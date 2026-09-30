@@ -1142,7 +1142,8 @@ namespace QuestTree.QuestGraph
         /// <summary>Campaign speed step 1 (4): MapCampaign calls this when a campaign starts, before its first stop's capture.
         /// A new session: the first stop casts the relief and every later stop of the same campaign, in the same raid,
         /// reuses it (colliders never stream out - see MapMeshBuilder's header).</summary>
-        internal static void CampaignBegins()
+        /// <param name="stops">Campaign speed step 2: the stops the campaign planned, for the checkpoint lines ("stop N of M").</param>
+        internal static void CampaignBegins(int stops = 0)
         {
             unchecked { _campaignSession++; }
             if (_campaignSession == 0) _campaignSession = 1;
@@ -1150,15 +1151,1928 @@ namespace QuestTree.QuestGraph
             _inCampaign = true;
             MapMeshBuilder.ForgetRelief();
             ForgetEmptyCounts();
+
+            // Campaign speed step 2: a new session holds nothing yet - the first stop loads from disk. A hold a previous
+            // campaign left (CampaignEnds hands it to a write, so none should be here) is let go with its lost stops said.
+            if (_hold != null) DropHold(_hold, "a new campaign started", raidEnded: false);
+            _hold = null;
+            _holdOff = false;
+            _campaignStop = 0;
+            _campaignStopCount = Math.Max(0, stops);
         }
 
         /// <summary>Campaign speed step 1 (4): MapCampaign calls this whenever a campaign ends - done, cut short, cancelled,
-        /// or the raid gone. Later captures cast their own relief again, and the held grids are let go.</summary>
+        /// or the raid gone. Later captures cast their own relief again, and the held grids are let go.
+        ///
+        /// Campaign speed step 2: and the held session with them. The campaign's own ends (done, early for time, cancelled,
+        /// a death) have written their last checkpoint before they get here (MapCampaign's CampaignCheckpoint); what is still
+        /// unsaved now - the raid ended between two stops, or a checkpoint wait gave up - is written on a worker thread
+        /// (<see cref="StartFlush"/>), which the scene's unload does not stop. A stop cut off mid-way by the raid leaves a
+        /// hold that may mix two stops, and that is never written: its unsaved stops are said to be lost.</summary>
         internal static void CampaignEnds()
         {
             _inCampaign = false;
             MapMeshBuilder.ForgetRelief();
             ForgetEmptyCounts();
+
+            var hold = _hold;
+            _hold = null;
+            _holdOff = false;
+
+            if (hold == null) return;
+
+            // Already being written (a checkpoint the campaign stopped waiting for): the write owns the hold now, and the
+            // plugin object finishes it if nothing here is left to.
+            if (_flush != null && !_flush.Completed && ReferenceEquals(_flush.Hold, hold))
+            {
+                // (review) nothing holds on to this hold after the write: its arrays go the moment it ends
+                _flush.Detached = true;
+                EnsureFlushPoller(_flush);
+                return;
+            }
+
+            if (hold.Unsaved == 0 || hold.Meta == null)
+            {
+                SweepHeldPages(hold);
+                return;
+            }
+
+            if (hold.StopInProgress)
+            {
+                DropHold(hold, "the raid ended in the middle of a stop, so what is held may mix two stops", raidEnded: true);
+                return;
+            }
+
+            var job = StartFlush(hold, "the campaign's end", detached: true);
+            if (job == null) return;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: writing {hold.Key}'s {hold.Unsaved.ToString(CultureInfo.InvariantCulture)} stop(s) since the last " +
+                "checkpoint on a worker thread - the raid's end does not stop it, closing the game before it finishes would.");
+
+            EnsureFlushPoller(job);
+        }
+
+        /// <summary>Campaign speed step 2: MapCampaign calls this before each stop's capture, so the checkpoint line can
+        /// name the stop it followed.</summary>
+        /// <param name="stop">The stop about to be captured, 1-based.</param>
+        internal static void CampaignStopIs(int stop) => _campaignStop = Math.Max(0, stop);
+
+        // --- campaign speed step 2: the campaign session that writes at checkpoints -----------------
+
+        /// <summary>
+        /// Campaign speed step 2, the rollback: true - inside a capture campaign the stored pictures, their distance sidecars
+        /// and the stored 3D mesh are loaded ONCE, at the campaign's first stop, and kept in memory (<see cref="CampaignHold"/>);
+        /// every later stop merges into those copies, and the set's files - pictures, sidecars, mesh, index, atlas pages and
+        /// meta, all of one stop - are written only at a checkpoint: every <see cref="CampaignCheckpointStops"/> stops, at
+        /// the campaign's end (done, early for time, cancelled), before the extract teleport, and on a worker when the raid
+        /// ends with stops unsaved. False: every stop loads and writes its files, as before. A capture outside a campaign is
+        /// never held either way. Static readonly rather than const, like this file's other switches, so the path it turns
+        /// off still compiles clean.
+        /// </summary>
+        private static readonly bool CampaignSessionWrites = true;
+
+        /// <summary>Campaign speed step 2: stops held in memory between two checkpoints. Four, not eight: a raid can end
+        /// abruptly - a death screen clicked through, a disconnect, the game closed - and until a checkpoint the stops since
+        /// the last one exist nowhere but in this process.</summary>
+        private const int CampaignCheckpointStops = 4;
+
+        /// <summary>Campaign speed step 2: the most the held copies may be ESTIMATED at, when the campaign's first stop takes
+        /// its hold, before that campaign falls back to writing every stop. 3 GiB. Rollback: 1.5 GiB (3L &lt;&lt; 29).
+        /// Interchange - five floors, four sides and its mesh - estimates at about 1.5 GB, Customs at about 0.6 GB.</summary>
+        private const long CampaignHoldMaxBytes = 3L << 30;
+
+        /// <summary>Campaign speed step 2: what one held pixel costs - its colour (four bytes) and its distance step.</summary>
+        private const long HeldBytesPerPixel = 5L;
+
+        /// <summary>Campaign speed step 2, the estimate's mesh terms, measured on Interchange's stop 11: 272 MB of building
+        /// arrays for 11.1 million triangles (24.5 B) with the ranges and objects on top, and 51 MB of relief for 17.9 million
+        /// cells; and the mesh assumed when there is no stored one to measure yet.</summary>
+        private const long HeldMeshBytesPerTriangle = 26L;
+
+        private const long HeldMeshBytesPerCell = 3L;
+
+        private const long HeldMeshNominalBytes = 400L << 20;
+
+        /// <summary>Campaign speed step 2: seconds a stop waits for its checkpoint's write before it lets the stop end anyway
+        /// (the write goes on, on its worker, and the campaign waits for it before the next stop). Parallel encodes of
+        /// Interchange's nine pictures and its mesh deflate are tens of seconds; this is a ceiling for a stuck disk. In
+        /// <see cref="WorstCaseSeconds"/>.</summary>
+        internal const double CheckpointWaitSeconds = 180d;
+
+        /// <summary>Campaign speed step 2: a floor's or a side's picture and distance sidecar, held between stops - exactly what
+        /// the next stop would have decoded from the two PNGs (both are lossless), in texture order.</summary>
+        private sealed class HeldPicture
+        {
+            public string File;
+            public string DistFile;
+            public int Width;
+            public int Height;
+            public Color32[] Pixels;
+            public byte[] Dist;
+
+            /// <summary>Changed since the last checkpoint wrote it (or never written): the next checkpoint encodes it.</summary>
+            public bool Dirty;
+
+            public long Bytes => (Pixels?.LongLength ?? 0L) * 4L + (Dist?.LongLength ?? 0L);
+        }
+
+        /// <summary>Campaign speed step 2: the 3D mesh and its identity sidecar, held between stops - the last stop's build,
+        /// which the next stop's build takes as its base instead of reading, hashing and inflating the stored file.</summary>
+        private sealed class HeldMesh
+        {
+            public MapMeshFile File;
+            public MapMeshIndex Index;
+            public long Cells;
+            public long Triangles;
+            public long ReliefBytes;
+            public long BuildingBytes;
+            public bool Accumulated;
+
+            /// <summary>The mesh differs from the file on disk: the next checkpoint serialises it.</summary>
+            public bool Dirty;
+
+            /// <summary>Only the sidecar differs (a recorded attempt, the mesh unchanged): the next checkpoint writes it alone.</summary>
+            public bool IndexDirty;
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: one campaign's set, held in memory between checkpoints - for ONE map, in ONE session (raid).
+        /// <see cref="Meta"/> is the meta the last finished stop would have written; the next stop merges into it exactly as it
+        /// would have merged into the file (LoadPrevious' checks included). Pictures a stop did not load come from disk as
+        /// before, and the files on disk are always the last checkpoint's - complete and of one stop.
+        /// </summary>
+        private sealed class CampaignHold
+        {
+            public string Key;
+            public string Dir;
+            public int Session;
+
+            /// <summary>The held set's meta: the last finished stop's, or null before the first stop finishes. Its mesh block
+            /// names the file on disk while the held mesh is clean, and is a placeholder (no length, no hash) while it is dirty.</summary>
+            public CaptureMeta Meta;
+
+            /// <summary>The mesh block and atlas list the meta on disk names - what a checkpoint writes when the held mesh cannot be.</summary>
+            public CaptureMesh WrittenMesh;
+
+            public List<CaptureAtlas> WrittenAtlas;
+
+            public readonly Dictionary<string, HeldPicture> Pictures =
+                new Dictionary<string, HeldPicture>(StringComparer.OrdinalIgnoreCase);
+
+            public HeldMesh Mesh;
+
+            /// <summary>Atlas pages a held stop encoded, by page: files beside the set under <see cref="HeldPageSuffix"/>, which
+            /// nothing reads but the next stop's build (MeshRequest.AtlasPagePath) and the checkpoint that commits them.</summary>
+            public readonly Dictionary<int, string> PendingPages = new Dictionary<int, string>();
+
+            /// <summary>Stops held since the last checkpoint.</summary>
+            public int Unsaved;
+
+            /// <summary>Campaign speed step 2 (review): an allocation of a held stop failed for memory - the stop is written
+            /// at its end and the campaign writes every stop from there (<see cref="NoteOutOfMemory"/>).</summary>
+            public bool OutOfMemory;
+
+            /// <summary>Campaign speed step 2 (review): the meta on disk - what a checkpoint carries a picture's entry from when
+            /// that picture cannot be written (over the size cap, a side that will not commit).</summary>
+            public CaptureMeta WrittenMeta;
+
+            /// <summary>A stop has started changing the held copies and has not finished: they may mix two stops. Never written
+            /// in this state; the Run that set it clears it at the stop's end or drops the hold.</summary>
+            public bool StopInProgress;
+
+            public long Estimate;
+        }
+
+        /// <summary>Campaign speed step 2 (review): a capture allocation that failed for memory inside a held campaign - the
+        /// held copies are part of why, so the campaign stops holding: this stop is written at its end (Run) and every later
+        /// stop writes as before (<see cref="_holdOff"/>).</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="ex">What the allocation threw.</param>
+        private static void NoteOutOfMemory(Plan plan, Exception ex)
+        {
+            if (plan?.Hold == null || !(ex is OutOfMemoryException)) return;
+
+            plan.Hold.OutOfMemory = true;
+            _holdOff = true;
+        }
+
+        /// <summary>A held atlas page's file: <c>&lt;key&gt;-atlas-&lt;n&gt;.png.held</c> - not a .png, so no reader, the stale
+        /// sweep or tools/check-capture.py sees it, and not .tmp, so DropStaged leaves it.</summary>
+        private const string HeldPageSuffix = ".held";
+
+        /// <summary>The running campaign's hold, or null (outside a campaign, before its first stop, or writing every stop).</summary>
+        private static CampaignHold _hold;
+
+        /// <summary>This campaign writes every stop, as before: over the memory cap, the managed encoder off, or a checkpoint
+        /// that failed. Reset by CampaignBegins and CampaignEnds.</summary>
+        private static bool _holdOff;
+
+        private static int _campaignStop;
+
+        private static int _campaignStopCount;
+
+        /// <summary>Campaign speed step 2: one checkpoint's write - the snapshot a worker writes from, and what it came to.</summary>
+        private sealed class HeldFlush
+        {
+            public CampaignHold Hold;
+            public string Key;
+            public string Dir;
+            public string Why;
+            public int Stop;
+            public int Unsaved;
+            public CaptureMeta Meta;
+            public List<HeldPicture> Pictures;
+            public HeldMesh Mesh;
+            public bool WriteMesh;
+            public bool WriteIndex;
+            public CaptureMesh WrittenMesh;
+            public List<CaptureAtlas> WrittenAtlas;
+            public List<KeyValuePair<int, string>> Pages;
+            public Stopwatch Clock;
+            public Task Task;
+
+            // what the worker came to
+            public bool Written;
+            public string Failed;
+            public long Bytes;
+            public bool MeshWritten;
+            public string MeshWhy;
+            public CaptureMesh NewMesh;
+            /// <summary>In: the meta on disk, which a picture that cannot be written is carried from. Out: the meta this write
+            /// put down.</summary>
+            public CaptureMeta WrittenMeta;
+
+            public HashSet<string> Keep;
+
+            /// <summary>Review: the pictures this write committed (the rest stay dirty), whether the sidecar alone went in
+            /// place, whether the atlas ended early, and what the main thread says about it.</summary>
+            public readonly List<HeldPicture> WrittenPictures = new List<HeldPicture>();
+
+            public bool IndexWritten;
+            public bool IndexFailed;
+            public bool PagesCut;
+            public readonly List<string> Notes = new List<string>();
+
+            /// <summary>Review: nothing holds on to this hold after the write - its arrays go when it ends.</summary>
+            public volatile bool Detached;
+
+            // the main thread's side
+            public bool Completed;
+            public bool Polled;
+            public readonly List<Action> Then = new List<Action>();
+        }
+
+        /// <summary>The checkpoint write in flight or last finished, or null.</summary>
+        private static HeldFlush _flush;
+
+        /// <summary>Campaign speed step 2 (review): seconds the last checkpoint took - what a campaign bounds its wait for a
+        /// running write by, and adds to the raid-time guard's need.</summary>
+        internal static double LastCheckpointSeconds;
+
+        /// <summary>Campaign speed step 2: a checkpoint's write is running - no capture may start (Prepare refuses) and a
+        /// campaign waits before its next stop.</summary>
+        internal static bool CampaignWriting
+        {
+            get
+            {
+                PollFlush();
+                return _flush != null && !_flush.Completed;
+            }
+        }
+
+        /// <summary>Campaign speed step 2: runs <paramref name="then"/> on the main thread once the checkpoint being written
+        /// has finished - how a campaign's upload hold outlives its last write - and says whether one was running (false:
+        /// the caller goes ahead now).</summary>
+        /// <param name="then">What to do once the files are down.</param>
+        internal static bool WhenCampaignWritten(Action then)
+        {
+            PollFlush();
+
+            var job = _flush;
+            if (job == null || job.Completed || then == null) return false;
+
+            job.Then.Add(then);
+            EnsureFlushPoller(job);
+            return true;
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: writes the held stops now and waits for the write (a frame at a time, up to
+        /// <see cref="CheckpointWaitSeconds"/>; past it the write finishes on its own). Nothing when nothing is unsaved. What a
+        /// stop runs every <see cref="CampaignCheckpointStops"/> stops and what MapCampaign runs at its end, before the
+        /// extract teleport. Never throws.
+        /// </summary>
+        /// <param name="why">For the line: why this checkpoint.</param>
+        internal static IEnumerator CampaignCheckpoint(string why)
+        {
+            PollFlush();
+
+            var job = _flush != null && !_flush.Completed ? _flush : null;
+
+            // Another hold's write still running (the last raid's end): this hold's stops wait behind it.
+            if (job != null && !ReferenceEquals(job.Hold, _hold))
+            {
+                var behind = Stopwatch.StartNew();
+                while (!job.Task.IsCompleted && behind.Elapsed.TotalSeconds < CheckpointWaitSeconds) yield return null;
+
+                if (!job.Task.IsCompleted)
+                {
+                    EnsureFlushPoller(job);
+                    yield break;
+                }
+
+                CompleteFlush(job);
+                job = null;
+            }
+
+            if (job == null)
+            {
+                var hold = _hold;
+                if (hold == null || hold.Unsaved == 0 || hold.Meta == null) yield break;
+
+                // An upload of this map reading a file on a worker: the commit waits for it, as a stop's does (WP3 Phase A).
+                var reading = Stopwatch.StartNew();
+                while (MapTransfer.IsReadingCapture(hold.Key) && reading.Elapsed.TotalSeconds < CommitWaitSeconds)
+                    yield return null;
+
+                if (!ReferenceEquals(_hold, hold)) yield break;
+
+                job = StartFlush(hold, why);
+                if (job == null) yield break;
+            }
+
+            var clock = Stopwatch.StartNew();
+
+            while (!job.Task.IsCompleted && clock.Elapsed.TotalSeconds < CheckpointWaitSeconds)
+                yield return null;
+
+            if (job.Task.IsCompleted)
+            {
+                CompleteFlush(job);
+                yield break;
+            }
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: the checkpoint of {job.Key} has been writing for {CheckpointWaitSeconds:0} s - it finishes on its " +
+                "own, and the campaign waits for it before the next stop.");
+            EnsureFlushPoller(job);
+        }
+
+        /// <summary>
+        /// Campaign speed step 2 (review): the campaign's END write - started, not waited for. The held set cannot change after
+        /// the last stop, so the player goes to the extract at once while a worker writes; the upload hold's release waits for
+        /// the write (<see cref="WhenCampaignWritten"/>), and CampaignEnds, which follows, marks it detached. True when a write
+        /// is running or was started. Never throws.
+        /// </summary>
+        /// <param name="why">For the line.</param>
+        internal static bool StartCampaignWrite(string why)
+        {
+            try
+            {
+                PollFlush();
+
+                if (_flush != null && !_flush.Completed)
+                {
+                    EnsureFlushPoller(_flush);
+                    return true;
+                }
+
+                var hold = _hold;
+                if (hold == null || hold.Unsaved == 0 || hold.Meta == null || hold.StopInProgress) return false;
+
+                var job = StartFlush(hold, why);
+                if (job == null) return false;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: writing {hold.Key}'s {hold.Unsaved.ToString(CultureInfo.InvariantCulture)} stop(s) since the last " +
+                    $"checkpoint on a worker thread ({why}) - the campaign does not wait for it.");
+
+                EnsureFlushPoller(job);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the campaign's last write could not be started ({ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>Campaign speed step 2 (review): finishes a checkpoint whose worker is done, from any main-thread Update that
+        /// ticks - TrackerHotkey's, whose root canvas is proven to tick in the menu, where the raid's end write lands.</summary>
+        internal static void PollCampaignWrite()
+        {
+            try
+            {
+                PollFlush();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: a campaign checkpoint could not be finished ({ex.Message}).");
+            }
+        }
+
+        /// <summary>Campaign speed step 2: the running campaign's hold for this map, or null.</summary>
+        /// <param name="key">The map.</param>
+        private static CampaignHold LiveHold(string key)
+        {
+            var hold = _hold;
+            var live = LiveCampaignSession;
+
+            if (hold == null || live == 0 || hold.Session != live) return null;
+            return string.Equals(hold.Key, key, StringComparison.OrdinalIgnoreCase) ? hold : null;
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: takes a hold at a campaign's first stop - or null, writing every stop as before: outside a
+        /// campaign, with the rollback off, when this campaign has already fallen back, with the managed PNG encoder off (a
+        /// checkpoint encodes on a worker, where Unity's encoder cannot run), or when the estimate is over
+        /// <see cref="CampaignHoldMaxBytes"/> - which is said once, with the numbers. Stale held atlas pages an earlier
+        /// session left are swept. Never throws.
+        /// </summary>
+        /// <param name="plan">The first stop's plan, <see cref="Plan.Previous"/> already read from disk.</param>
+        private static CampaignHold NewHold(Plan plan)
+        {
+            try
+            {
+                var live = LiveCampaignSession;
+                if (!CampaignSessionWrites || live == 0 || _holdOff || _hold != null) return null;
+
+                if (!ManagedPngEncode || _managedPngOff)
+                {
+                    _holdOff = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: this campaign writes {plan.Key} at every stop - the managed PNG encoder is off, and a " +
+                        "checkpoint encodes on a worker thread, where Unity's encoder cannot run.");
+                    return null;
+                }
+
+                var estimate = EstimateHold(plan, out var parts);
+
+                if (estimate > CampaignHoldMaxBytes)
+                {
+                    _holdOff = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: this campaign writes {plan.Key} at every stop - holding it between checkpoints is estimated at " +
+                        $"{Mb(estimate)} MB ({parts}), over the {Mb(CampaignHoldMaxBytes)} MB cap.");
+                    return null;
+                }
+
+                // What the meta on disk names and a checkpoint falls back to - by WriteMeta's own carry rules (the format
+                // version, the file still there, every page still there).
+                var writtenMesh = CarriedMesh(plan, null);
+
+                var hold = new CampaignHold
+                {
+                    Key = plan.Key,
+                    Dir = plan.Dir,
+                    Session = live,
+                    WrittenMesh = writtenMesh,
+                    WrittenAtlas = writtenMesh != null ? CarriedAtlas(plan) : null,
+                    WrittenMeta = plan.Previous,
+                    Estimate = estimate,
+                };
+
+                SweepHeldPages(hold);
+                _hold = hold;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: this campaign holds {plan.Key} in memory between checkpoints (every " +
+                    $"{CampaignCheckpointStops.ToString(CultureInfo.InvariantCulture)} stops, at its end and before the extract) - " +
+                    $"estimated {Mb(estimate)} MB ({parts}) of the {Mb(CampaignHoldMaxBytes)} MB cap.");
+
+                return hold;
+            }
+            catch (Exception ex)
+            {
+                _holdOff = true;
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan?.Key} could not be held between stops ({ex.GetType().Name}: {ex.Message}) - this campaign " +
+                    "writes every stop.");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: what holding this map between stops will cost - every floor's picture and sidecar at five
+        /// bytes a pixel; the sides already on disk (scaled to four), or about one floor's pixels when there are none yet
+        /// (Interchange's four are 1.2 of its floors, Customs' 0.8 of its one); and the stored mesh's triangles and cells, or
+        /// <see cref="HeldMeshNominalBytes"/> without one. Interchange's set today: 944 + 220 + 343 MB; Customs': 193 + 159 +
+        /// 267 MB.
+        /// </summary>
+        /// <param name="plan">The first stop's plan.</param>
+        /// <param name="parts">The three terms, for the line.</param>
+        private static long EstimateHold(Plan plan, out string parts)
+        {
+            var floorPixels = (long)plan.WidthPx * plan.HeightPx * plan.Floors.Count;
+
+            var sidePixels = 0L;
+            var sides = plan.Previous?.Sides?.Where(s => s != null && s.Width > 0 && s.Height > 0).ToList();
+
+            if (sides != null && sides.Count > 0)
+            {
+                foreach (var side in sides) sidePixels += (long)side.Width * side.Height;
+                sidePixels = sidePixels * MapSideView.Directions.Length / sides.Count;
+            }
+            else
+            {
+                sidePixels = (long)plan.WidthPx * plan.HeightPx;
+            }
+
+            var stored = plan.Previous?.Mesh;
+            var mesh = stored != null && stored.Triangles > 0
+                ? stored.Triangles * HeldMeshBytesPerTriangle + stored.Cells * HeldMeshBytesPerCell
+                : HeldMeshNominalBytes;
+
+            parts = $"floors {Mb(floorPixels * HeldBytesPerPixel)} MB, sides {Mb(sidePixels * HeldBytesPerPixel)} MB, " +
+                    $"mesh {Mb(mesh)} MB{(stored == null ? " assumed" : "")}";
+
+            return (floorPixels + sidePixels) * HeldBytesPerPixel + mesh;
+        }
+
+        /// <summary>Campaign speed step 2: what the hold keeps alive now - the pictures and sidecars and the mesh's arrays.</summary>
+        /// <param name="hold">The hold.</param>
+        private static long HeldBytes(CampaignHold hold)
+        {
+            if (hold == null) return 0L;
+
+            var total = 0L;
+            foreach (var picture in hold.Pictures.Values) total += picture.Bytes;
+
+            try
+            {
+                if (hold.Mesh?.File != null) total += hold.Mesh.File.ApproximateBytes();
+            }
+            catch
+            {
+                // a mesh that cannot count itself is left out of a log line's number
+            }
+
+            return total;
+        }
+
+        /// <summary>Campaign speed step 2: the held picture for a file of this size, or null.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side), carrying the hold.</param>
+        /// <param name="file">The picture's file name.</param>
+        private static HeldPicture HeldPictureOf(Plan plan, string file)
+        {
+            if (plan?.Hold == null || string.IsNullOrEmpty(file)) return null;
+            if (!plan.Hold.Pictures.TryGetValue(file, out var held) || held.Pixels == null || held.Dist == null) return null;
+
+            return held.Width == plan.WidthPx && held.Height == plan.HeightPx &&
+                   held.Pixels.Length == plan.WidthPx * plan.HeightPx && held.Dist.Length == held.Pixels.Length
+                ? held
+                : null;
+        }
+
+        /// <summary>Campaign speed step 2: whether a picture the meta may name is there - held in memory, or on disk. The held
+        /// copy counts: in a held session the meta describes the held set, which a checkpoint writes whole.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="name">The file name inside the capture's folder.</param>
+        private static bool PictureExists(Plan plan, string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            if (plan?.Hold != null && plan.Hold.Pictures.ContainsKey(name)) return true;
+
+            return File.Exists(Path.Combine(plan.Dir, name));
+        }
+
+        /// <summary>Campaign speed step 2: takes a picture and its sidecar into the hold - the one place a held entry changes.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        /// <param name="pixels">The picture, texture order.</param>
+        /// <param name="dist">Its distances.</param>
+        /// <param name="dirty">It differs from the file on disk.</param>
+        /// <returns>The array it displaced, or null.</returns>
+        private static Color32[] HoldPicture(Plan plan, FloorPlan floor, Color32[] pixels, byte[] dist, bool dirty)
+        {
+            var hold = plan.Hold;
+            hold.StopInProgress = true;
+
+            if (!hold.Pictures.TryGetValue(floor.File, out var held))
+            {
+                held = new HeldPicture { File = floor.File };
+                hold.Pictures[floor.File] = held;
+            }
+
+            var displaced = held.Pixels;
+
+            held.DistFile = floor.DistFile;
+            held.Width = plan.WidthPx;
+            held.Height = plan.HeightPx;
+            held.Pixels = pixels;
+            held.Dist = dist;
+            held.Dirty = dirty || held.Dirty && ReferenceEquals(displaced, pixels);
+
+            return ReferenceEquals(displaced, pixels) ? null : displaced;
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: a developed floor, instead of its encode, sidecar and stage, is STASHED on the floor - the
+        /// plan's pool with it, so the next floor develops into a pool of its own - and taken into the hold only once the
+        /// floor loop is over (<see cref="HoldStashedFloors"/>), after every floor's light test (review): a refusal then
+        /// leaves the hold exactly as it was. The "captured" line says the floor is held.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor, developed.</param>
+        private void StashFloor(Plan plan, FloorPlan floor)
+        {
+            try
+            {
+                if (floor.Rgba == null || floor.Dist == null || floor.Exposure == null ||
+                    floor.Rgba.Length != plan.WidthPx * plan.HeightPx || floor.Dist.Length != floor.Rgba.Length)
+                {
+                    floor.Failed = true;
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" has no developed picture to hold.");
+                    return;
+                }
+
+                floor.StashPixels = floor.Rgba;
+                floor.StashDist = floor.Dist;
+                floor.StashDirty = true;
+
+                if (ReferenceEquals(plan.RgbaPool, floor.Rgba)) plan.RgbaPool = null;
+                floor.Rgba = null;
+                floor.Dist = null;
+
+                var bytes = (long)floor.StashPixels.Length * HeldBytesPerPixel;
+                RecordFloor(plan, floor, bytes, null, null,
+                    $", held in memory for the next checkpoint ({Mb(bytes)} MB)", held: true);
+            }
+            catch (Exception ex)
+            {
+                floor.Failed = true;
+                floor.StashPixels = null;
+                floor.StashDist = null;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" could not be held ({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        /// <summary>Campaign speed step 2 (review): the stashed floors into the hold, once the floor loop has ended unrefused -
+        /// a developed one dirty, an unchanged one as it is (clean when it came from disk at the campaign's first stop).
+        /// A refused stop drops the stashes instead, and the hold is as the last stop left it.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private static void HoldStashedFloors(Plan plan)
+        {
+            foreach (var floor in plan.Floors)
+            {
+                var pixels = floor.StashPixels;
+                var dist = floor.StashDist;
+                var dirty = floor.StashDirty;
+
+                floor.StashPixels = null;
+                floor.StashDist = null;
+
+                if (pixels == null || dist == null || plan.Hold == null || plan.Refused || floor.Failed) continue;
+
+                var held = HeldPictureOf(plan, floor.File);
+                if (!dirty && held != null && ReferenceEquals(held.Pixels, pixels)) continue;
+
+                HoldPicture(plan, floor, pixels, dist, dirty);
+            }
+        }
+
+        /// <summary>Campaign speed step 2: a developed side into the hold, as <see cref="StashFloor"/> would a floor - its entry for the meta
+        /// and its line are RecordSide's. False, having said why, when it is not held.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="view">The side, developed.</param>
+        private static bool HoldSide(Plan plan, SideView view)
+        {
+            var floor = view.Floor;
+            var side = view.Plan;
+
+            try
+            {
+                if (floor.Rgba == null || floor.Dist == null)
+                {
+                    Plugin.LogSource?.LogWarning($"QuestTree: {plan.Key} side view {view.Dir} has no developed picture to hold.");
+                    return false;
+                }
+
+                var drawn = 0;
+                if (floor.Drawn != null)
+                    foreach (var d in floor.Drawn)
+                        if (d) drawn++;
+
+                var pixels = floor.Rgba;
+                HoldPicture(side, floor, pixels, floor.Dist, dirty: true);
+
+                side.RgbaPool = null;
+                floor.Rgba = null;
+                floor.Dist = null;
+
+                var bytes = (long)pixels.Length * HeldBytesPerPixel;
+                var held = RecordSide(plan, view, bytes, null, drawn, floor.Drawn?.Length ?? pixels.Length, null,
+                    $", held in memory for the next checkpoint ({Mb(bytes)} MB)", held: true);
+
+                var entry = plan.Sides.LastOrDefault(s => s.Dir == view.Dir);
+                if (entry != null) entry.DistStale = false;
+
+                return held;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} side view {view.Dir} could not be held ({ex.GetType().Name}: {ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: an unchanged floor or side (no tile rendered, the stored picture and sidecar loaded) is
+        /// held as it is - a copy loaded from disk at the campaign's first stop is taken in CLEAN (it is the file), one
+        /// already held stays as it was. The length the "was it written" gates read is the held size.
+        /// </summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        private static long HoldUnchanged(Plan plan, FloorPlan floor)
+        {
+            var held = HeldPictureOf(plan, floor.File);
+
+            if (held == null || !ReferenceEquals(held.Pixels, floor.PreviousColour))
+            {
+                HoldPicture(plan, floor, floor.PreviousColour, floor.UnhealedDist ?? floor.PreviousDist, dirty: false);
+                held = HeldPictureOf(plan, floor.File);
+            }
+
+            return held?.Bytes ?? 0L;
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: the stop's build into the hold instead of its serialise and stage. The build took the held
+        /// mesh as its base and changed its buildings in place (MapMeshBuilder's merge), so a build that produced no file
+        /// may have left that base half-changed: the held mesh is then let go (<see cref="RevertHeldMesh"/>) and the next
+        /// stop reads the stored one again. A build that changed nothing keeps the held mesh's state.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="mesh">The build's result.</param>
+        private static void HoldMesh(Plan plan, MapMeshBuilder.Result mesh)
+        {
+            var hold = plan.Hold;
+
+            if (mesh?.File == null)
+            {
+                if (hold.Mesh != null) RevertHeldMesh(hold, "the build that took it as its base produced nothing");
+                return;
+            }
+
+            hold.StopInProgress = true;
+
+            var was = hold.Mesh;
+            var dirty = !mesh.Unchanged || (was?.Dirty ?? false) || hold.WrittenMesh == null;
+
+            hold.Mesh = new HeldMesh
+            {
+                File = mesh.File,
+                Index = mesh.Index,
+                Cells = mesh.Cells,
+                Triangles = mesh.Triangles,
+                ReliefBytes = mesh.ReliefBytes,
+                BuildingBytes = mesh.BuildingBytes,
+                Accumulated = mesh.Accumulated,
+                Dirty = dirty,
+                IndexDirty = mesh.IndexChanged || (was?.IndexDirty ?? false),
+            };
+
+            plan.MeshHeld = true;
+            plan.MeshLevels = new HashSet<int>();
+            foreach (var band in mesh.File.Bands) plan.MeshLevels.Add(band.Level);
+
+            // WP2 (2.12)'s one-shot rebuild is spent once a rebuilt mesh is held - or every held stop would rebuild again
+            if (!mesh.Accumulated && ModSettings.MeshRebuildNext != null && ModSettings.MeshRebuildNext.Value)
+                ModSettings.MeshRebuildNext.Value = false;
+
+            Plugin.LogSource?.LogInfo(mesh.Unchanged
+                ? $"QuestTree: {plan.Key} built no new 3D geometry this time - the held mesh is kept."
+                : $"QuestTree: mesh for {plan.Key} held in memory for the next checkpoint - {MB(mesh.ReliefBytes)} MB relief + " +
+                  $"{MB(mesh.BuildingBytes)} MB buildings" + (mesh.Accumulated ? " (accumulated)." : " (from scratch)."));
+        }
+
+        /// <summary>Campaign speed step 2: the held mesh and its held atlas pages let go - the meta goes back to naming the mesh
+        /// and pages on disk, and the next stop's build reads the stored mesh as a stop outside a campaign does.</summary>
+        /// <param name="hold">The hold.</param>
+        /// <param name="why">For the line.</param>
+        private static void RevertHeldMesh(CampaignHold hold, string why)
+        {
+            if (hold == null) return;
+
+            var had = hold.Mesh != null && (hold.Mesh.Dirty || hold.Mesh.IndexDirty);
+
+            hold.Mesh = null;
+            SweepHeldPages(hold);
+
+            if (hold.Meta != null)
+            {
+                hold.Meta.Mesh = hold.WrittenMesh;
+                hold.Meta.Atlas = hold.WrittenMesh != null ? hold.WrittenAtlas : null;
+            }
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: {hold.Key}'s held 3D mesh is let go - {why}; " +
+                (had
+                    ? "what the stops since the last checkpoint added to it is lost, and the next stop builds onto the stored mesh."
+                    : "the next stop builds onto the stored mesh."));
+        }
+
+        /// <summary>Campaign speed step 2: the held atlas pages' files deleted and forgotten. Also sweeps any an earlier session
+        /// left (a game closed between two checkpoints). Never throws.</summary>
+        /// <param name="hold">The hold.</param>
+        private static void SweepHeldPages(CampaignHold hold)
+        {
+            if (hold == null) return;
+
+            hold.PendingPages.Clear();
+
+            try
+            {
+                if (hold.Dir == null || !Directory.Exists(hold.Dir)) return;
+
+                foreach (var file in Directory.GetFiles(hold.Dir, $"{hold.Key}-atlas-*.png{HeldPageSuffix}"))
+                    DeleteQuietly(file);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: {hold.Key}'s held atlas pages could not be swept ({ex.Message}).");
+            }
+        }
+
+        /// <summary>Campaign speed step 2: where a held stop's atlas page waits for its checkpoint.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="name">The page's file name.</param>
+        private static string HeldPagePath(Plan plan, string name) => Path.Combine(plan.Dir, name) + HeldPageSuffix;
+
+        /// <summary>
+        /// Campaign speed step 2: a hold let go without being written - a stop that did not finish (refused, an exception, the
+        /// raid gone mid-stop), a meta that no longer fits, or a checkpoint that failed. The files on disk are the last
+        /// checkpoint's, complete as they were written; the stops since are lost, and said so. The next stop of a campaign
+        /// still running takes a new hold from disk.
+        /// </summary>
+        /// <param name="hold">The hold.</param>
+        /// <param name="why">For the line.</param>
+        /// <param name="raidEnded">The raid is over: the line says the stops were lost with it.</param>
+        private static void DropHold(CampaignHold hold, string why, bool raidEnded)
+        {
+            if (hold == null) return;
+
+            if (ReferenceEquals(_hold, hold)) _hold = null;
+
+            var unsaved = hold.Unsaved + (hold.StopInProgress ? 1 : 0);
+            hold.Unsaved = 0;
+            hold.StopInProgress = false;
+            SweepHeldPages(hold);
+
+            if (unsaved == 0) return;
+
+            Plugin.LogSource?.LogWarning(raidEnded
+                ? $"QuestTree: {unsaved.ToString(CultureInfo.InvariantCulture)} stop(s) since the last checkpoint were lost with " +
+                  $"the raid ({why}) - {hold.Key}'s files on disk are the last checkpoint's, complete as they were written."
+                : $"QuestTree: {unsaved.ToString(CultureInfo.InvariantCulture)} stop(s) of {hold.Key} since the last checkpoint " +
+                  $"were dropped ({why}) - the files on disk are the last checkpoint's, and the next stop starts again from them.");
+
+            Journal(hold.Key, $"{unsaved.ToString(CultureInfo.InvariantCulture)} held stop(s) lost - {why}.");
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: the end of a held stop - what WriteMeta would have written, built and kept as the held meta
+        /// instead of committed: the floors this stop took (developed or unchanged) or the entries it carries, the held mesh
+        /// (a placeholder block while it differs from the file) or the stored one, the atlas the mesh names, the sides, and
+        /// the raid's light and clock read NOW, while there is a raid to read them from. The stop's line says it is held.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="clock">Running since the capture started.</param>
+        private void HoldMeta(Plan plan, Stopwatch clock)
+        {
+            var hold = plan.Hold;
+
+            try
+            {
+                var written = plan.Floors.Where(f => !f.Failed && f.Bytes > 0).ToList();
+
+                if (written.Count == 0)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: no floor of {plan.Key} could be captured - nothing was held. The warnings above say why for each.");
+                    return;
+                }
+
+                var floors = new List<CaptureFloor>();
+                var carried = 0;
+                var unchanged = 0;
+
+                foreach (var floor in plan.Floors)
+                {
+                    CaptureFloor entry;
+
+                    if (!floor.Failed && floor.Bytes > 0)
+                    {
+                        entry = Described(plan, floor);
+                        if (floor.Unchanged) unchanged++;
+                    }
+                    else
+                    {
+                        entry = Carried(plan, floor);
+                        if (entry == null) continue;
+
+                        carried++;
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" was not captured this time, so the picture an earlier " +
+                            "stop left is kept and the meta goes on naming it.");
+                    }
+
+                    floors.Add(entry);
+                }
+
+                // The check that can fail, as WriteMeta's: a held mesh whose bands are not the floors the meta names is let go.
+                if (plan.MeshHeld && !SameLevels(plan.MeshLevels, floors))
+                    RevertHeldMesh(hold,
+                        $"its relief covers floor(s) [{Levels(plan.MeshLevels)}] while the meta names [{Levels(floors)}]");
+
+                CaptureMesh mesh;
+                List<CaptureAtlas> atlas;
+
+                if (hold.Mesh != null)
+                {
+                    mesh = hold.Mesh.Dirty
+                        ? new CaptureMesh
+                        {
+                            File = plan.MeshFile,
+                            Version = MapMeshFile.Version,
+                            Cells = hold.Mesh.Cells,
+                            Triangles = hold.Mesh.Triangles,
+                        }
+                        : hold.WrittenMesh;
+
+                    atlas = plan.MeshHeld ? new List<CaptureAtlas>(plan.Atlas) : plan.Previous?.Atlas;
+                }
+                else
+                {
+                    mesh = CarriedMesh(plan, floors);
+                    atlas = mesh != null ? CarriedAtlas(plan) : null;
+                }
+
+                if (atlas != null && atlas.Count == 0) atlas = null;
+
+                var sides = HeldSides(plan);
+
+                CaptureLighting lighting = null;
+                try
+                {
+                    lighting = ReadLighting();
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: the raid's light could not be read ({ex.GetType().Name}: {ex.Message}) - the capture carries none.");
+                }
+
+                var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+
+                hold.Meta = new CaptureMeta
+                {
+                    SchemaVersion = SchemaVersion,
+                    Map = plan.Key,
+                    Extent = new CaptureExtent
+                    {
+                        MinX = plan.Extent.MinX,
+                        MinZ = plan.Extent.MinZ,
+                        MaxX = plan.Extent.MaxX,
+                        MaxZ = plan.Extent.MaxZ,
+                    },
+                    Rotation = 0f,
+                    PxPerMetre = plan.Ppm,
+                    TileSize = TileSize,
+                    CapturedAt = now,
+                    FirstCapturedAt = string.IsNullOrEmpty(plan.FirstCapturedAt) ? now : plan.FirstCapturedAt,
+                    Captures = plan.Captures,
+                    ModVersion = ModInfo.Stamp,
+                    Render = RenderTag,
+                    TimeOfDay = TimeOfDay(),
+                    Lighting = lighting,
+                    Floors = floors,
+                    Labels = plan.Labels,
+                    Mesh = mesh,
+                    Atlas = mesh != null ? atlas : null,
+                    Sides = sides,
+                };
+
+                hold.Unsaved++;
+                hold.StopInProgress = false;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: capture of {plan.Key} held for the next checkpoint - {written.Count} floor(s)" +
+                    (unchanged > 0 ? $" ({unchanged} unchanged)" : "") +
+                    (carried > 0 ? $", {carried} kept from an earlier stop" : "") +
+                    (sides != null ? $", {sides.Count} side view(s)" : "") +
+                    (hold.Mesh != null ? $", mesh {(hold.Mesh.Dirty ? "changed" : "as stored")}" : "") +
+                    $", {hold.Unsaved.ToString(CultureInfo.InvariantCulture)} of {CampaignCheckpointStops.ToString(CultureInfo.InvariantCulture)} " +
+                    $"stop(s) since the last checkpoint, {Ms(clock.Elapsed.TotalMilliseconds)} ms total.");
+            }
+            catch (Exception ex)
+            {
+                // StopInProgress stays set: Run's finally lets the hold go rather than keep a set this stop half-described.
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the capture of {plan.Key} could not be held ({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        /// <summary>Campaign speed step 2: the side entries a held stop's meta names - CommitSides' per-direction rule with
+        /// nothing committed: the side this stop held, else the earlier entry whose picture is held or on disk.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private static List<CaptureSide> HeldSides(Plan plan)
+        {
+            var named = new List<CaptureSide>();
+            var carried = CarriedSides(plan);
+            var carriedCount = 0;
+
+            foreach (var dir in MapSideView.Directions)
+            {
+                var chosen = plan.Sides.FirstOrDefault(s => s.Dir == dir);
+
+                if (chosen == null)
+                {
+                    chosen = carried.FirstOrDefault(s => s.Dir == dir);
+                    if (chosen != null) carriedCount++;
+                }
+
+                if (chosen != null) named.Add(chosen);
+            }
+
+            plan.SidesCarried = carriedCount;
+            return named.Count == 0 ? null : named;
+        }
+
+        /// <summary>
+        /// Campaign speed step 2: starts a checkpoint's write on a worker - or null when there is nothing to write or a write
+        /// is already running. The snapshot is taken here, on the main thread: the held meta, the pictures that differ from
+        /// disk, the held mesh when it does, and the held atlas pages. Nothing changes the held copies while it runs: a stop
+        /// waits for its own checkpoint, a campaign for any before its next stop, Prepare refuses a capture, and a raid that
+        /// has ended has no stop to run. The pixel counter is bumped before any file is replaced (WP3's supersede guard).
+        /// </summary>
+        /// <param name="hold">The hold to write.</param>
+        /// <param name="why">For the line.</param>
+        /// <param name="detached">Review: nothing holds on to the hold after this write - its arrays are let go when it ends.</param>
+        private static HeldFlush StartFlush(CampaignHold hold, string why, bool detached = false)
+        {
+            PollFlush();
+
+            if (_flush != null && !_flush.Completed) return null;
+            if (hold == null || hold.Meta == null || hold.Unsaved == 0 || hold.StopInProgress) return null;
+
+            try
+            {
+                // Only what the meta names: a held picture it does not (none today) would be staged and never committed.
+                var named = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var floor in hold.Meta.Floors ?? new List<CaptureFloor>())
+                    if (floor?.File != null) named.Add(floor.File);
+                foreach (var side in hold.Meta.Sides ?? new List<CaptureSide>())
+                    if (side?.File != null) named.Add(side.File);
+
+                var job = new HeldFlush
+                {
+                    Hold = hold,
+                    Key = hold.Key,
+                    Dir = hold.Dir,
+                    Why = why,
+                    Stop = _campaignStop,
+                    Unsaved = hold.Unsaved,
+                    Meta = hold.Meta,
+                    Pictures = hold.Pictures.Values
+                        .Where(p => p.Dirty && p.Pixels != null && p.Dist != null && named.Contains(p.File) && !string.IsNullOrEmpty(p.DistFile))
+                        .ToList(),
+                    Mesh = hold.Mesh,
+                    WriteMesh = hold.Mesh != null && hold.Mesh.Dirty,
+                    WriteIndex = hold.Mesh != null && hold.Mesh.Index != null && (hold.Mesh.Dirty || hold.Mesh.IndexDirty),
+                    WrittenMesh = hold.WrittenMesh,
+                    WrittenAtlas = hold.WrittenAtlas,
+                    WrittenMeta = hold.WrittenMeta,
+                    Pages = hold.PendingPages.OrderBy(p => p.Key).ToList(),
+                    Clock = Stopwatch.StartNew(),
+                    Detached = detached,
+                };
+
+                Bump(hold.Key, shape: false);
+
+                job.Task = Task.Run(() => WriteHeld(job));
+                _flush = job;
+                return job;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the checkpoint of {hold.Key} could not be started ({ex.GetType().Name}: {ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>One picture's two encodes, on a worker.</summary>
+        private sealed class HeldEncode
+        {
+            public HeldPicture Picture;
+            public PngEncoder.Result Png;
+            public PngEncoder.Result Sidecar;
+            public string Error;
+
+            /// <summary>Over <see cref="MaxFloorPngBytes"/>: carried, not written (review) - not an error.</summary>
+            public bool OverCap;
+        }
+
+        /// <summary>
+        /// Campaign speed step 2, ON A WORKER - no Unity call, and no line but a failed delete's Debug one (the main thread says
+        /// what came of it, from <see cref="HeldFlush.Notes"/>): a checkpoint's files, written as WriteMeta writes a stop's.
+        /// Every changed picture and its sidecar encoded in parallel with the mesh's deflate and hash; everything staged; then
+        /// committed in WriteMeta's order - the floors (picture, then sidecar), the mesh, its sidecar and its atlas pages, the
+        /// sides - and the meta LAST, so a reader finds the last checkpoint's set or this one. As WriteMeta (review): a picture
+        /// that will not encode fails the whole write before anything is committed; a picture over the size cap is left out
+        /// and its entry carried from the meta on disk; a mesh that will not serialise or commit is left out and the meta
+        /// names the stored one; a sidecar that will not commit is deleted; a page that will not commit ends the atlas there;
+        /// a side that will not commit keeps the earlier one. The meta is then written naming exactly what is on disk.
+        /// </summary>
+        /// <param name="job">The snapshot.</param>
+        private static void WriteHeld(HeldFlush job)
+        {
+            var staged = new List<string>();
+            var lengths = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            var movedPages = new List<KeyValuePair<string, string>>();
+
+            try
+            {
+                // 1. the encodes and the deflate, side by side
+                var encodes = job.Pictures.Select(p => new HeldEncode { Picture = p }).ToList();
+                var tasks = new List<Task>();
+
+                foreach (var e in encodes)
+                {
+                    var encode = e;
+                    tasks.Add(Task.Run(() => EncodeHeld(encode)));
+                }
+
+                SerialisedMesh serialised = null;
+
+                if (job.WriteMesh)
+                {
+                    var mesh = job.Mesh;
+                    tasks.Add(Task.Run(() =>
+                    {
+                        try
+                        {
+                            serialised = SerialiseHeldMesh(mesh);
+                        }
+                        catch (Exception ex)
+                        {
+                            job.MeshWhy = $"it would not serialise ({ex.GetType().Name}: {ex.Message})";
+                        }
+                    }));
+                }
+
+                Task.WaitAll(tasks.ToArray());
+
+                var bad = encodes.FirstOrDefault(e => e.Error != null);
+                if (bad != null)
+                {
+                    job.Failed = $"{bad.Picture.File} would not encode - {bad.Error}";
+                    return;
+                }
+
+                // 2. the meta this checkpoint writes: the held one - a picture over the size cap carried from the meta on disk,
+                // as a floor the old path would not write was (Carried), or left out when there is none
+                var meta = CopyMeta(job.Meta);
+                var good = encodes.Where(e => !e.OverCap).ToList();
+                var over = new HashSet<string>(encodes.Where(e => e.OverCap).Select(e => e.Picture.File), StringComparer.OrdinalIgnoreCase);
+                var floorLeftOut = false;
+
+                foreach (var e in encodes.Where(e => e.OverCap))
+                    job.Notes.Add($"{e.Picture.File} encoded to {e.Png.Length.ToString(CultureInfo.InvariantCulture)} bytes, over the " +
+                                  $"{(MaxFloorPngBytes / (1024 * 1024)).ToString(CultureInfo.InvariantCulture)} MB a picture may take - it " +
+                                  "is not written, and the one on disk is kept");
+
+                if (over.Count > 0)
+                {
+                    var floors = new List<CaptureFloor>();
+
+                    foreach (var floor in meta.Floors ?? new List<CaptureFloor>())
+                    {
+                        if (floor == null) continue;
+
+                        if (!over.Contains(floor.File))
+                        {
+                            floors.Add(floor);
+                            continue;
+                        }
+
+                        var was = job.WrittenMeta?.Floors?.FirstOrDefault(f => f != null && f.Level == floor.Level);
+                        if (was != null && IsPlainFileName(was.File) && File.Exists(Path.Combine(job.Dir, was.File))) floors.Add(was);
+                        else floorLeftOut = true;
+                    }
+
+                    meta.Floors = floors;
+                    meta.Sides = CarriedOver(meta.Sides, over, job);
+                }
+
+                foreach (var e in good)
+                {
+                    var picture = Path.Combine(job.Dir, e.Picture.File);
+                    staged.Add(picture);
+                    Stage(picture, e.Png.Parts, e.Png.LastLength);
+                    lengths[picture] = e.Png.Length;
+
+                    var dist = Path.Combine(job.Dir, e.Picture.DistFile);
+                    staged.Add(dist);
+                    Stage(dist, e.Sidecar.Parts, e.Sidecar.LastLength);
+                    lengths[dist] = e.Sidecar.Length;
+
+                    job.WrittenPictures.Add(e.Picture);
+                }
+
+                // 3. the mesh. A floor left out changes the floors the meta names: a mesh whose bands are not those floors is
+                // left out of the meta altogether (WriteMeta's SameLevels rule).
+                var indexPath = Path.Combine(job.Dir, MapMeshIndex.FileNameFor(job.Key));
+                var meshPath = Path.Combine(job.Dir, MapMeshFile.FileNameFor(job.Key));
+                var indexStaged = false;
+                var dropMesh = false;
+
+                if (floorLeftOut && meta.Mesh != null)
+                {
+                    var levels = job.Mesh?.File?.Bands != null ? new HashSet<int>(job.Mesh.File.Bands.Select(b => b.Level)) : null;
+                    if (levels == null || !SameLevels(levels, meta.Floors))
+                    {
+                        dropMesh = true;
+                        job.MeshWhy = "a floor left out of this checkpoint means its bands are not the floors the meta names";
+                    }
+                }
+
+                // The held pages go with the mesh that names them and never without it: one missing (swept by hand, say)
+                // leaves the mesh out of this checkpoint rather than naming a page whose file is the older one.
+                if (job.WriteMesh && serialised != null && !dropMesh)
+                {
+                    var missing = job.Pages.FirstOrDefault(p => p.Value == null || !File.Exists(p.Value));
+                    if (missing.Value != null || job.Pages.Any(p => p.Value == null))
+                    {
+                        job.MeshWhy = $"its held atlas page {missing.Key.ToString(CultureInfo.InvariantCulture)} is missing";
+                        serialised = null;
+                    }
+                }
+
+                var meshStaged = false;
+
+                if (job.WriteMesh && serialised != null && !dropMesh)
+                {
+                    staged.Add(meshPath);
+                    Stage(meshPath, serialised.Bytes, serialised.Length);
+                    lengths[meshPath] = serialised.Length;
+                    meshStaged = true;
+
+                    if (serialised.IndexBytes != null)
+                    {
+                        staged.Add(indexPath);
+                        Stage(indexPath, serialised.IndexBytes);
+                        lengths[indexPath] = serialised.IndexBytes.Length;
+                        indexStaged = true;
+                    }
+                    else
+                    {
+                        job.Notes.Add($"the mesh has no identity sidecar this time ({serialised.IndexWhy}) - the next capture rebuilds it from scratch");
+                    }
+
+                    job.NewMesh = new CaptureMesh
+                    {
+                        File = MapMeshFile.FileNameFor(job.Key),
+                        Bytes = serialised.Length,
+                        Version = MapMeshFile.Version,
+                        Cells = job.Mesh.Cells,
+                        Triangles = job.Mesh.Triangles,
+                        Sha256 = serialised.Sha256,
+                    };
+
+                    foreach (var page in job.Pages)
+                    {
+                        var final = page.Value.Substring(0, page.Value.Length - HeldPageSuffix.Length);
+                        var pageTemp = Staged(final);
+                        if (File.Exists(pageTemp)) File.Delete(pageTemp);
+                        File.Move(page.Value, pageTemp);
+                        movedPages.Add(new KeyValuePair<string, string>(pageTemp, page.Value));
+                        staged.Add(final);
+                        lengths[final] = new FileInfo(pageTemp).Length;
+                    }
+                }
+                else if (!job.WriteMesh && !dropMesh && job.WriteIndex && job.WrittenMesh != null &&
+                         !string.IsNullOrEmpty(job.WrittenMesh.Sha256))
+                {
+                    // a recorded attempt beside the stored mesh: its sidecar alone, bound to that mesh's own hash
+                    job.Mesh.Index.MeshSha = MapMeshIndex.ShaBytes(job.WrittenMesh.Sha256);
+                    var bytes = MapMeshIndex.ToBytes(job.Mesh.Index);
+                    staged.Add(indexPath);
+                    Stage(indexPath, bytes);
+                    lengths[indexPath] = bytes.Length;
+                    indexStaged = true;
+                }
+
+                if (job.WriteMesh && !meshStaged && job.MeshWhy == null) job.MeshWhy = "it could not be serialised";
+
+                // The mesh block the meta names before the commits: this write's, the one on disk, or none.
+                if (dropMesh)
+                {
+                    meta.Mesh = null;
+                }
+                else if (job.WriteMesh && !meshStaged)
+                {
+                    meta.Mesh = WrittenMeshOnDisk(job);
+                    meta.Atlas = meta.Mesh != null ? job.WrittenAtlas : null;
+                }
+                else if (meshStaged)
+                {
+                    meta.Mesh = job.NewMesh;
+                }
+
+                // 4. the commits, in WriteMeta's order, the meta last
+                var written = new HashSet<string>(job.WrittenPictures.Select(p => p.File), StringComparer.OrdinalIgnoreCase);
+                var byFile = job.WrittenPictures.ToDictionary(p => p.File, StringComparer.OrdinalIgnoreCase);
+
+                // The floors: as WriteMeta, with no try of their own - a floor that will not go in place fails the write, and
+                // no meta names the half.
+                foreach (var floor in meta.Floors)
+                {
+                    if (floor == null || !written.Contains(floor.File)) continue;
+
+                    var picture = Path.Combine(job.Dir, floor.File);
+                    Commit(picture);
+                    job.Bytes += lengths[picture];
+
+                    var dist = Path.Combine(job.Dir, byFile[floor.File].DistFile);
+                    Commit(dist);
+                    job.Bytes += lengths[dist];
+                }
+
+                if (meshStaged)
+                {
+                    // Its own try, as WriteMeta's: a .bin that will not move must not take the meta down with it.
+                    try
+                    {
+                        Commit(meshPath);
+                        job.Bytes += lengths[meshPath];
+                        job.MeshWritten = true;
+
+                        try
+                        {
+                            if (indexStaged)
+                            {
+                                Commit(indexPath);
+                                job.Bytes += lengths[indexPath];
+                            }
+                            else
+                            {
+                                DeleteOrWarn(indexPath);
+                            }
+                        }
+                        catch (Exception indexEx)
+                        {
+                            DeleteQuietly(Staged(indexPath));
+                            DeleteOrWarn(indexPath);
+                            job.IndexFailed = true;
+                            job.Notes.Add($"the mesh sidecar could not be put in place ({indexEx.GetType().Name}: {indexEx.Message}) - " +
+                                          "the next capture rebuilds the 3D mesh from scratch");
+                        }
+
+                        // The pages, each in its own try: the first that will not go in place ends the list.
+                        var atlas = new List<CaptureAtlas>();
+
+                        foreach (var page in meta.Atlas ?? new List<CaptureAtlas>())
+                        {
+                            if (page == null || atlas.Count != page.Page || !IsPlainFileName(page.File))
+                            {
+                                job.PagesCut = true;
+                                break;
+                            }
+
+                            var path = Path.Combine(job.Dir, page.File);
+
+                            try
+                            {
+                                var had = File.Exists(Staged(path));
+                                Commit(path);
+                                if (had && lengths.TryGetValue(path, out var length)) job.Bytes += length;
+                                atlas.Add(page);
+                            }
+                            catch (Exception pageEx)
+                            {
+                                job.PagesCut = true;
+                                job.Notes.Add($"atlas page {page.Page.ToString(CultureInfo.InvariantCulture)} could not be put in place " +
+                                              $"({pageEx.GetType().Name}: {pageEx.Message}) - the buildings on it and later pages keep " +
+                                              "the side views");
+                                break;
+                            }
+                        }
+
+                        meta.Atlas = atlas.Count == 0 ? null : atlas;
+                    }
+                    catch (Exception meshEx)
+                    {
+                        job.MeshWritten = false;
+                        job.MeshWhy = $"it could not be put in place ({meshEx.GetType().Name}: {meshEx.Message})";
+                        DeleteQuietly(Staged(indexPath));
+                        meta.Mesh = WrittenMeshOnDisk(job);
+                        meta.Atlas = meta.Mesh != null ? job.WrittenAtlas : null;
+                    }
+                }
+                else if (indexStaged)
+                {
+                    try
+                    {
+                        Commit(indexPath);
+                        job.Bytes += lengths[indexPath];
+                        job.IndexWritten = true;
+                    }
+                    catch (Exception indexEx)
+                    {
+                        DeleteQuietly(Staged(indexPath));
+                        DeleteOrWarn(indexPath);
+                        job.IndexFailed = true;
+                        job.Notes.Add($"the mesh's updated sidecar could not be put in place ({indexEx.GetType().Name}: {indexEx.Message}) - " +
+                                      "the next capture rebuilds the 3D mesh from scratch");
+                    }
+                }
+
+                if (meta.Mesh == null) meta.Atlas = null;
+
+                // The sides, each in its own try, as CommitSides: one that will not go in place keeps the earlier one.
+                if (meta.Sides != null)
+                {
+                    var sides = new List<CaptureSide>();
+
+                    foreach (var side in meta.Sides)
+                    {
+                        if (side == null) continue;
+
+                        if (!written.Contains(side.File))
+                        {
+                            sides.Add(side);
+                            continue;
+                        }
+
+                        var picture = Path.Combine(job.Dir, side.File);
+
+                        try
+                        {
+                            Commit(picture);
+                            job.Bytes += lengths[picture];
+                            sides.Add(side);
+
+                            var dist = Path.Combine(job.Dir, byFile[side.File].DistFile);
+                            try
+                            {
+                                Commit(dist);
+                                job.Bytes += lengths[dist];
+                            }
+                            catch (Exception distEx)
+                            {
+                                DeleteQuietly(Staged(dist));
+                                DeleteOrWarn(dist);
+                                job.Notes.Add($"{Path.GetFileName(dist)} could not be put in place ({distEx.Message}) - it is removed, " +
+                                              "so the next capture of that side merges as if fresh");
+                            }
+                        }
+                        catch (Exception sideEx)
+                        {
+                            job.Notes.Add($"{side.File} could not be put in place ({sideEx.GetType().Name}: {sideEx.Message}) - " +
+                                          "the earlier one is kept if there is one");
+                            job.WrittenPictures.Remove(byFile[side.File]);
+
+                            var was = job.WrittenMeta?.Sides?.FirstOrDefault(s => s != null && s.Dir == side.Dir);
+                            if (was != null && IsPlainFileName(was.File) && File.Exists(Path.Combine(job.Dir, was.File))) sides.Add(was);
+                        }
+                    }
+
+                    meta.Sides = sides.Count == 0 ? null : sides;
+                }
+
+                var json = JsonConvert.SerializeObject(meta, Formatting.Indented);
+                var metaPath = Path.Combine(job.Dir, $"{job.Key}.map.json");
+                var temp = metaPath + ".tmp";
+
+                File.WriteAllText(temp, json);
+                if (File.Exists(metaPath)) File.Delete(metaPath);
+                File.Move(temp, metaPath);
+
+                job.WrittenMeta = meta;
+                job.Keep = KeepOf(meta, job.Key);
+                job.Written = true;
+                movedPages.Clear();
+            }
+            catch (Exception ex)
+            {
+                job.Failed = $"{ex.GetType().Name}: {ex.Message}";
+            }
+            finally
+            {
+                // A held page this write moved and did not commit goes back beside the set; whatever else it staged and did
+                // not commit goes.
+                foreach (var page in movedPages)
+                {
+                    try
+                    {
+                        if (File.Exists(page.Key) && !File.Exists(page.Value)) File.Move(page.Key, page.Value);
+                    }
+                    catch
+                    {
+                        // swept with the hold
+                    }
+                }
+
+                foreach (var file in staged) DeleteQuietly(Staged(file));
+
+                // Review: a write nothing will hold on to after it (the raid's end, a campaign that has ended) lets the held
+                // arrays go the moment it is done - up to 1.5 GB on Interchange - rather than when the main thread next looks.
+                if (job.Detached) ReleaseHeldArrays(job);
+            }
+        }
+
+        /// <summary>The mesh block the meta on disk names, when its file is still there - what a checkpoint falls back to.</summary>
+        /// <param name="job">The write.</param>
+        private static CaptureMesh WrittenMeshOnDisk(HeldFlush job)
+        {
+            var mesh = job.WrittenMesh;
+            return mesh != null && IsPlainFileName(mesh.File) && File.Exists(Path.Combine(job.Dir, mesh.File)) ? mesh : null;
+        }
+
+        /// <summary>Campaign speed step 2 (review): the held sides with any over the size cap carried from the meta on disk, or
+        /// left out.</summary>
+        /// <param name="sides">The held meta's sides.</param>
+        /// <param name="over">The pictures over the cap.</param>
+        /// <param name="job">The write.</param>
+        private static List<CaptureSide> CarriedOver(List<CaptureSide> sides, HashSet<string> over, HeldFlush job)
+        {
+            if (sides == null) return null;
+
+            var kept = new List<CaptureSide>();
+
+            foreach (var side in sides)
+            {
+                if (side == null) continue;
+
+                if (!over.Contains(side.File))
+                {
+                    kept.Add(side);
+                    continue;
+                }
+
+                var was = job.WrittenMeta?.Sides?.FirstOrDefault(s => s != null && s.Dir == side.Dir);
+                if (was != null && IsPlainFileName(was.File) && File.Exists(Path.Combine(job.Dir, was.File))) kept.Add(was);
+            }
+
+            return kept.Count == 0 ? null : kept;
+        }
+
+        /// <summary>Campaign speed step 2 (review): a detached write's held arrays let go - every picture and the mesh.</summary>
+        /// <param name="job">The write.</param>
+        private static void ReleaseHeldArrays(HeldFlush job)
+        {
+            var hold = job?.Hold;
+            if (hold == null) return;
+
+            foreach (var picture in hold.Pictures.Values)
+            {
+                picture.Pixels = null;
+                picture.Dist = null;
+            }
+
+            hold.Mesh = null;
+        }
+
+        /// <summary>Campaign speed step 2, on a worker: one held picture and its sidecar through the managed encoder, with its
+        /// round trip the first time a colour type is encoded this session, and the floors' size cap.</summary>
+        /// <param name="e">The picture, and where its results go.</param>
+        private static void EncodeHeld(HeldEncode e)
+        {
+            try
+            {
+                var p = e.Picture;
+
+                e.Png = PngEncoder.Encode(p.Width, p.Height, 6, PngFilter, RgbaRows(p.Pixels, p.Width, p.Height), !_rgbaRoundTripped);
+                if (e.Png.Error != null)
+                {
+                    if (e.Png.RoundTripFailed) _managedPngOff = true;
+                    e.Error = $"{e.Png.Error.GetType().Name}: {e.Png.Error.Message}";
+                    return;
+                }
+
+                if (e.Png.RoundTripChecked) _rgbaRoundTripped = true;
+
+                if (e.Png.Length <= 0)
+                {
+                    e.Error = "it encoded to nothing";
+                    return;
+                }
+
+                // Review: a picture over the cap is carried, as the old path did with a floor it would not write.
+                if (e.Png.Length > MaxFloorPngBytes)
+                {
+                    e.OverCap = true;
+                    return;
+                }
+
+                e.Sidecar = PngEncoder.Encode(p.Width, p.Height, 2, PngFilter, GreyRgbRows(p.Dist, p.Width, p.Height), !_rgbRoundTripped);
+                if (e.Sidecar.Error != null)
+                {
+                    if (e.Sidecar.RoundTripFailed) _managedPngOff = true;
+                    e.Error = $"its sidecar: {e.Sidecar.Error.GetType().Name}: {e.Sidecar.Error.Message}";
+                    return;
+                }
+
+                if (e.Sidecar.RoundTripChecked) _rgbRoundTripped = true;
+            }
+            catch (Exception ex)
+            {
+                e.Error = $"{ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
+        /// <summary>Campaign speed step 2, on a worker: SerialiseMesh's body for a held mesh - the deflate, the hash, and the
+        /// sidecar bound to those bytes.</summary>
+        /// <param name="mesh">The held mesh.</param>
+        private static SerialisedMesh SerialiseHeldMesh(HeldMesh mesh)
+        {
+            using (var stream = MapMeshFile.ToStream(mesh.File))
+            {
+                var buffer = stream.GetBuffer();
+                var length = (int)stream.Length;
+                var sha = Sha256(buffer, length);
+
+                byte[] indexBytes = null;
+                string indexWhy = null;
+
+                if (mesh.Index != null)
+                {
+                    try
+                    {
+                        mesh.Index.MeshSha = MapMeshIndex.ShaBytes(sha);
+                        indexBytes = MapMeshIndex.ToBytes(mesh.Index);
+                    }
+                    catch (Exception ex)
+                    {
+                        indexWhy = $"{ex.GetType().Name}: {ex.Message}";
+                    }
+                }
+                else
+                {
+                    indexWhy = "the build produced none";
+                }
+
+                return new SerialisedMesh { Bytes = buffer, Length = length, Sha256 = sha, IndexBytes = indexBytes, IndexWhy = indexWhy };
+            }
+        }
+
+        /// <summary>A shallow copy of a meta, so a checkpoint can name its own mesh block without touching the held one.</summary>
+        /// <param name="m">The meta.</param>
+        private static CaptureMeta CopyMeta(CaptureMeta m) => new CaptureMeta
+        {
+            SchemaVersion = m.SchemaVersion,
+            Map = m.Map,
+            Extent = m.Extent,
+            Rotation = m.Rotation,
+            PxPerMetre = m.PxPerMetre,
+            TileSize = m.TileSize,
+            CapturedAt = m.CapturedAt,
+            FirstCapturedAt = m.FirstCapturedAt,
+            Captures = m.Captures,
+            ModVersion = m.ModVersion,
+            Render = m.Render,
+            TimeOfDay = m.TimeOfDay,
+            Lighting = m.Lighting,
+            Floors = m.Floors,
+            Labels = m.Labels,
+            Mesh = m.Mesh,
+            Atlas = m.Atlas,
+            Sides = m.Sides,
+        };
+
+        /// <summary>The file names a meta accounts for - its floors and their sidecars, its mesh, its pages, its sides and their
+        /// sidecars - for the stale sweep, as WriteMeta's keep.</summary>
+        /// <param name="meta">The meta written.</param>
+        /// <param name="key">The map.</param>
+        private static HashSet<string> KeepOf(CaptureMeta meta, string key)
+        {
+            var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var floor in meta.Floors ?? new List<CaptureFloor>())
+            {
+                if (floor == null) continue;
+                keep.Add(floor.File);
+                keep.Add($"{key}-{floor.Level.ToString(CultureInfo.InvariantCulture)}.dist.png");
+            }
+
+            if (meta.Mesh != null) keep.Add(meta.Mesh.File);
+
+            if (meta.Atlas != null)
+                foreach (var page in meta.Atlas)
+                    if (page != null) keep.Add(page.File);
+
+            if (meta.Sides != null)
+                foreach (var side in meta.Sides)
+                {
+                    if (side == null) continue;
+                    keep.Add(side.File);
+                    keep.Add(SideDistFileName(key, side.Dir));
+                }
+
+            return keep;
+        }
+
+        /// <summary>Campaign speed step 2: finishes a checkpoint once its worker has, if one has. Main thread; cheap; asked every
+        /// frame by the waits, by this component's Update and by the poller the plugin object runs.</summary>
+        private static void PollFlush()
+        {
+            var job = _flush;
+            if (job != null && !job.Completed && job.Task != null && job.Task.IsCompleted) CompleteFlush(job);
+        }
+
+        /// <summary>Campaign speed step 2: a checkpoint nobody is waiting for - the raid's end, or a wait that gave up - is
+        /// finished by a coroutine on the plugin object, which outlives the raid (MapTransfer's upload runs there too).</summary>
+        /// <param name="job">The write.</param>
+        private static void EnsureFlushPoller(HeldFlush job)
+        {
+            if (job == null || job.Polled || job.Completed) return;
+
+            try
+            {
+                var host = Plugin.Instance;
+                if (host == null) return;
+
+                job.Polled = true;
+                host.StartCoroutine(PollFlushUntilDone(job));
+            }
+            catch (Exception ex)
+            {
+                job.Polled = false;
+                Plugin.LogSource?.LogDebug($"QuestTree: the checkpoint's poller could not be started ({ex.Message}).");
+            }
+        }
+
+        private static IEnumerator PollFlushUntilDone(HeldFlush job)
+        {
+            while (!job.Completed && job.Task != null && !job.Task.IsCompleted) yield return null;
+
+            if (!job.Completed) CompleteFlush(job);
+        }
+
+        /// <summary>
+        /// Campaign speed step 2, on the main thread: what a checkpoint's write came to. Written: the held copies it wrote are
+        /// clean again, the stale sweep, WP3's shape counter, the Maps tab told, the upload asked for (owed while the campaign
+        /// holds uploads - the campaign's release is the one upload, and it sees these files), the checkpoint line with the
+        /// heap after a collection and the held bytes. Failed: nothing was committed or the commit was cut short; the hold is
+        /// let go with its stops said lost, and the campaign writes every stop from here, as it did before step 2. Then
+        /// whatever waited for the write (a campaign's upload hold). Never throws.
+        /// </summary>
+        /// <param name="job">The finished write.</param>
+        private static void CompleteFlush(HeldFlush job)
+        {
+            if (job == null || job.Completed) return;
+
+            job.Completed = true;
+            var hold = job.Hold;
+
+            try
+            {
+                if (job.Task.IsFaulted && job.Failed == null)
+                    job.Failed = job.Task.Exception?.GetBaseException().Message ?? "the worker failed";
+
+                if (job.Written)
+                {
+                    // Only what went in place is clean: a picture over the size cap, or a side that would not commit, stays
+                    // dirty and is tried again at the next checkpoint.
+                    foreach (var picture in job.WrittenPictures) picture.Dirty = false;
+
+                    // What the meta on disk now names - whatever the mesh came to (review: the fallbacks are WriteMeta's).
+                    hold.WrittenMeta = job.WrittenMeta;
+                    hold.WrittenMesh = job.WrittenMeta.Mesh;
+                    hold.WrittenAtlas = job.WrittenMeta.Atlas;
+
+                    var meshFell = job.Mesh != null && (job.WriteMesh && !job.MeshWritten || job.PagesCut || job.WrittenMeta.Mesh == null);
+
+                    if (meshFell && hold.Mesh != null)
+                    {
+                        RevertHeldMesh(hold, job.PagesCut
+                            ? "an atlas page of the checkpoint could not be put in place, so the atlas on disk ends early"
+                            : $"it could not be written at the checkpoint ({job.MeshWhy ?? "no reason given"})");
+                    }
+                    else if (job.MeshWritten)
+                    {
+                        hold.PendingPages.Clear();
+
+                        if (hold.Mesh != null && ReferenceEquals(hold.Mesh, job.Mesh))
+                        {
+                            hold.Mesh.Dirty = false;
+                            hold.Mesh.IndexDirty = job.IndexFailed;
+                        }
+
+                        if (hold.Meta != null && ReferenceEquals(hold.Meta, job.Meta))
+                        {
+                            hold.Meta.Mesh = job.NewMesh;
+                            hold.Meta.Atlas = job.WrittenMeta.Atlas;
+                        }
+                    }
+                    else if (job.IndexWritten && hold.Mesh != null)
+                    {
+                        hold.Mesh.IndexDirty = false;
+                    }
+
+                    hold.Unsaved = Math.Max(0, hold.Unsaved - job.Unsaved);
+
+                    DropStalePictures(new Plan { Key = job.Key, Dir = job.Dir }, job.Keep);
+
+                    var shape = ShapeSignature(job.WrittenMeta);
+                    if (!_shapes.TryGetValue(job.Key, out var oldShape) || !string.Equals(oldShape, shape, StringComparison.Ordinal))
+                    {
+                        Bump(job.Key, shape: true);
+                        _shapes[job.Key] = shape;
+                    }
+
+                    try
+                    {
+                        UI.MapCatalog.InvalidateCaptures();
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: the Maps tab could not be told about the checkpoint ({ex.Message}).");
+                    }
+
+                    try
+                    {
+                        MapTransfer.UploadCapture(job.Key);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: the checkpoint of {job.Key} could not be offered to the host ({ex.Message}).");
+                    }
+
+                    var ms = job.Clock.Elapsed.TotalMilliseconds;
+                    LastCheckpointSeconds = ms / 1000d;
+
+                    foreach (var note in job.Notes)
+                        Plugin.LogSource?.LogWarning($"QuestTree: the checkpoint of {job.Key}: {note}.");
+
+                    if (job.Detached) ReleaseHeldArrays(job);
+
+                    // (review) a campaign that has stopped holding (memory ran short) lets its hold go once it is written
+                    if (_holdOff && ReferenceEquals(_hold, hold) && hold.Unsaved == 0)
+                    {
+                        SweepHeldPages(hold);
+                        _hold = null;
+                    }
+
+                    CollectGarbage("after a campaign checkpoint", force: true);
+
+                    var inv = CultureInfo.InvariantCulture;
+                    var of = _campaignStopCount > 0 ? $" of {_campaignStopCount.ToString(inv)}" : "";
+
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: campaign checkpoint after stop {job.Stop.ToString(inv)}{of} - wrote {Mb(job.Bytes)} MB in " +
+                        $"{Ms(ms)} ms (heap {GB(GC.GetTotalMemory(false))} GB, held {Mb(HeldBytes(hold))} MB) - {job.Key}, " +
+                        $"{job.Unsaved.ToString(inv)} stop(s), {job.WrittenPictures.Count.ToString(inv)} of " +
+                        $"{job.Pictures.Count.ToString(inv)} changed picture(s) written" +
+                        (job.MeshWritten
+                            ? $", mesh {MB(job.NewMesh.Bytes)} MB sha256 {ShortSha(job.NewMesh.Sha256)}" +
+                              (job.PagesCut ? $", atlas cut to {(job.WrittenMeta.Atlas?.Count ?? 0).ToString(inv)} page(s)" : "")
+                            : job.WriteMesh
+                                ? (job.WrittenMeta.Mesh != null ? ", the stored mesh kept" : ", no mesh named") + $" ({job.MeshWhy})"
+                                : job.IndexWritten ? ", the mesh sidecar alone" : "") +
+                        $"; {job.Why}.");
+
+                    Journal(job.Key, $"checkpoint after stop {job.Stop.ToString(inv)}{of} - {Mb(job.Bytes)} MB in {Ms(ms)} ms ({job.Why}).");
+                }
+                else
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the campaign checkpoint of {job.Key} after stop {job.Stop.ToString(CultureInfo.InvariantCulture)} " +
+                        $"failed ({job.Failed ?? "no reason given"}) - this campaign writes every stop from here.");
+
+                    if (ReferenceEquals(_hold, hold)) _holdOff = true;
+
+                    DropHold(hold, "its checkpoint could not be written", raidEnded: !ReferenceEquals(_hold, hold) && LiveCampaignSession == 0);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the campaign checkpoint of {job.Key} could not be finished ({ex.GetType().Name}: {ex.Message}).");
+            }
+            finally
+            {
+                if (ReferenceEquals(_flush, job)) _flush = null;
+
+                foreach (var then in job.Then)
+                {
+                    try
+                    {
+                        then();
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: what waited for the checkpoint of {job.Key} failed ({ex.Message}).");
+                    }
+                }
+
+                job.Then.Clear();
+            }
         }
 
         /// <summary>WP2 (7): the raid's LOD map and path hashes, kept across its captures (MapMeshBuilder.CacheFor, keyed
@@ -1246,12 +3160,14 @@ namespace QuestTree.QuestGraph
         /// <see cref="CollectEveryBytes"/> since the last time. Never throws.
         /// </summary>
         /// <param name="where">Where in the capture, for the debug line.</param>
-        private static void CollectGarbage(string where)
+        /// <param name="force">Campaign speed step 2: collect whatever the growth - a checkpoint's line reports the heap after a
+        /// collection, which is the number that shows whether holding a campaign's set grows it from one checkpoint to the next.</param>
+        private static void CollectGarbage(string where, bool force = false)
         {
             try
             {
                 var before = GC.GetTotalMemory(false);
-                if (_heapAfterCollect >= 0 && before - _heapAfterCollect < CollectEveryBytes) return;
+                if (!force && _heapAfterCollect >= 0 && before - _heapAfterCollect < CollectEveryBytes) return;
 
                 var mode = UnityEngine.Scripting.GarbageCollector.GCMode;
                 var clock = Stopwatch.StartNew();
@@ -1294,8 +3210,9 @@ namespace QuestTree.QuestGraph
         /// <summary>The longest a capture can run with every cap in force (review F45): floors, the stored mesh's load
         /// (WP2), mesh watchdog and grace, the atlas encode wait, sides, the uncapped finishing steps, the wait for an
         /// upload's read before the commit (WP3), and the two encode settles no phase cap covers (WP4: the last floor's
-        /// and the last side's managed encodes, each waited for up to EncodeWaitSeconds after its phase). 995 s with
-        /// today's numbers (600 s before the 8 px/m ground raised FloorPhaseSeconds and EncodeWaitSeconds). The
+        /// and the last side's managed encodes, each waited for up to EncodeWaitSeconds after its phase), and a held
+        /// campaign stop's checkpoint (campaign speed step 2: the upload-read wait and the write's). 1185 s with
+        /// today's numbers (995 s before step 2, 600 s before the 8 px/m ground raised FloorPhaseSeconds and EncodeWaitSeconds). The
         /// campaign waits this long for a stop, so a slow capture is never taken for a stuck one; it is a ceiling for a
         /// hung capture, not what a stop takes.</summary>
         internal const double WorstCaseSeconds =
@@ -1306,7 +3223,8 @@ namespace QuestTree.QuestGraph
             SidePhaseSeconds * SidePhaseOverrun +                   // 225 (the floors' numbers)
             FinishAllowanceSeconds +                                //  60
             CommitWaitSeconds +                                     //  10 (WP3: an upload's read before the commit)
-            2 * EncodeWaitSeconds;                                  // 180 (WP4: the last floor's and last side's settle)
+            2 * EncodeWaitSeconds +                                 // 180 (WP4: the last floor's and last side's settle)
+            CommitWaitSeconds + CheckpointWaitSeconds;              // 190 (campaign speed step 2: a checkpoint stop's write)
 
         private Camera _camera;
 
@@ -1550,6 +3468,10 @@ namespace QuestTree.QuestGraph
 
         private void Update()
         {
+            // Campaign speed step 2: a checkpoint nobody waits for any more is finished on the main thread - here as well as
+            // by the plugin object's poller.
+            PollFlush();
+
             if (!ModSettings.Ready || ModSettings.CaptureMapKey == null) return;
 
             try
@@ -1749,15 +3671,19 @@ namespace QuestTree.QuestGraph
                     {
                         yield return null;
 
+                        // Campaign speed step 2: a held campaign keeps the developed floor in memory for its next stop and
+                        // its next checkpoint - no encode, no sidecar, nothing staged.
+                        if (plan.Hold != null) StashFloor(plan, floor);
+
                         // WP4 B2: FinishFloor on the Texture path; on the managed path the picture's and the sidecar's
                         // encodes start on workers and are staged at the next barrier.
-                        StartFloorEncode(plan, floor);
+                        else StartFloorEncode(plan, floor);
                     }
 
                     // The sidecar AFTER the picture, and only when the picture was written - see
                     // WriteSidecar, where the order is the whole of what makes a crash between the
                     // two files survivable. (The managed path keeps that order in SettleEncodes.)
-                    if (!floor.Failed && !unchanged && floor.PictureEncode == null)
+                    if (plan.Hold == null && !floor.Failed && !unchanged && floor.PictureEncode == null)
                     {
                         yield return null;
                         WriteSidecar(plan, floor);
@@ -1791,6 +3717,17 @@ namespace QuestTree.QuestGraph
                 while (settled.MoveNext()) yield return settled.Current;
 
                 plan.RgbaPool = null;
+
+                // Campaign speed step 2 (review): every floor's light test has run - the stashed floors go into the hold now
+                if (plan.Hold != null)
+                {
+                    HoldStashedFloors(plan);
+
+                    // The arrays the hold just displaced (~1 GB on Interchange) are garbage only from here, and the next
+                    // collect ("before 3D mesh") runs only after 1 GiB of growth - so it is forced here, or that garbage
+                    // goes into the mesh build with EFT's collector off (step 2 re-review).
+                    CollectGarbage("after the held floors", force: true);
+                }
 
                 plan.FloorSeconds = floorsClock.Elapsed.TotalSeconds;
 
@@ -1933,7 +3870,13 @@ namespace QuestTree.QuestGraph
                     // pages it carries as well as the ones it rewrote.
                     SettleAtlasPages(plan, mesh);
 
-                    if (mesh.Unchanged)
+                    if (plan.Hold != null)
+                    {
+                        // Campaign speed step 2: the build is held for the next stop's base and the next checkpoint - no
+                        // deflate, no hash, nothing staged.
+                        HoldMesh(plan, mesh);
+                    }
+                    else if (mesh.Unchanged)
                     {
                         // WP2 (2.13): nothing was added, replaced or re-targeted, no tile or page changed, and the relief
                         // and y range are the stored ones byte for byte - the stored mesh, sidecar and pages are carried
@@ -2080,16 +4023,59 @@ namespace QuestTree.QuestGraph
                 while (lastSides.MoveNext()) yield return lastSides.Current;
 
                 var commitWait = Stopwatch.StartNew();
-                while (!plan.Refused && MapTransfer.IsReadingCapture(plan.Key) && commitWait.Elapsed.TotalSeconds < CommitWaitSeconds)
+                while (!plan.Refused && plan.Hold == null && MapTransfer.IsReadingCapture(plan.Key) &&
+                       commitWait.Elapsed.TotalSeconds < CommitWaitSeconds)
                     yield return null;
 
                 // Nothing is in place until this runs: it commits every staged picture and then
                 // writes the meta. A refused capture skips it, which is the whole of what makes the
                 // refusal cost nothing.
-                if (!plan.Refused) WriteMeta(plan, clock);
+                if (!plan.Refused && plan.Hold == null) WriteMeta(plan, clock);
+
+                // Campaign speed step 2: a held stop ends by holding its meta - the stop is then whole in memory - and every
+                // CampaignCheckpointStops stops by writing the held set, which this stop waits for (so does the campaign).
+                if (!plan.Refused && plan.Hold != null)
+                {
+                    HoldMeta(plan, clock);
+
+                    // (review) memory ran short in a held stop: written now, whatever the count, and the hold let go after
+                    var outOfMemory = plan.Hold.OutOfMemory;
+                    if (outOfMemory)
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: memory ran short while {plan.Key} was held between stops - it is written now, and this " +
+                            "campaign writes every stop from here.");
+
+                    if (!plan.Hold.StopInProgress && (plan.Hold.Unsaved >= CampaignCheckpointStops || outOfMemory) &&
+                        ReferenceEquals(_hold, plan.Hold))
+                    {
+                        var checkpoint = CampaignCheckpoint(outOfMemory
+                            ? "memory ran short"
+                            : $"every {CampaignCheckpointStops.ToString(CultureInfo.InvariantCulture)} stops");
+                        while (checkpoint.MoveNext()) yield return checkpoint.Current;
+                    }
+
+                    // Written (or being written, which owns it): the campaign holds nothing from here.
+                    if (outOfMemory && ReferenceEquals(_hold, plan.Hold) && plan.Hold.Unsaved == 0)
+                    {
+                        SweepHeldPages(plan.Hold);
+                        _hold = null;
+                    }
+                }
             }
             finally
             {
+                // Campaign speed step 2: a held stop that changed the held copies and did not finish - refused, thrown, or
+                // abandoned - may have left them mixing two stops, so they are let go; the next stop starts from the last
+                // checkpoint on disk.
+                // (review) and the campaign writes every stop from here: a failure that repeats (memory) must not drop a
+                // fresh hold at every stop.
+                if (plan?.Hold != null && plan.Hold.StopInProgress)
+                {
+                    DropHold(plan.Hold, plan.Refused ? "the stop was refused after it had changed them" : "the stop did not finish",
+                        raidEnded: false);
+                    _holdOff = true;
+                }
+
                 Cleanup();
                 _running = false;
             }
@@ -2124,6 +4110,15 @@ namespace QuestTree.QuestGraph
 
                 var dir = CaptureDir(key);
                 if (dir == null) return false;
+
+                // Campaign speed step 2: a checkpoint's write owns the held set and its files until it finishes - a capture
+                // started under it would merge into copies the worker is writing and stage files it may sweep.
+                if (CampaignWriting)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        "QuestTree: a campaign checkpoint is still being written - nothing was captured; try again in a moment.");
+                    return false;
+                }
 
                 // The extent the HARVEST sent, when this raid has already measured it - not a second
                 // measurement that could differ. See MapExtentProbe.TryProbeForCapture.
@@ -2261,7 +4256,22 @@ namespace QuestTree.QuestGraph
 
                 // After the camera, because whether the previous capture can be merged into this one
                 // depends on the encoding the camera decided (see LoadPrevious).
-                plan.Previous = LoadPrevious(plan, _needsGamma, RenderTag);
+                //
+                // Campaign speed step 2: inside a held campaign the "previous capture" is the held set's meta - the last
+                // stop's, not the file, which is the last checkpoint's - held to the same checks. One that no longer fits
+                // is let go (its stops said lost) and this stop starts from disk, as the first stop of a campaign does.
+                var hold = LiveHold(key);
+                plan.Previous = LoadPrevious(plan, _needsGamma, RenderTag, hold?.Meta);
+
+                if (hold?.Meta != null && plan.Previous == null)
+                {
+                    DropHold(hold, "the held set no longer fits this capture", raidEnded: false);
+                    hold = null;
+                    plan.Previous = LoadPrevious(plan, _needsGamma, RenderTag);
+                }
+
+                plan.Hold = hold ?? NewHold(plan);
+
                 plan.Captures = plan.Previous == null ? 1 : Math.Max(1, plan.Previous.Captures) + 1;
                 plan.FirstCapturedAt = plan.Previous == null
                     ? null
@@ -2415,6 +4425,7 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
+                NoteOutOfMemory(plan, ex);
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" was not captured " +
                     $"({ex.GetType().Name}: {ex.Message}).");
@@ -3615,10 +5626,13 @@ namespace QuestTree.QuestGraph
         /// <param name="write">Stages the file at the path it is given.</param>
         /// <param name="encodeMs">The floor clock to report, or null for the clock now (the synchronous path).</param>
         /// <param name="encoded">Added inside the captured line's sentence (the managed path's timing), or null.</param>
+        /// <param name="held">Campaign speed step 2: the floor was HELD, not encoded - <paramref name="length"/> is what it
+        /// holds, nothing is staged, and the size cap (a file's) is the checkpoint's to judge.</param>
         private void RecordFloor(Plan plan, FloorPlan floor, long length, Action<string> write, double? encodeMs,
-            string encoded)
+            string encoded, bool held = false)
         {
-            if (length == 0)
+            // A held floor has no file yet: the checkpoint encodes it, and judges the cap on that file (EncodeHeld).
+            if (!held && length == 0)
             {
                 floor.Failed = true;
                 Plugin.LogSource?.LogWarning(
@@ -3626,7 +5640,7 @@ namespace QuestTree.QuestGraph
                 return;
             }
 
-            if (length > MaxFloorPngBytes)
+            if (!held && length > MaxFloorPngBytes)
             {
                 // Not written rather than written and large: these files ship in the release zip
                 // and are uploaded to Fika hosts, and a floor this size is a sign the picture is
@@ -3641,7 +5655,7 @@ namespace QuestTree.QuestGraph
 
             // STAGED, not written: see Stage. It goes in place in WriteMeta, with every other
             // floor of this capture, once the last of them has passed the light test.
-            write(Path.Combine(plan.Dir, floor.File));
+            write?.Invoke(Path.Combine(plan.Dir, floor.File));
 
             floor.Bytes = length;
             plan.Bytes += length;
@@ -3763,6 +5777,33 @@ namespace QuestTree.QuestGraph
                 // and the stored entry agree on it.
                 var stored = Carried(plan, floor);
                 if (stored == null || !string.Equals(stored.File, floor.File, StringComparison.OrdinalIgnoreCase)) return false;
+
+                // Campaign speed step 2: in a held campaign "kept as it is" means kept in the hold - taken in clean when this
+                // is the campaign's first stop and the copy came from disk, left as it was when it came from the hold.
+                if (plan.Hold != null)
+                {
+                    // Stashed, not held yet (review): a later floor's light test may still refuse this stop.
+                    if (floor.PreviousColour.Length != plan.WidthPx * plan.HeightPx ||
+                        floor.PreviousDist.Length != floor.PreviousColour.Length)
+                        return false;
+
+                    floor.StashPixels = floor.PreviousColour;
+                    floor.StashDist = floor.PreviousDist;
+                    floor.StashDirty = false;
+
+                    var bytes = (long)floor.PreviousColour.Length * HeldBytesPerPixel;
+
+                    floor.Unchanged = true;
+                    floor.Merged = true;
+                    floor.Bytes = bytes;
+
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" unchanged, not developed - {TilesPhrase(plan, floor)}; its " +
+                        $"picture and distance sidecar are held as they are, exposure {E(floor.Exposure.Low)}..{E(floor.Exposure.High)} " +
+                        $"(kept from the first capture), {Ms(floor.Clock?.Elapsed.TotalMilliseconds ?? 0d)} ms.");
+
+                    return true;
+                }
 
                 var picture = new FileInfo(Path.Combine(plan.Dir, floor.File));
                 if (!picture.Exists || picture.Length <= 0 || !File.Exists(Path.Combine(plan.Dir, floor.DistFile))) return false;
@@ -4521,15 +6562,16 @@ namespace QuestTree.QuestGraph
         /// <param name="renderTag">This capture's render recipe, which the stored one has to equal. Passed
         /// in rather than read from the property, because it depends on the multisampling this capture's
         /// device actually granted and this method is static.</param>
-        private static CaptureMeta LoadPrevious(Plan plan, bool needsGamma, string renderTag)
+        /// <param name="held">Campaign speed step 2: the held set's meta, checked in place of the file; null reads the file.</param>
+        private static CaptureMeta LoadPrevious(Plan plan, bool needsGamma, string renderTag, CaptureMeta held = null)
         {
             var path = Path.Combine(plan.Dir, $"{plan.Key}.map.json");
 
             try
             {
-                if (!File.Exists(path)) return null;
+                if (held == null && !File.Exists(path)) return null;
 
-                var meta = JsonConvert.DeserializeObject<CaptureMeta>(File.ReadAllText(path));
+                var meta = held ?? JsonConvert.DeserializeObject<CaptureMeta>(File.ReadAllText(path));
                 if (meta == null || meta.Extent == null || meta.Floors == null || meta.Floors.Count == 0)
                 {
                     Fresh(plan, "the capture already there cannot be read");
@@ -4601,8 +6643,9 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
-                // WP2 (fixes 4): a file an interrupted commit left under .old is put back before anything looks for it
-                RestoreOld(plan, meta);
+                // WP2 (fixes 4): a file an interrupted commit left under .old is put back before anything looks for it - on
+                // disk, so not for a held meta (the campaign's first stop did it)
+                if (held == null) RestoreOld(plan, meta);
 
                 return meta;
             }
@@ -4679,6 +6722,15 @@ namespace QuestTree.QuestGraph
         {
             if (plan.Previous == null) return;
 
+            // Campaign speed step 2: the held copy is exactly what the PNG would decode to (the encode is lossless), so
+            // there is nothing to read, decode or copy - the merge reads it in place and never writes it.
+            var held = HeldPictureOf(plan, floor.File);
+            if (held != null)
+            {
+                floor.PreviousColour = held.Pixels;
+                return;
+            }
+
             Texture2D texture = null;
 
             try
@@ -4708,6 +6760,16 @@ namespace QuestTree.QuestGraph
         /// <param name="floor">The floor whose previous sidecar is wanted.</param>
         private static void LoadPreviousDist(Plan plan, FloorPlan floor)
         {
+            // Campaign speed step 2: the held sidecar. A floor's is read in place (the merge writes this stop's own array);
+            // a side's is COPIED, because HealSideDist rewrites the previous sidecar it is given and the held one must stay
+            // what the held picture was merged with until this stop is held in its place.
+            var held = HeldPictureOf(plan, floor.File);
+            if (held != null && ReferenceEquals(held.Pixels, floor.PreviousColour))
+            {
+                floor.PreviousDist = plan.Side != null ? (byte[])held.Dist.Clone() : held.Dist;
+                return;
+            }
+
             Texture2D texture = null;
 
             try
@@ -4732,6 +6794,10 @@ namespace QuestTree.QuestGraph
                 if (!CopyRed(texture, red, plan, floor)) return;
 
                 floor.PreviousDist = red;
+
+                // Campaign speed step 2 (review): a held side keeps the sidecar as stored - HealSideDist is about to
+                // rewrite this one, and a side held unchanged must not carry the healed copy forward
+                if (plan.Hold != null && plan.Side != null) floor.UnhealedDist = (byte[])red.Clone();
             }
             finally
             {
@@ -7722,6 +9788,7 @@ namespace QuestTree.QuestGraph
             catch (Exception ex)
             {
                 floor.Failed = true;
+                NoteOutOfMemory(plan, ex);
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" could not be developed " +
                     $"({ex.GetType().Name}: {ex.Message}).");
@@ -8862,7 +10929,11 @@ namespace QuestTree.QuestGraph
                     // Anything this capture staged and did not commit - a refused capture's floors, a
                     // raid that ended mid-capture. Each deletion is guarded on its own, so this
                     // cannot keep the camera below from being destroyed.
-                    DropStaged(_plan);
+                    // Campaign speed step 2: not while a checkpoint of this map is being written - its worker stages under
+                    // the same names, and a stop whose checkpoint wait gave up ends here while that write goes on.
+                    if (!(_flush != null && !_flush.Completed &&
+                          string.Equals(_flush.Key, _plan.Key, StringComparison.OrdinalIgnoreCase)))
+                        DropStaged(_plan);
 
                     _plan = null;
                 }
@@ -8948,6 +11019,7 @@ namespace QuestTree.QuestGraph
             floor.Dist = null;
             floor.PreviousColour = null;
             floor.PreviousDist = null;
+            floor.UnhealedDist = null;
             floor.Block = null;
             floor.DxSquared = null;
             floor.LumBand = null;
@@ -9371,7 +11443,19 @@ namespace QuestTree.QuestGraph
                     while (develop.MoveNext()) yield return develop.Current;
                 }
 
-                if (!view.Floor.Failed && !unchanged && view.Floor.Rgba != null)
+                if (!view.Floor.Failed && !unchanged && plan.Hold != null)
+                {
+                    yield return null;
+
+                    // Campaign speed step 2: held for the next stop and the next checkpoint - no encode, nothing staged.
+                    if (HoldSide(plan, view))
+                    {
+                        tally.Rendered++;
+                        sizes.Add($"{view.Plan.WidthPx}x{view.Plan.HeightPx}");
+                        scales.Add(view.Plan.Ppm);
+                    }
+                }
+                else if (!view.Floor.Failed && !unchanged && view.Floor.Rgba != null)
                 {
                     yield return null;
 
@@ -9457,8 +11541,22 @@ namespace QuestTree.QuestGraph
                     return false;
 
                 var carried = CarriedSides(plan).FirstOrDefault(s => s.Dir == view.Dir);
-                if (carried == null || !string.Equals(carried.File, floor.File, StringComparison.OrdinalIgnoreCase) ||
-                    !File.Exists(Path.Combine(plan.Dir, SideDistFileName(plan.Key, view.Dir))))
+                if (carried == null || !string.Equals(carried.File, floor.File, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                // Campaign speed step 2: held as it is (HoldUnchanged), and CommitSides' carry becomes HeldSides'
+                if (side.Hold != null)
+                {
+                    if (HoldUnchanged(side, floor) <= 0) return false;
+
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: side view {view.Dir} of {plan.Key} unchanged, not developed - {TilesPhrase(side, floor)}; its " +
+                        "picture and distance sidecar are held as they are.");
+
+                    return true;
+                }
+
+                if (!File.Exists(Path.Combine(plan.Dir, SideDistFileName(plan.Key, view.Dir))))
                     return false;
 
                 Plugin.LogSource?.LogInfo(
@@ -9722,6 +11820,9 @@ namespace QuestTree.QuestGraph
                     WidthPx = SidePictureSide(frame[1], ppm),
                     HeightPx = SidePictureSide(frame[3], ppm),
                     From = plan.From,
+
+                    // Campaign speed step 2: the side merges from and into the same held set as its capture
+                    Hold = plan.Hold,
                 };
 
                 side.TilesX = (side.SampleWidth + TileSize - 1) / TileSize;
@@ -9814,6 +11915,7 @@ namespace QuestTree.QuestGraph
             {
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: {plan.Key} side view {dir} was not taken ({ex.GetType().Name}: {ex.Message}).");
+                NoteOutOfMemory(plan, ex);
                 return null;
             }
         }
@@ -10017,13 +12119,15 @@ namespace QuestTree.QuestGraph
         /// <param name="drawnOf">The side's pixel count.</param>
         /// <param name="encodeMs">The side clock to report, or null for the clock now.</param>
         /// <param name="encoded">Added to the line (the managed path's timing), or null.</param>
+        /// <param name="held">Campaign speed step 2: the side was HELD, not encoded - nothing is staged and the size cap is the
+        /// checkpoint's to judge.</param>
         private static bool RecordSide(Plan plan, SideView view, long length, Action<string> write, int drawn, int drawnOf,
-            double? encodeMs, string encoded)
+            double? encodeMs, string encoded, bool held = false)
         {
             var floor = view.Floor;
             var side = view.Plan;
 
-            if (length == 0 || length > MaxFloorPngBytes)
+            if (!held && (length == 0 || length > MaxFloorPngBytes))
             {
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: {plan.Key} side view {view.Dir} encoded to {length} " +
@@ -10031,7 +12135,7 @@ namespace QuestTree.QuestGraph
                 return false;
             }
 
-            write(Path.Combine(plan.Dir, floor.File));
+            write?.Invoke(Path.Combine(plan.Dir, floor.File));
 
             plan.SideBytes += length;
             plan.Sides.Add(new CaptureSide
@@ -10251,7 +12355,8 @@ namespace QuestTree.QuestGraph
 
                 try
                 {
-                    if (File.Exists(Path.Combine(plan.Dir, side.File))) kept.Add(side);
+                    // Campaign speed step 2: held counts as there (PictureExists)
+                    if (PictureExists(plan, side.File)) kept.Add(side);
                 }
                 catch (Exception ex)
                 {
@@ -10430,6 +12535,63 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
+                // Campaign speed step 2: the held mesh - the last stop's build, already checked when it was loaded or built -
+                // is the base as it is: no read, no hash, no inflate, no page hashes. Only this machine's memory ceiling is
+                // asked again, as it is of a stored one.
+                var held = plan.Hold?.Mesh;
+
+                // Campaign speed step 2 (review): a held mesh built under another recipe (a setting changed mid-campaign) is
+                // let go, and this stop reads the stored mesh as a stop outside a campaign does - LoadMeshBase's recipe rule
+                if (held != null && !string.Equals(held.Index?.Recipe, MapMeshBuilder.MeshRecipe, StringComparison.Ordinal))
+                {
+                    RevertHeldMesh(plan.Hold, "it was built under another mesh recipe");
+                    held = null;
+                }
+
+                if (held != null)
+                {
+                    if (held.Index == null)
+                    {
+                        plan.MeshBaseRefused = "the held mesh has no index";
+                        return null;
+                    }
+
+                    // The one sidecar check a held mesh can fail within a raid (MapMeshIndex.Mismatch's culling rule, as
+                    // LoadMeshBase applies it): known when held and unknown now is this once - carried, no build; unknown when
+                    // held and known now rebuilds from scratch, and the rebuilt index says known.
+                    if (held.Index.CullingKnown != cullingKnown)
+                    {
+                        plan.MeshBaseRefused = $"the held index does not fit it - {MapMeshIndex.CullingChanged}";
+                        plan.MeshBaseTemporary = held.Index.CullingKnown && !cullingKnown;
+                        return null;
+                    }
+
+                    var heldCeiling = MapMeshBuilder.MemoryCeiling();
+                    if (held.Triangles > heldCeiling)
+                    {
+                        plan.MeshBaseRefused =
+                            $"the held mesh's {held.Triangles.ToString("#,##0", CultureInfo.InvariantCulture)} triangles are over this " +
+                            $"machine's memory ceiling of {heldCeiling.ToString("#,##0", CultureInfo.InvariantCulture)}";
+                        plan.MeshBaseTemporary = true;
+                        return null;
+                    }
+
+                    // The deflated size the builder's shipped-size bound is estimated from (Request.BaseFileBytes): the last
+                    // written file's bytes a triangle, times the held triangles - the held mesh has no file to measure.
+                    var written = plan.Hold.WrittenMesh;
+                    var heldBytes = written != null && written.Triangles > 0 && written.Bytes > 0
+                        ? (long)(written.Bytes * (double)held.Triangles / written.Triangles)
+                        : 0L;
+
+                    // The build changes its base's buildings in place (MapMeshBuilder's merge): from here until the stop is
+                    // held whole, the held set is this stop's to finish or to lose - never to be written half-changed.
+                    plan.Hold.StopInProgress = true;
+
+                    var heldFile = held.File;
+                    var heldIndex = held.Index;
+                    return Task.Run(() => HeldMeshBase(heldFile, heldIndex, heldBytes));
+                }
+
                 RestoreOld(plan, plan.Previous);
 
                 var carried = CarriedMesh(plan, null);
@@ -10583,6 +12745,40 @@ namespace QuestTree.QuestGraph
             catch (Exception ex)
             {
                 load.Refused = $"the stored mesh or its index would not read ({ex.GetType().Name}: {ex.Message})";
+                return load;
+            }
+        }
+
+        /// <summary>Campaign speed step 2, on a worker: the held mesh as a base - LoadMeshBase's last step, the lowest and highest
+        /// building height, on the file already in memory.</summary>
+        /// <param name="file">The held mesh.</param>
+        /// <param name="index">Its sidecar.</param>
+        /// <param name="bytes">Its estimated deflated size.</param>
+        private static MeshBaseLoad HeldMeshBase(MapMeshFile file, MapMeshIndex index, long bytes)
+        {
+            var load = new MeshBaseLoad { Bytes = bytes };
+
+            try
+            {
+                file.Bind();
+
+                foreach (var b in file.Buildings)
+                    foreach (var code in b.Y)
+                    {
+                        if (code == MapMeshFile.NoHit) continue;
+
+                        var y = file.HeightOf(code);
+                        if (y < load.YLow) load.YLow = y;
+                        if (y > load.YHigh) load.YHigh = y;
+                    }
+
+                load.File = file;
+                load.Index = index;
+                return load;
+            }
+            catch (Exception ex)
+            {
+                load.Refused = $"the held mesh would not bind ({ex.GetType().Name}: {ex.Message})";
                 return load;
             }
         }
@@ -10855,7 +13051,12 @@ namespace QuestTree.QuestGraph
                 BaseFileBytes = plan.MeshBase?.Bytes ?? 0L,
                 CaptureOrdinal = plan.Captures,
                 Game = plan.Game ?? "",
-                AtlasPagePath = page => Path.Combine(plan.Dir, MapMeshFile.AtlasFileNameFor(plan.Key, page)),
+                // Campaign speed step 2: a page a held stop re-encoded is read from its held file - the one on disk is the last
+                // checkpoint's, and the base's index names the held one's sha
+                AtlasPagePath = page =>
+                    plan.Hold != null && plan.Hold.PendingPages.TryGetValue(page, out var held) && File.Exists(held)
+                        ? held
+                        : Path.Combine(plan.Dir, MapMeshFile.AtlasFileNameFor(plan.Key, page)),
 
                 // PART-10: trees and bushes in the model, or left out (the default)
                 IncludeFoliage = ModSettings.MeshFoliage?.Value ?? false,
@@ -10946,6 +13147,15 @@ namespace QuestTree.QuestGraph
             var done = MapMeshBuilder.SettleAccumulated(mesh);
             var staged = new Dictionary<int, CaptureAtlas>();
 
+            // Campaign speed step 2: a held stop's pages wait beside the set under .held for the checkpoint that writes the
+            // mesh naming them. A build from scratch owes nothing to the pages held before it, so those go first.
+            var hold = plan.Hold;
+            if (hold != null && !mesh.Accumulated)
+            {
+                hold.StopInProgress = true;
+                SweepHeldPages(hold);
+            }
+
             for (var i = 0; i < done.Count; i++)
             {
                 var page = done[i];
@@ -10953,9 +13163,15 @@ namespace QuestTree.QuestGraph
 
                 try
                 {
-                    var target = Staged(Path.Combine(plan.Dir, name));
+                    var target = hold != null ? HeldPagePath(plan, name) : Staged(Path.Combine(plan.Dir, name));
                     if (File.Exists(target)) File.Delete(target);
                     File.Move(page.PartPath, target);
+
+                    if (hold != null)
+                    {
+                        hold.StopInProgress = true;
+                        hold.PendingPages[page.Page] = target;
+                    }
 
                     staged[page.Page] = new CaptureAtlas
                     {
@@ -11024,6 +13240,14 @@ namespace QuestTree.QuestGraph
                 MapMeshBuilder.TruncateAtlasIndexed(mesh.File, page, mesh.Index);
                 break;
             }
+
+            // Campaign speed step 2: a held page past the atlas the mesh now names is nothing's
+            if (hold != null)
+                foreach (var gone in hold.PendingPages.Keys.Where(p => p >= plan.Atlas.Count).ToList())
+                {
+                    DeleteQuietly(hold.PendingPages[gone]);
+                    hold.PendingPages.Remove(gone);
+                }
 
             if (done.Count > 0 || carried > 0 || (mesh.AtlasPages?.Count ?? 0) > 0)
                 Plugin.LogSource?.LogInfo(
@@ -11945,8 +14169,9 @@ namespace QuestTree.QuestGraph
                 if (string.IsNullOrEmpty(stored.File)) return null;
 
                 // The meta may only name a file that is there: one deleted by hand between two
-                // captures would otherwise be named by this meta and draw as nothing.
-                return File.Exists(Path.Combine(plan.Dir, stored.File)) ? stored : null;
+                // captures would otherwise be named by this meta and draw as nothing. Campaign speed step 2: or HELD, which
+                // a checkpoint writes with the meta that names it.
+                return PictureExists(plan, stored.File) ? stored : null;
             }
 
             return null;
@@ -13002,6 +15227,15 @@ namespace QuestTree.QuestGraph
 
             /// <summary>WP4 B2: side views whose encodes are running - settled by SettleSides (barriers 3, 4, 5).</summary>
             public readonly List<SideView> PendingSides = new List<SideView>();
+
+            /// <summary>Campaign speed step 2: the campaign's held set this capture merges into and is held into instead of
+            /// written (the capture's plan and its sides' own plans alike), or null - every capture outside a campaign, and
+            /// every stop of a campaign that writes every stop.</summary>
+            public CampaignHold Hold;
+
+            /// <summary>Campaign speed step 2: this stop's build went into the hold (HoldMesh) - the meta names the held mesh and
+            /// this stop's atlas list.</summary>
+            public bool MeshHeld;
         }
 
         /// <summary>One floor's state while it is being captured.</summary>
@@ -13197,6 +15431,20 @@ namespace QuestTree.QuestGraph
             /// <summary>Campaign speed step 1 (2): side pixels whose sidecar now records the step they were seen empty
             /// from (newly, or from closer than before), for the side's line.</summary>
             public int SettledEmpty;
+
+            /// <summary>Campaign speed step 2 (review): a held floor's picture and sidecar waiting for the end of the floor loop
+            /// - developed (dirty) or kept unchanged (clean) - so a refusal by a later floor's light test leaves the hold as
+            /// it was. Taken into the hold by <see cref="HoldStashedFloors"/>.</summary>
+            public Color32[] StashPixels;
+
+            public byte[] StashDist;
+
+            public bool StashDirty;
+
+            /// <summary>Campaign speed step 2 (review): a side's sidecar as it came off disk, before HealSideDist rewrote the
+            /// copy the merge uses - what an unchanged side is held with, so every later stop heals from the stored data
+            /// exactly as a stop that reads the file does.</summary>
+            public byte[] UnhealedDist;
         }
 
         // --- the meta file ---------------------------------------------------------------------

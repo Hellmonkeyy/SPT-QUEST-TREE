@@ -44,6 +44,11 @@ namespace QuestTree.UI
             // QuestGraph/MeshProbe.cs.
             QuestGraph.MenuMeshProbe.PollFromHotkey(this);
 
+            // Campaign speed step 2 (review): a capture campaign's last write can finish after its raid, in the menu - this
+            // Update is proven to tick there, so the write's main-thread end (the upload release, the Maps tab) runs from here
+            // too, not only from the plugin object's coroutine.
+            QuestGraph.MapCapture.PollCampaignWrite();
+
             if (!ModSettings.Ready) return;
 
             var shortcut = ModSettings.OpenTracker.Value;

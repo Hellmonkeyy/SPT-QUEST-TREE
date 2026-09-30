@@ -201,6 +201,10 @@ namespace QuestTree.QuestGraph
         /// campaigns instead of rescuing them, which is the worse failure of the two.</summary>
         private static readonly float MaxCaptureWaitSeconds = (float)MapCapture.WorstCaseSeconds;
 
+        /// <summary>Campaign speed step 2 (review): seconds a stop waits for a checkpoint's write still running before any has
+        /// been measured; after one, twice its measured time (MapCapture.LastCheckpointSeconds).</summary>
+        private const double WriteWaitSeconds = 120d;
+
         /// <summary>The last stop's capture was still running when the campaign stopped waiting.</summary>
         private bool _stillCapturing;
 
@@ -240,6 +244,10 @@ namespace QuestTree.QuestGraph
             try
             {
                 while (MapCapture.IsCapturing) yield return null;
+
+                // Campaign speed step 2: the held stops, the late capture's included, start writing before the player is moved;
+                // the upload hold's release below waits for the write, as Run's own end does.
+                if (_gameWorld != null) MapCapture.StartCampaignWrite("the campaign stopped");
             }
             finally
             {
@@ -276,11 +284,37 @@ namespace QuestTree.QuestGraph
             }
 
             var still = MapCapture.IsCapturing ? " while a capture is still running" : "";
-            MapTransfer.UploadStart outcome;
 
             // Automatic capture's hold goes first (WP3 5.1): with both on the map, the campaign's own release is then
             // the one that uploads, so "one upload at the end of the campaign" is literal.
             if (_autoHold != null) ReleaseAutoHold("capture campaign ended");
+
+            // Campaign speed step 2: stops still being written (CampaignEnds above started the write when the raid ended
+            // between two stops, or a checkpoint outlived its wait) keep the hold until they are down, so the one upload
+            // reads them - the release then runs on the main thread when the write finishes, from the plugin object once the
+            // raid is gone.
+            if (MapCapture.WhenCampaignWritten(() => _campaignUploadNote = ReleaseUploadsNow(hold, map, captured, what, " after its last stops were written")))
+            {
+                _campaignUploadNote = ", 1 upload once the last stops are written";
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {what}: uploads of {map} stay held until the stops since the last checkpoint are written.");
+                return;
+            }
+
+            _campaignUploadNote = ReleaseUploadsNow(hold, map, captured, what, still);
+        }
+
+        /// <summary>The release half of <see cref="ReleaseCampaignHold"/>: the one upload (WP3) and its line, and the summary
+        /// note it comes to. Static, so a release deferred past the raid (campaign speed step 2) touches nothing of this
+        /// component. Never throws.</summary>
+        /// <param name="hold">The campaign's hold, taken.</param>
+        /// <param name="map">The campaign's map.</param>
+        /// <param name="captured">How many stops were captured.</param>
+        /// <param name="what">For the line: how the campaign ended.</param>
+        /// <param name="still">Added to the line: " while a capture is still running", or "".</param>
+        private static string ReleaseUploadsNow(MapTransfer.UploadHold hold, string map, int captured, string what, string still)
+        {
+            MapTransfer.UploadStart outcome;
 
             // Never throws: the callers are a finally and OnDestroy, and the lines after them (clearing _running) must run.
             try
@@ -300,19 +334,17 @@ namespace QuestTree.QuestGraph
                 case MapTransfer.UploadStart.Started:
                 case MapTransfer.UploadStart.Queued:
                 case MapTransfer.UploadStart.StillHeld:
-                    _campaignUploadNote = $", 1 upload at the end ({hold.Deferred} held back)";
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: {what}: 1 upload of {map} ({captured} stops, {intermediate} intermediate uploads){still}.");
-                    break;
+                    return $", 1 upload at the end ({hold.Deferred} held back)";
 
                 default:
                     var why = outcome == MapTransfer.UploadStart.SharingOff ? "sharing is off"
                         : outcome == MapTransfer.UploadStart.Declined ? "this host declines map pictures"
                         : outcome == MapTransfer.UploadStart.NoHost ? "no plugin object"
                         : "no capture was written";
-                    _campaignUploadNote = $", no upload ({why})";
                     Plugin.LogSource?.LogInfo($"QuestTree: {what}: no upload of {map} - {why} ({captured} stops).");
-                    break;
+                    return $", no upload ({why})";
             }
         }
 
@@ -661,7 +693,9 @@ namespace QuestTree.QuestGraph
             // A player who will not be sent to an extract - the setting or the rollback off - has to walk to one, so
             // they are left the walk-out reserve. "No extract qualifies" cannot be known until Finish looks, so that
             // case keeps the ordinary reserve.
-            var need = stop + extraSeconds + (ExtractEnabled() ? ExtractReserveSeconds : WalkOutReserveSeconds);
+            // Campaign speed step 2 (review): and the last checkpoint's write, which the end of a held campaign starts
+            var need = stop + extraSeconds + (float)MapCapture.LastCheckpointSeconds +
+                       (ExtractEnabled() ? ExtractReserveSeconds : WalkOutReserveSeconds);
             if (left >= need) return null;
 
             Plugin.LogSource?.LogInfo(
@@ -1006,7 +1040,7 @@ namespace QuestTree.QuestGraph
             {
                 // Campaign speed step 1 (4): a new campaign session - its first stop casts the relief, later stops reuse it.
                 // Inside the try (review), so the finally's ReleaseCampaignHold -> CampaignEnds follows it whatever happens.
-                MapCapture.CampaignBegins();
+                MapCapture.CampaignBegins(stops.Count);
 
                 _cancelRequested = false;
                 _raidTimeUnreadableSaid = false;
@@ -1035,6 +1069,41 @@ namespace QuestTree.QuestGraph
                     endedEarly = WhyOutOfTime(
                         i, stops.Count, measuredSeconds, measured, verifyNext ? (float)MapCapture.VerifyExtraSeconds : 0f);
                     if (endedEarly != null) break;
+
+                    // Campaign speed step 2: a checkpoint whose write outlived its stop's wait finishes before anything moves -
+                    // the next capture would merge into the copies it is writing. Bounded (review): twice the last checkpoint's
+                    // measured time, or 120 s before one is measured; a death, the raid's end or the key end the wait as they
+                    // end the campaign.
+                    if (MapCapture.CampaignWriting)
+                    {
+                        var writeLimit = MapCapture.LastCheckpointSeconds > 0d ? 2d * MapCapture.LastCheckpointSeconds : WriteWaitSeconds;
+                        var writeUntil = Time.realtimeSinceStartup + (float)writeLimit;
+
+                        while (MapCapture.CampaignWriting)
+                        {
+                            stopped = WhyStop();
+                            if (stopped != null || _cancelRequested) break;
+
+                            if (Time.realtimeSinceStartup >= writeUntil)
+                            {
+                                stopped = $"a checkpoint's write had not finished after {Whole((float)writeLimit)} s";
+                                break;
+                            }
+
+                            yield return null;
+                        }
+
+                        if (stopped != null) break;
+
+                        if (_cancelRequested)
+                        {
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: campaign cancelled after stop {i} of {stops.Count}; " +
+                                (ExtractEnabled() ? "going to an extract." : "going back to the start."));
+                            endedEarly = "cancelled with the key";
+                            break;
+                        }
+                    }
 
                     var stopBegan = clock.Elapsed.TotalSeconds;
 
@@ -1087,6 +1156,9 @@ namespace QuestTree.QuestGraph
                     // stop's wait is the capture's own worst case (MapCapture.WorstCaseSeconds, review F45). The last stop
                     // may also build the mesh from scratch for comparison (MeshVerifyLastStop), and waits for that too.
                     var verify = i == stops.Count - 1 && (ModSettings.MeshVerifyLastStop?.Value ?? false);
+
+                    // Campaign speed step 2: the stop the checkpoint line names
+                    MapCapture.CampaignStopIs(i + 1);
 
                     if (!MapCapture.TryStartCapture(buildMesh: true, verifyMesh: verify))
                     {
@@ -1160,6 +1232,17 @@ namespace QuestTree.QuestGraph
                 }
 
                 completed = stopped == null;
+
+                // Campaign speed step 2: the stops held since the last checkpoint start writing HERE, on a worker, before the
+                // finally moves the player to an extract or back (review: not waited for - the held set cannot change after
+                // the last stop, so the teleport need not wait); the finally's release of the upload hold waits for the write
+                // (MapCapture.WhenCampaignWritten), so the one upload sees it. Every end that leaves a world gets it (done,
+                // early for time, cancelled, a death, a failed stop); a capture still running (a death or a timeout mid-stop)
+                // is waited for by RestoreWhenDone, which starts the write after it.
+                if (_gameWorld != null && !MapCapture.IsCapturing)
+                    MapCapture.StartCampaignWrite(stopped != null ? $"the campaign stopped ({stopped})"
+                        : endedEarly != null ? $"the campaign ended early ({endedEarly})"
+                        : "the campaign's last stop");
             }
             finally
             {
