@@ -894,21 +894,25 @@ namespace QuestTree
                     "and no capture is taken at all until you have moved 15 m from the last one.",
                     new AcceptableValueRange<int>(2, 120)));
 
+            // A NEW key (was "Capture resolution", default 8192, the old ceiling): a config saved before 1.19.0
+            // holds 8192, which would keep Customs at 7.32 px/m - under the 3D view's 8 px/m threshold for
+            // taking roofs from the picture - so the old value is left behind rather than carried over.
+            // Rollback: the old key, default and list.
             CaptureResolution = config.Bind(
-                "Map", "Capture resolution", 8192,
+                "Map", "Capture resolution (long side)", 16384,
                 new ConfigDescription(
-                    "Longest side, in pixels, of a captured map picture. 8192 is the sharpest the mod " +
-                    "will draw and what a map of Customs is worth - a quarter of a metre to the pixel, " +
-                    "where a vehicle is 16 pixels across; 4096 halves that and 2048 quarters it, each " +
-                    "step making the files four times smaller and the raid's frames cheaper, which is " +
-                    "the setting for a weak machine or a capture refused for being too large. None of " +
-                    "them ever stretches a map past four pixels per metre - past that there is no more " +
-                    "detail in the scene to record, only a bigger file. A capture also works to a memory " +
-                    "budget of 256 MiB per floor, and on a big map that budget, not this setting, decides " +
-                    "the scale: Interchange comes down to about 3 pixels per metre, and the capture's header " +
-                    "line in the log says so whenever the budget has lowered one. What is shared with a host or " +
+                    "Longest side, in pixels, of a captured map picture. 16384 is the sharpest the mod " +
+                    "will draw and lets a map of Customs have an eighth of a metre to the pixel (8 pixels " +
+                    "per metre), the most any capture uses and what the 3D map needs to draw roofs from the " +
+                    "picture; 8192 halves that, 4096 quarters it and 2048 is an eighth, each step making the " +
+                    "files four times smaller and the raid's frames cheaper - the setting for a weak machine " +
+                    "or a capture refused for being too large. A graphics card that cannot hold a 16384 " +
+                    "texture is held to its own largest. A capture also works to a memory budget of 1 GiB " +
+                    "per floor, and on a big map that budget, not this setting, decides the scale: " +
+                    "Interchange comes down to about 6.5 pixels per metre, and the capture's header line in " +
+                    "the log says so whenever the budget has lowered one. What is shared with a host or " +
                     "shipped in the release is downscaled to 2048 whatever this says.",
-                    new AcceptableValueList<int>(2048, 4096, 8192)));
+                    new AcceptableValueList<int>(2048, 4096, 8192, 16384)));
 
             MapPictureSource = config.Bind(
                 "Map", "Map pictures come from", PictureSource.PreferDynamicMaps,

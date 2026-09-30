@@ -14,8 +14,9 @@ What it checks, per capture folder <key>/:
   1. <key>.map.json parses, is schemaVersion 1, and its "map" is the folder name (case-insensitive).
   2. every floor's PNG exists; the IHDR width/height read out of the file's first chunk equal the
      meta's width/height; those in turn equal ceil(extent span * pxPerMetre) on each axis within 1
-     px; the file is under 48 MB; floor levels are distinct and names non-empty.
-  3. if zones\\<key>.json carries a v2 extent, the capture's four edges match it within 0.5 m and the
+     px; the file is under 192 MB; floor levels are distinct and names non-empty.
+  3. if zones\\<key>.json carries a v2 extent, the capture's four edges match it within 0.5 m (maxX and
+     minZ within 0.5 m plus 4 px, where the capture widens to its rounded picture) and the
      floor LEVELS are the same set, and the zone file's source/sampledAt are printed beside the
      capture's capturedAt. A v1 zone file (every shipped seed) or a missing one is a WARN, not a
      failure: it means this capture cannot be cross-checked yet, which is the normal state until the
@@ -205,9 +206,14 @@ ZONES = Path(_POSITIONAL[1]) if len(_POSITIONAL) > 1 else Path(
     r"C:\Games\SPT\SPT_Runtime\user\mods\QuestTree\zones")
 
 SCHEMA_VERSION = 1     # the capture-meta shape this script reads
-MAX_PNG_BYTES = 48 * 1024 * 1024  # MapCapture.MaxFloorPngBytes: 0.25 m/px floors run 10-25 MB
-PIXEL_TOLERANCE = 1     # px, on each axis, against ceil(span * pxPerMetre)
-EDGE_TOLERANCE = 0.5    # m, on each of the four edges, against the zone file's extent
+MAX_PNG_BYTES = 192 * 1024 * 1024  # MapCapture.MaxFloorPngBytes: 0.125 m/px floors, ~40-100 MB
+PIXEL_TOLERANCE = 1     # px, on each axis, a FLOOR against ceil(extent span * pxPerMetre) - exact since the
+                        # capture widens its extent to its rounded picture (MapCapture.PictureExtent)
+SIDE_PIXEL_TOLERANCE = 4  # px, a SIDE against ceil(box span * pxPerMetre): the capture rounds a side up to a
+                          # multiple of 4 (MapCapture.SidePictureSide); MapStore.SidePixelTolerance
+EDGE_TOLERANCE = 0.5    # m, on minX and maxZ, against the zone file's extent
+PICTURE_BLOCK = 4       # px: maxX and minZ may also sit up to this many pixels (4 / pxPerMetre m) outside the
+                        # zone's, where the capture widened its extent east and south to its rounded picture
 SIDECAR_STALE_SECONDS = 15  # s: a picture and its distance sidecar are staged one frame apart (review F09)
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -675,7 +681,7 @@ def check_floors(meta, folder, key, extent, px_per_metre, errors, warnings):
     return levels, pixels or "-", total
 
 
-def check_zone(key, extent, levels, errors, warnings):
+def check_zone(key, extent, levels, errors, warnings, px_per_metre=None):
     """Cross-checks the capture against the server's zone file. Returns (column, rotation): the
     summary line's zones column - what matched, or why nothing could be compared - and the zone
     file's own rotation when there was one to read."""
@@ -709,11 +715,19 @@ def check_zone(key, extent, levels, errors, warnings):
                 errors.append(f"{key}: {path.name}'s extent.{field} is missing or not a number")
                 ok = False
                 continue
+            # maxX moves east and minZ south, by under PICTURE_BLOCK pixels, when the capture widens its
+            # extent to its rounded picture (MapCapture.PictureExtent); only outward, and only those two.
+            tolerance = EDGE_TOLERANCE
+            if px_per_metre:
+                if field == "maxX" and extent[index] >= theirs:
+                    tolerance = EDGE_TOLERANCE + PICTURE_BLOCK / px_per_metre
+                elif field == "minZ" and extent[index] <= theirs:
+                    tolerance = EDGE_TOLERANCE + PICTURE_BLOCK / px_per_metre
             drift = abs(extent[index] - theirs)
-            if drift > EDGE_TOLERANCE:
+            if drift > tolerance:
                 ok = False
                 errors.append(f"{key}: extent.{field} {extent[index]:g} is {drift:.2f} m from the "
-                              f"zone file's {theirs:g} (tolerance {EDGE_TOLERANCE} m) - the picture "
+                              f"zone file's {theirs:g} (tolerance {tolerance:.3f} m) - the picture "
                               f"and the world disagree about where this map's edge is")
     else:
         ok = False  # already reported by check_extent
@@ -2483,7 +2497,7 @@ def check_sides(meta, folder, key, extent, errors, warnings):
 
         want_w = math.ceil((max(along_r) - min(along_r)) * ppm)
         want_h = math.ceil((max(along_u) - min(along_u)) * ppm)
-        if abs(width - want_w) > PIXEL_TOLERANCE or abs(height - want_h) > PIXEL_TOLERANCE:
+        if abs(width - want_w) > SIDE_PIXEL_TOLERANCE or abs(height - want_h) > SIDE_PIXEL_TOLERANCE:
             errors.append(f"{where} is {width}x{height} but the box at {ppm:g} px/m wants {want_w}x{want_h}")
 
         sizes.append(f"{direction} {width}x{height}")
@@ -2553,7 +2567,7 @@ def check_capture(folder, errors, warnings):
     if PIXELS:
         sides += "; " + check_pixels(meta, folder, key, errors, warnings)
 
-    zones, rotation = check_zone(key, extent, levels, errors, warnings)
+    zones, rotation = check_zone(key, extent, levels, errors, warnings, px_per_metre)
     meta_rotation = number(meta.get("rotation"))
     if rotation is not None and meta_rotation is not None and abs(meta_rotation - rotation) > 0.01:
         warnings.append(f"{key}: rotation {meta_rotation:g} differs from the zone file's "

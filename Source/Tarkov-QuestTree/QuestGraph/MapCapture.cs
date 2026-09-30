@@ -99,7 +99,7 @@ namespace QuestTree.QuestGraph
     /// encode, so the work is spread one step to a frame: each tile's render and readback, then, per
     /// floor, its exposure measurement, its development into eight bits - itself a step for the
     /// previous picture, one for that picture's sidecar and one per band of
-    /// <see cref="SmoothingBandRows"/> rows, because the whole of it is a second and a half - its
+    /// <see cref="SmoothingBandPixels"/> worth of rows, because the whole of it is a second and a half - its
     /// encode and write, and its sidecar. None of it can move off the main
     /// thread - ReadPixels, GetPixels, SetPixels32 and EncodeToPNG are all main-thread Texture2D
     /// calls - so a capture is a handful of short hitches on a key the player pressed, rather than
@@ -112,17 +112,19 @@ namespace QuestTree.QuestGraph
     /// not Unity's, so pictures are compared by pixels, not bytes. Unity's encoder remains the fallback and the
     /// rollback (ManagedPngEncode).
     ///
-    /// Memory is BUDGETED, not hoped for. One floor may work in CaptureMemoryBudgetBytes - 256 MB - of
+    /// Memory is BUDGETED, not hoped for. One floor may work in CaptureMemoryBudgetBytes - 1024 MiB - of
     /// arrays and textures, at WorkingSetBytesPerPixel (26 B a pixel: the float buffer, the drawn mask,
     /// two sets of distances, the picture, the sidecar texture and, on a merge, the previous picture),
     /// and the pixels per metre come down in half-metre steps until the floor fits. The figures below
     /// are of the harvested RECTANGLE, not of a map name - the rectangle is what the arithmetic sees,
     /// and a re-harvest moves it: a 965x925 m one (Interchange's, as this install measured it) at
-    /// 4 px/m is 3860x3700 and 354 MB a floor, which is exactly what died in a raid - "GetPixels:
-    /// scripting array creation failed" on its first floor and OutOfMemoryException on the other two -
-    /// and it comes down through 3.5 px/m (271 MB, still over) to 3 px/m and 199 MB. A 1118x539 m one
-    /// (Customs) at 4 px/m is 239 MB and is not touched. (Every figure here is what the capture header
-    /// prints: mebibytes, the way the code divides.)
+    /// 8 px/m is 7720x7400 and 1417 MiB a floor, and it comes down through 7.5 and 7 px/m (1246 and
+    /// 1085 MiB, still over) to 6.5 px/m, 6276x6016 and 936 MiB. A 1118x539 m one (Customs) at 8 px/m
+    /// is 8944x4312 and 956 MiB and is not touched. (Every figure here is what the capture header
+    /// prints: mebibytes, the way the code divides, of the sizes after PictureSide's rounding.) Why a
+    /// budget at all: at 4 px/m and no budget, that Interchange rectangle's 354 MiB floor died in a raid
+    /// - "GetPixels: scripting array creation failed" on its first floor and OutOfMemoryException on the
+    /// other two.
     ///
     /// What is outside that budget and small: the 34 MB half-float staging texture (one per CAPTURE),
     /// two 32 KB sample rows, a band's worth of Color32 and the encoded PNG. What is no longer in it at
@@ -162,20 +164,46 @@ namespace QuestTree.QuestGraph
         /// larger tile would be a longer hitch for no gain.</summary>
         private const int TileSize = 2048;
 
-        /// <summary>Most pixels per metre, whatever the resolution setting allows. Four - a quarter of
-        /// a metre to the pixel.
+        /// <summary>Most pixels per metre, whatever the resolution setting allows. Eight - an eighth of
+        /// a metre to the pixel. Rollback: 4f (the value until 1.19.0), which with the rest of the
+        /// capture unchanged writes 0.25 m/px pictures again.
         ///
         /// Two was the first value, and the campaign capture of Customs at half a metre to the pixel is
-        /// what argued it up: the buildings, vehicles and trees the LOD fix brought back are read at
-        /// ten to forty pixels across at 0.5 m/px, which is enough to see that a warehouse is there and
-        /// not enough to tell one door from the next. At 0.25 m/px a 4 m vehicle is 16 px and a
-        /// stairwell is visible. Past four there is genuinely no more detail in the scene to record -
-        /// the terrain base map and the LOD meshes run out - only a bigger file.
+        /// what argued it up to four: the buildings, vehicles and trees the LOD fix brought back are
+        /// read at ten to forty pixels across at 0.5 m/px, which is enough to see that a warehouse is
+        /// there and not enough to tell one door from the next. At 0.25 m/px a 4 m vehicle is 16 px.
+        ///
+        /// Eight because of what the picture is now FOR. Four was judged by the scene's detail - the
+        /// terrain base map and the LOD meshes run out not far past it - but the picture is the one
+        /// part of a capture that carries the game's own light (its sun and shadows, graded), and the
+        /// 3D view draws roofs and ground from it at close zoom, where 0.25 m/px is visibly blocky; the
+        /// 3D view only takes roofs from a picture of at least 8 px/m (Map3DView.RoofPictureMinPpm).
+        /// The cost is four times the pixels, which is what the larger CaptureMemoryBudgetBytes,
+        /// MaxFloorPngBytes, EncodeWaitSeconds and FloorPhaseSeconds pay for; the viewer holds it
+        /// block-compressed (DynamicMapsLibrary), which is what PictureSide's multiple of four is for.
         ///
         /// It is a CAP, not a target: it binds only where the long-side setting does not, which is
-        /// every map under about 2 km across at the 8192 setting, and it is what stops Factory's
-        /// two-hundred-metre extent asking for forty pixels per metre.</summary>
-        private const float MaxPixelsPerMetre = 4f;
+        /// every map under about 2 km across at the 16384 setting, and it is what stops Factory's
+        /// two-hundred-metre extent asking for eighty pixels per metre. A saved setting of 8192 still
+        /// binds first on anything over a kilometre: Customs is then 7.32 px/m (8188 / 1118 m).
+        ///
+        /// Tile time per campaign stop goes up about 4x with it, so the first Customs campaign at 8 px/m
+        /// has to be timed against the raid timer.</summary>
+        private const float MaxPixelsPerMetre = 8f;
+
+        /// <summary>Whether a picture's width and height are rounded UP to a multiple of
+        /// <see cref="PictureBlock"/> (see <see cref="PictureSide"/>), the floor's extent widened east and
+        /// south by the added pixels so a pixel is still exactly 1/ppm metres. Rollback: false, which is
+        /// ceil(metres x ppm) and the harvested extent as they were - the only setting under which a
+        /// capture from before it can still be merged into. Static readonly, not const, for
+        /// FillWaterCyan's reason.</summary>
+        private static readonly bool AlignPictureSides = true;
+
+        /// <summary>What a picture's sides are rounded to: 4, the block of DXT1/DXT5. The viewer
+        /// (DynamicMapsLibrary.BuildRasterSprite) block-compresses a picture only when both sides are
+        /// multiples of four - a quarter of the GPU memory of RGBA32 - and keeps anything else RGBA32,
+        /// which at 8 px/m is 154 MB for Customs' ground alone.</summary>
+        private const int PictureBlock = 4;
 
         /// <summary>Whether the cyan water quads are painted out. The off switch for the whole step -
         /// <see cref="Inpaint"/> and the classifier below - for the case where a map's real content is
@@ -210,23 +238,26 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Square windows the inpainting tries, in pixels a side, smallest first: the mean of
         /// the non-cyan drawn pixels in the first one that holds any replaces the quad. 5 keeps a
-        /// puddle's edge looking like the ground it is in, 17 reaches across the biggest pool on
-        /// Customs at four pixels to the metre; a pixel with nothing but cyan and holes within 17 px is
-        /// marked undrawn and left for another capture to fill.</summary>
-        private static readonly int[] InpaintWindows = { 5, 9, 17 };
+        /// puddle's edge looking like the ground it is in, 17 reached across the biggest pool on
+        /// Customs at four pixels to the metre, and 33 is the same two metres at eight (17 alone would
+        /// reach only a metre there); a pixel with nothing but cyan and holes within 33 px is marked
+        /// undrawn and left for another capture to fill. Rollback: { 5, 9, 17 }. InpaintReach (the
+        /// tile-skip halo of a fill) follows the largest, 16 px.</summary>
+        private static readonly int[] InpaintWindows = { 5, 9, 17, 33 };
 
-        /// <summary>Cyan pixels repainted per frame. Each is up to 289 samples of the float buffer, so
+        /// <summary>Cyan pixels repainted per frame. Each is up to 1,089 samples (the 33 window) of the float buffer, so
         /// twenty thousand of them is about the same work as one band of development - the unit the
         /// frame budget is built in.</summary>
         private const int InpaintChunkPixels = 20000;
 
         /// <summary>How many samples a side each output pixel is rendered from: 2, so every pixel is
         /// the average of four. The tile target stays 2048 and covers half the metres it did, which
-        /// quadruples the tile count - Customs goes from 3x2 to 6x4 tiles - and leaves the float buffer,
+        /// quadruples the tile count - Customs is 5x3 tiles at 4 px/m (256 m a tile) and 9x5 at 8 px/m
+        /// (128 m a tile) - and leaves the float buffer,
         /// the drawn mask, the distances and everything downstream at the output resolution.
         ///
         /// It is here because of what a single sample per pixel looks like on a photographed map at a
-        /// quarter of a metre to the pixel: every railing, wire, roof edge and tree trunk is a hard
+        /// quarter of a metre to the pixel (where it was judged; an eighth is no different): every railing, wire, roof edge and tree trunk is a hard
         /// staircase, and no amount of smoothing afterwards can recover the coverage information that
         /// one sample never had. Supersampling is the only antialiasing that works on everything -
         /// geometry edges, alpha-tested foliage and texture detail alike - and unlike MSAA it does not
@@ -439,9 +470,9 @@ namespace QuestTree.QuestGraph
         /// <summary>Reach of the smoothing kernel in pixels: 2, a 5x5 window. What it is for is the
         /// speckle left in a photographed map - terrain detail textures that tile every couple of
         /// metres, foliage billboards, the dither in a half-float readback - none of which is
-        /// information about the map, all of which survives a percentile stretch. A 5x5 window at
-        /// 0.25 m/px is a metre and a quarter across, which is smaller than anything on a map that
-        /// matters and bigger than the speckle.</summary>
+        /// information about the map, all of which survives a percentile stretch. A 5x5 window is a
+        /// metre and a quarter across at 0.25 m/px and 0.625 m at 0.125 m/px (MaxPixelsPerMetre 8),
+        /// smaller than anything on a map that matters and still bigger than the speckle.</summary>
         private const int SmoothingRadius = 2;
 
         /// <summary>Spread of the spatial weights, in pixels. 1.2 puts the corner of a 5x5 window at
@@ -476,14 +507,21 @@ namespace QuestTree.QuestGraph
         /// 40-80 ms. Every pixel then gained a reach sample and a despeckle window on top of that
         /// measurement, so 32 rows is now over the 40 ms that a capture's other steps are budgeted
         /// against - hence half of it, 13-20 ms on .NET and 20-45 ms in a raid, which is the same order
-        /// as the tile readbacks Phase 0 measured at 10-61 ms.
+        /// as the tile readbacks Phase 0 measured at 10-61 ms. Those are 4 px/m figures: at 8 px/m a row
+        /// is twice as wide (Customs 8944 px), so a band of sixteen is roughly twice the time - not yet
+        /// measured in a raid.
         ///
         /// The band is a WORK SPLIT and nothing else: the luminance buffer carries the filter's halo
         /// either side (<see cref="FillLuminance"/>) and the smoothing reads the whole float buffer, so
         /// the picture is byte for byte the same at any band size. It costs a hundred and thirty-five
         /// frames instead of sixty-eight on a map that size, which is another second of wall clock and
-        /// a shorter hitch in each of them.</summary>
-        private const int SmoothingBandRows = 16;
+        /// a shorter hitch in each of them.
+        ///
+        /// Counted in PIXELS, not rows (rollback: a fixed 16 rows): 16 x 4472 is what sixteen rows cost
+        /// on Customs at 4 px/m, the band the measurement above was taken on. At 8 px/m a Customs row is
+        /// 8944 px, so the same work is 8 rows (<see cref="DevelopBandRows"/>), and a wider or narrower
+        /// picture gets a band of the same cost rather than the same height.</summary>
+        private const int SmoothingBandPixels = 16 * 4472;
 
         /// <summary>The spatial weights, built once: (2r+1)^2 of them, indexed row-major from the
         /// window's top-left.</summary>
@@ -498,8 +536,11 @@ namespace QuestTree.QuestGraph
 
         private const float SmoothingRangeScale = (SmoothingRangeSteps - 1) / SmoothingRangeCut;
 
-        /// <summary>Rows developed in one frame: fewer when every pixel costs a 5x5 window.</summary>
-        private static int DevelopBandRows => SmoothingEnabled ? SmoothingBandRows : PixelBandRows;
+        /// <summary>Rows developed in one frame: fewer when every pixel costs a 5x5 window - as many as
+        /// fit <see cref="SmoothingBandPixels"/> across this picture's width, never under 4.</summary>
+        /// <param name="plan">The floor's or side's plan, for its width.</param>
+        private static int DevelopBandRows(Plan plan) =>
+            SmoothingEnabled ? Math.Max(4, SmoothingBandPixels / Math.Max(1, plan.WidthPx)) : PixelBandRows;
 
         /// <summary>WP1: the rollback switch for tile skipping. Off = exactly the f1aa04f path: the previous picture
         /// loaded in Develop, every tile rendered, the scene held for every floor. Static readonly, not const - see
@@ -545,8 +586,8 @@ namespace QuestTree.QuestGraph
             OutsideMask = 2,
         }
 
-        /// <summary>Most managed and texture memory one floor of a capture may work in. Two hundred and
-        /// fifty-six megabytes.
+        /// <summary>Most managed and texture memory one floor of a capture may work in. 1024 MiB.
+        /// Rollback: 256 MiB, the value with MaxPixelsPerMetre 4.
         ///
         /// Interchange is why it exists - or rather its harvested RECTANGLE is, which is what the
         /// arithmetic below sees and what a re-harvest can move: 965x925 m as this install measured it.
@@ -565,11 +606,16 @@ namespace QuestTree.QuestGraph
         /// through GetPixelData, which is a view of the texture's own memory (see ReadSampleRow,
         /// CopyColours). What is left for this number to guard is the PEAK alone, a handful of long-lived
         /// arrays allocated once a floor and freed with a collect between floors, and that is a far
-        /// easier thing for an allocator to place. At 256 MB a 1118x539 m rectangle (Customs) keeps its
-        /// 4 px/m and its 239 MB - which also keeps the captures already on disk mergeable - and a
-        /// 965x925 m one (Interchange) walks 4 px/m (354 MB) past 3.5 (271 MB, still over) and lands at
-        /// 3 px/m and 199 MB.</summary>
-        private const long CaptureMemoryBudgetBytes = 256L * 1024L * 1024L;
+        /// easier thing for an allocator to place. At 256 MiB and 4 px/m a 1118x539 m rectangle (Customs)
+        /// kept its 4 px/m and its 239 MiB, and a 965x925 m one (Interchange) landed at 3 px/m and 199 MiB.
+        ///
+        /// It is 1024 because MaxPixelsPerMetre went from 4 to 8, four times the pixels: Customs at 8 px/m
+        /// is 8944x4312 and 956 MiB and is not touched, and Interchange walks 8, 7.5 and 7 px/m (1417,
+        /// 1246, 1085 MiB) and lands at 6.5 px/m and 936 MiB. The largest single allocation is the float
+        /// buffer, 12 of the 26 bytes - 463 MB on Customs - which the large-object heap has to place in
+        /// one piece; an OutOfMemoryException there is caught and fails that floor alone (BeginFloor), and
+        /// EFT disables the GC in a raid, which is why the floors collect by hand (CollectGarbage).</summary>
+        private const long CaptureMemoryBudgetBytes = 1024L << 20;
 
         /// <summary>What one output pixel costs while its floor is being captured, in bytes, counted
         /// term by term so the budget can be checked by hand:
@@ -748,14 +794,15 @@ namespace QuestTree.QuestGraph
         /// than exactly on it.</summary>
         private const float FarClipSlack = 1f;
 
-        /// <summary>A floor's PNG is not written past this. 48 MB, four times the first value, because
-        /// the pixel count went up four times with <see cref="MaxPixelsPerMetre"/>: Customs is
-        /// 4472x2156 now, 9.6 million pixels, which a PNG of a photographed map encodes to somewhere
-        /// around 10-25 MB. Hitting 48 still means something is wrong - noise rather than a map, or a
-        /// resolution nobody wants - and the local capture is the only thing this bounds: what travels
-        /// to a host and what ships in the zip are downscaled to 2048 long side by MapTransfer and
-        /// package.ps1 respectively.</summary>
-        private const int MaxFloorPngBytes = 48 * 1024 * 1024;
+        /// <summary>A floor's PNG is not written past this. 192 MiB (rollback: 48 MiB), four times the
+        /// last value, because the pixel count went up four times again with
+        /// <see cref="MaxPixelsPerMetre"/> 4 -> 8: Customs was 4472x2156, 9.6 million pixels, which a PNG
+        /// of a photographed map encoded to somewhere around 10-25 MB, and is 8944x4312 now, 38.6
+        /// million, so somewhere around 40-100 MB. Hitting 192 still means something is wrong - noise
+        /// rather than a map, or a resolution nobody wants - and the local capture is the only thing
+        /// this bounds: what travels to a host and what ships in the zip are downscaled to 2048 long
+        /// side by MapTransfer and package.ps1 respectively.</summary>
+        private const int MaxFloorPngBytes = 192 * 1024 * 1024;
 
         /// <summary>WP4 B2: rollback for the managed encode. False = EncodeToPNG on the main thread for every floor, side
         /// and sidecar, exactly as before (the per-floor Texture2D, FinishFloor, WriteSidecar, FinishSide). Static
@@ -772,8 +819,10 @@ namespace QuestTree.QuestGraph
         private const PngEncoder.Filter PngFilter = PngEncoder.Filter.Adaptive;
 
         /// <summary>WP4 B2: how long a settle waits, a frame at a time, for an encode before it falls back to Unity's
-        /// encoder for that file.</summary>
-        private const double EncodeWaitSeconds = 30d;
+        /// encoder for that file. 90 s (rollback: 30 s): an encode's time goes with its pixels, four times as many
+        /// at MaxPixelsPerMetre 8, and a fallback is Unity's encoder on the MAIN thread - a far longer freeze than the
+        /// wait it would save. Two of these waits are in <see cref="WorstCaseSeconds"/>.</summary>
+        private const double EncodeWaitSeconds = 90d;
 
         /// <summary>WP4 B2: a managed file failed its round trip this session - every later picture is encoded by Unity.</summary>
         private static bool _managedPngOff;
@@ -1007,8 +1056,13 @@ namespace QuestTree.QuestGraph
         /// <summary>Seconds the floor phase may take before the floors not yet started are skipped (review F45),
         /// and the overrun a floor that started in time may take before it too is abandoned. With the side
         /// phase's cap and the mesh watchdog this bounds a capture at <see cref="WorstCaseSeconds"/>, which is
-        /// what the campaign waits for.</summary>
-        internal const double FloorPhaseSeconds = 70d;
+        /// what the campaign waits for.
+        ///
+        /// 180 s (rollback: 70 s). Nearly all of a floor's time goes with its pixels - the tiles (Customs 9x5 of
+        /// them at 8 px/m against 5x3 at 4, about 32 s a full floor at ~720 ms a tile), the development and the
+        /// encode - and those went up four times with MaxPixelsPerMetre 4 -> 8, so the 70 s that let a multi-floor
+        /// map finish would now cut its upper floors every time.</summary>
+        internal const double FloorPhaseSeconds = 180d;
 
         private const double FloorPhaseOverrun = 1.25d;
 
@@ -1108,17 +1162,19 @@ namespace QuestTree.QuestGraph
         /// <summary>The longest a capture can run with every cap in force (review F45): floors, the stored mesh's load
         /// (WP2), mesh watchdog and grace, the atlas encode wait, sides, the uncapped finishing steps, the wait for an
         /// upload's read before the commit (WP3), and the two encode settles no phase cap covers (WP4: the last floor's
-        /// and the last side's managed encodes, each waited for up to EncodeWaitSeconds after its phase). 600 s with
-        /// today's numbers. The campaign waits this long for a stop, so a slow capture is never taken for a stuck one.</summary>
+        /// and the last side's managed encodes, each waited for up to EncodeWaitSeconds after its phase). 995 s with
+        /// today's numbers (600 s before the 8 px/m ground raised FloorPhaseSeconds and EncodeWaitSeconds). The
+        /// campaign waits this long for a stop, so a slow capture is never taken for a stuck one; it is a ceiling for a
+        /// hung capture, not what a stop takes.</summary>
         internal const double WorstCaseSeconds =
-            FloorPhaseSeconds * FloorPhaseOverrun +                 //  87.5
+            FloorPhaseSeconds * FloorPhaseOverrun +                 // 225
             MeshBaseWaitSeconds +                                   //  20 (WP2: the stored mesh's load)
             MeshWatchdogSeconds + MeshWatchdogGraceSeconds +        // 215
             AtlasEncodeWaitSeconds +                                //  60
-            SidePhaseSeconds * SidePhaseOverrun +                   //  87.5
+            SidePhaseSeconds * SidePhaseOverrun +                   // 225 (the floors' numbers)
             FinishAllowanceSeconds +                                //  60
             CommitWaitSeconds +                                     //  10 (WP3: an upload's read before the commit)
-            2 * EncodeWaitSeconds;                                  //  60 (WP4: the last floor's and last side's settle)
+            2 * EncodeWaitSeconds;                                  // 180 (WP4: the last floor's and last side's settle)
 
         private Camera _camera;
 
@@ -1955,7 +2011,13 @@ namespace QuestTree.QuestGraph
                 }
 
                 var cap = Resolution();
-                var wanted = (float)Math.Min(cap / longSide, MaxPixelsPerMetre);
+
+                // The cap less one block when the sides are rounded: ceil(longSide x ppm) can land a pixel
+                // over what cap / longSide promises (float), and rounding that up to a multiple of four would
+                // then pass the cap - and a picture over DynamicMapsLibrary.MaxPictureSide is refused by the
+                // viewer. Resolution() hands back a multiple of four, so cap - 4 rounds up to at most cap.
+                var capPx = AlignPictureSides ? cap - PictureBlock : cap;
+                var wanted = (float)Math.Min(capPx / longSide, MaxPixelsPerMetre);
                 var ppm = Budget(wanted, widthM, heightM, out var budgetNote);
 
                 if (!(ppm > 0f))
@@ -1966,15 +2028,18 @@ namespace QuestTree.QuestGraph
                     return false;
                 }
 
+                var widthPx = PictureSide(widthM, ppm);
+                var heightPx = PictureSide(heightM, ppm);
+
                 plan = new Plan
                 {
                     Key = key,
                     Dir = dir,
-                    Extent = extent,
+                    Extent = AlignPictureSides ? PictureExtent(extent, widthPx, heightPx, ppm) : extent,
                     Cap = cap,
                     Ppm = ppm,
-                    WidthPx = (int)Math.Ceiling(widthM * ppm),
-                    HeightPx = (int)Math.Ceiling(heightM * ppm),
+                    WidthPx = widthPx,
+                    HeightPx = heightPx,
                     MeshFile = MapMeshFile.FileNameFor(key),
                 };
 
@@ -1988,8 +2053,8 @@ namespace QuestTree.QuestGraph
                 }
 
                 // Counted in SAMPLES, not output pixels: a tile is 2048 samples, which at
-                // SupersampleFactor 2 is 1024 output pixels, so a Customs-sized floor takes 6x4 tiles
-                // where one sample a pixel took 3x2.
+                // SupersampleFactor 2 is 1024 output pixels, so a Customs-sized floor takes 9x5 tiles
+                // at 8 px/m (5x3 at 4 px/m, where one sample a pixel took 3x2).
                 plan.TilesX = (plan.SampleWidth + TileSize - 1) / TileSize;
                 plan.TilesY = (plan.SampleHeight + TileSize - 1) / TileSize;
 
@@ -2100,7 +2165,8 @@ namespace QuestTree.QuestGraph
 
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: {key} capture geometry: extent {F(extent.MinX)},{F(extent.MinZ)}.." +
-                    $"{F(extent.MaxX)},{F(extent.MaxZ)} ({extent.Source}), cap {cap}, " +
+                    $"{F(extent.MaxX)},{F(extent.MaxZ)} ({extent.Source}), picture extent " +
+                    $"{F(plan.Extent.MinX)},{F(plan.Extent.MinZ)}..{F(plan.Extent.MaxX)},{F(plan.Extent.MaxZ)}, cap {cap}, " +
                     $"prepared in {Ms(clock.Elapsed.TotalMilliseconds)} ms.");
 
                 return true;
@@ -2190,7 +2256,9 @@ namespace QuestTree.QuestGraph
 
                 // Three floats per pixel, not a texture: the tiles arrive as linear light and the
                 // exposure that turns them into eight bits cannot be decided until the whole floor is
-                // in. 2360x2040 is 58 MB of it, freed the moment the floor is written.
+                // in. Customs at 8 px/m, 8944x4312, is 463 MB of it, freed the moment the floor is
+                // written. Int arithmetic is safe: Resolution() holds a side to 16384, and
+                // 16384 x 16384 x 3 = 805,306,368 is under int.MaxValue.
                 floor.Pixels = new float[plan.WidthPx * plan.HeightPx * 3];
 
                 // Which of those pixels the camera actually drew, and how far each was from the
@@ -4453,7 +4521,8 @@ namespace QuestTree.QuestGraph
 
                 // Straight into ONE byte a pixel. The old path decoded the whole sidecar into a
                 // Color32 array first - four bytes a pixel, 31 MB on a floor of a 965x925 m rectangle at
-                // the 3 px/m its memory budget settles that map on - to read one channel out of it,
+                // the 3 px/m its memory budget settled that map on at 4 px/m (144 MiB at today's 6.5) -
+                // to read one channel out of it,
                 // which is most of what made the merge unaffordable.
                 var red = new byte[plan.WidthPx * plan.HeightPx];
                 if (!CopyRed(texture, red, plan, floor)) return;
@@ -5048,7 +5117,7 @@ namespace QuestTree.QuestGraph
             // WP1 (2.9): a floor that rendered no tile after a load before the tiles has no drawn pixel, so none is
             // taken and no band needs the luminance buffer or the smoothing - the picture is the same at any band
             // height, so it goes in PixelBandRows at a time.
-            floor.BandRows = floor.Tiles == 0 && floor.PreviousLoaded ? PixelBandRows : DevelopBandRows;
+            floor.BandRows = floor.Tiles == 0 && floor.PreviousLoaded ? PixelBandRows : DevelopBandRows(plan);
 
             if (!DevelopBegin(plan, floor)) yield break;
 
@@ -5350,8 +5419,8 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>How reachable one output pixel is, 0 to 1, sampled from the mask with bilinear
-        /// interpolation - the cells are eight pixels across at a quarter of a metre to the pixel, and
-        /// nearest-cell sampling would draw the ramp as a staircase of 8-pixel blocks.</summary>
+        /// interpolation - the cells are sixteen pixels across at an eighth of a metre to the pixel, and
+        /// nearest-cell sampling would draw the ramp as a staircase of 16-pixel blocks.</summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="col">The pixel's column.</param>
         /// <param name="row">The pixel's row in texture order, counting from the bottom.</param>
@@ -6469,8 +6538,8 @@ namespace QuestTree.QuestGraph
         /// No copy of the buffer and no halo bookkeeping: the whole float buffer is in memory and this
         /// only ever READS it, writing its result into the band's Color32 block by way of
         /// <see cref="Grade"/>. That is the one design decision here worth stating - the alternative
-        /// was a second 116 MB float buffer at 0.25 m/px, on top of a merge that already peaks near
-        /// 300 MB.
+        /// was a second float buffer - 116 MB on Customs at 0.25 m/px, 463 MB at 0.125 m/px - on top of a
+        /// merge that already peaks near the whole budget.
         /// </summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="floor">The floor being developed, for its pixels, its drawn mask and the band's
@@ -6601,7 +6670,7 @@ namespace QuestTree.QuestGraph
         /// an edge to it, so every speckle survives the smoothing untouched. What is left after that
         /// pass is single bright or black pixels - a specular glint on wet metal, a lamp seen end-on,
         /// one sample of sky through a gap in a roof - and at a quarter of a metre to the pixel there
-        /// are thousands of them on a map.
+        /// were thousands of them on a map (more at an eighth).
         ///
         /// Three conditions, all of which have to hold, so that the pass cannot eat real content:
         ///   - at least <see cref="DespeckleMinNeighbours"/> of the eight neighbours were drawn, or
@@ -7423,8 +7492,8 @@ namespace QuestTree.QuestGraph
 
                 floor.Block = new Color32[plan.WidthPx * floor.BandRows];
 
-                // One band's stretched luminance plus the filter's halo - 640 KB at 0.25 m/px, against
-                // the 116 MB a second full float buffer would have cost. See Smooth.
+                // One band's stretched luminance plus the filter's halo - 640 KB at 0.25 m/px and 1.3 MB
+                // at 0.125, against the 116 / 463 MB a second full float buffer would have cost. See Smooth.
                 // Wanted by the smoothing AND by the despeckle, which measures its neighbours on the
                 // same stretched luminance.
                 // Not for a floor that drew nothing (WP1 2.9): only a taken pixel reads it, and there is none.
@@ -7617,7 +7686,7 @@ namespace QuestTree.QuestGraph
             finally
             {
                 // What the development cost, in work rather than in frames - the smoothing is most of
-                // it on a large floor, and this is the number that decides SmoothingBandRows.
+                // it on a large floor, and this is the number that decides SmoothingBandPixels.
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" developed in {Ms(floor.SmoothMs)} ms of " +
                     $"main-thread work over {(plan.HeightPx + floor.BandRows - 1) / Math.Max(1, floor.BandRows)} band(s) of " +
@@ -8866,7 +8935,7 @@ namespace QuestTree.QuestGraph
                     MapSideView.Frame(f, r, u, e.MinX, e.MinZ, e.MaxX, e.MaxZ, yMin, yMax, out var frame);
 
                     var ppm = Budget(SidePixelsPerMetre, frame[1], frame[3], out _);
-                    pixels += (long)MapSideView.Size(frame[1], ppm) * MapSideView.Size(frame[3], ppm);
+                    pixels += (long)SidePictureSide(frame[1], ppm) * SidePictureSide(frame[3], ppm);
                 }
 
                 return plan.FloorSeconds * pixels / plan.FloorPixels * 1.25d;
@@ -9075,8 +9144,8 @@ namespace QuestTree.QuestGraph
                     Extent = plan.Extent,
                     Cap = plan.Cap,
                     Ppm = ppm,
-                    WidthPx = MapSideView.Size(frame[1], ppm),
-                    HeightPx = MapSideView.Size(frame[3], ppm),
+                    WidthPx = SidePictureSide(frame[1], ppm),
+                    HeightPx = SidePictureSide(frame[3], ppm),
                     From = plan.From,
                 };
 
@@ -12039,24 +12108,100 @@ namespace QuestTree.QuestGraph
         /// <param name="ppm">Pixels per metre.</param>
         private static long WorkingSet(double widthM, double heightM, float ppm)
         {
-            var width = (long)Math.Ceiling(widthM * ppm);
-            var height = (long)Math.Ceiling(heightM * ppm);
+            // The sizes the picture will actually have (PictureSide's rounding included), so the model counts
+            // the pixels that are allocated - at most three more a side, never fewer.
+            var width = (long)PictureSide(widthM, ppm);
+            var height = (long)PictureSide(heightM, ppm);
 
             return width * height * WorkingSetBytesPerPixel;
         }
 
+        /// <summary>A floor picture's side in pixels: ceil(metres x ppm), rounded UP to a multiple of
+        /// <see cref="PictureBlock"/> when <see cref="AlignPictureSides"/> - so the viewer can hold it
+        /// block-compressed. Rounded on the OUTPUT size; the sample size (Plan.SampleWidth) is
+        /// SupersampleFactor times this, so it stays an exact multiple and every tile holds whole sample
+        /// blocks. The added pixels are real ground, not padding: <see cref="PictureExtent"/> widens the
+        /// extent to cover them.</summary>
+        /// <param name="metres">The span in metres.</param>
+        /// <param name="ppm">Pixels per metre.</param>
+        private static int PictureSide(double metres, float ppm)
+        {
+            var px = Math.Max(1, (int)Math.Ceiling(metres * ppm));
+            return AlignPictureSides ? RoundUpToBlock(px) : px;
+        }
+
+        /// <summary>A side picture's size in pixels: <see cref="MapSideView.Size"/> rounded up like
+        /// <see cref="PictureSide"/>. No extent to widen here: a side is placed by its origin and its
+        /// own pixels per metre (MapSideView.Pixel, the viewer's SideUv, both divide by the stored width
+        /// and height), so the added pixels simply reach past the frame's high r and high u edges and
+        /// every pixel keeps exactly 1/ppm metres.</summary>
+        /// <param name="span">The frame's span in metres.</param>
+        /// <param name="ppm">The side's pixels per metre.</param>
+        private static int SidePictureSide(double span, float ppm)
+        {
+            var px = MapSideView.Size(span, ppm);
+            return AlignPictureSides ? RoundUpToBlock(px) : px;
+        }
+
+        private static int RoundUpToBlock(int px) => (px + PictureBlock - 1) / PictureBlock * PictureBlock;
+
+        /// <summary>
+        /// The rectangle a floor picture of <paramref name="widthPx"/> x <paramref name="heightPx"/> at
+        /// <paramref name="ppm"/> actually covers: the harvested one widened EAST (MaxX) and SOUTH (MinZ).
+        ///
+        /// Widened rather than the ppm recomputed, because one ppm cannot make both axes exact (width and
+        /// height are rounded separately) and the ppm is the merge key (LoadPrevious). Those two edges,
+        /// because the picture is anchored at MinX and MaxZ - the camera (PositionCamera), the develop's
+        /// world positions and the self-check all count from there - so its pixels already run past MaxX
+        /// and below MinZ, and this only writes down where they end. Every reader then agrees without
+        /// being told: the meta's extent, the mesh and atlas files' extents (the 3D view's PlanarUv and its
+        /// ExtentTolerance check) and the 2D map's bounds all stretch the picture over exactly
+        /// widthPx / ppm by heightPx / ppm metres. The old ceil(metres x ppm) left up to a pixel of
+        /// stretch in that; the widened rectangle leaves none.
+        ///
+        /// Deterministic - the same harvested extent and ppm always give the same doubles - so two
+        /// captures of a map still agree on it for a merge. A copy: the probe's object is not touched.
+        /// </summary>
+        /// <param name="extent">The harvested extent.</param>
+        /// <param name="widthPx">The picture's width in pixels.</param>
+        /// <param name="heightPx">Its height in pixels.</param>
+        /// <param name="ppm">Pixels per metre.</param>
+        private static MapExtentDto PictureExtent(MapExtentDto extent, int widthPx, int heightPx, float ppm) =>
+            new MapExtentDto
+            {
+                MinX = extent.MinX,
+                MaxX = extent.MinX + widthPx / (double)ppm,
+                MinZ = extent.MaxZ - heightPx / (double)ppm,
+                MaxZ = extent.MaxZ,
+                Source = extent.Source,
+                Rotation = extent.Rotation,
+                SampledAt = extent.SampledAt,
+                Floors = extent.Floors,
+            };
+
         private static string Mb(long bytes) =>
             (bytes / (1024d * 1024d)).ToString("0", CultureInfo.InvariantCulture);
 
-        /// <summary>The long side the picture is allowed, from the setting, held to something a
-        /// texture and a release zip can carry whatever a hand-edited config file says.</summary>
+        /// <summary>The long side the picture is allowed, from the setting, held to something the
+        /// viewer can load whatever a hand-edited config file says: at most 16384 (rollback: 8192) and at
+        /// most <see cref="QuestTree.UI.DynamicMapsLibrary.MaxPictureSide"/>, the largest picture this GPU's
+        /// textures take (min(16384, SystemInfo.maxTextureSize), sized in Plugin.Awake) - a picture past it
+        /// would be captured and then refused. A multiple of four when AlignPictureSides, for Prepare's rounding.
+        ///
+        /// The setting is the user's and is not overridden: a config saved at 8192 (the old default and
+        /// the old ceiling) still asks for 8192, which holds Customs at 7.32 px/m rather than 8. The
+        /// fallback, when the settings are not up, is 16384 (rollback: 8192).</summary>
         private static int Resolution()
         {
             var value = ModSettings.Ready && ModSettings.CaptureResolution != null
                 ? ModSettings.CaptureResolution.Value
-                : 8192;
+                : 16384;
 
-            return Mathf.Clamp(value, 512, 8192);
+            var limit = Math.Max(512, Math.Min(16384, QuestTree.UI.DynamicMapsLibrary.MaxPictureSide));
+
+            var clamped = Mathf.Clamp(value, 512, limit);
+
+            return AlignPictureSides ? clamped / PictureBlock * PictureBlock : clamped;
         }
 
         private static bool IsFinite(double v) => !double.IsNaN(v) && !double.IsInfinity(v);

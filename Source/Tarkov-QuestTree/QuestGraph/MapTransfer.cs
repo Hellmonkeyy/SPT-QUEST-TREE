@@ -1855,11 +1855,11 @@ namespace QuestTree.QuestGraph
         ///
         /// Per side rather than once for all of them, because the four are not the same shape: the N and
         /// S views span the map's width, the E and W views its depth. The scale comes off the side
-        /// ScaleTo PINS, as for the floors, and the span it is divided by is the capture box projected on
-        /// the side's own axes - the box's eight corners, the meta's extent by the side's height range -
-        /// which is the same arithmetic the host checks with, so the two cannot disagree by more than the
-        /// rounding of the short side. The basis and the origins are distances in the world and do not
-        /// change with the picture's size.
+        /// ScaleTo PINS, as for the floors: the side's own pixels per metre times the pinned side's new
+        /// size over its old, so the picture keeps its own scale (with the up-to-3-px padding a capture
+        /// adds) rather than being stretched onto the capture box. The host checks the result against the
+        /// box projected on the side's axes within MapStore.SidePixelTolerance, 4 px. The basis and the
+        /// origins are distances in the world and do not change with the picture's size.
         /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta being offered, for its extent.</param>
@@ -1880,11 +1880,16 @@ namespace QuestTree.QuestGraph
 
                 if (width == side.Width && height == side.Height) continue;
 
-                if (!SideSpans(meta.Extent, side, out var spanR, out var spanU)) continue;
+                // Still the basis check: a side whose basis is unusable is left as it is for the host to judge.
+                if (!SideSpans(meta.Extent, side, out _, out _)) continue;
 
+                // Scaled from the side's OWN ppm by the pinned (long) axis, not re-derived as pixels / span: a
+                // capture rounds a side up to a multiple of four (MapCapture.SidePictureSide), so the picture
+                // reaches up to 3 px past the box, and pixels / span would stretch those pixels onto the box and
+                // shift every wall textured from it. The host's check (MapStore.SideProblem) allows 4 px.
                 side.PxPerMetre = height >= width
-                    ? (float)(height / spanU)
-                    : (float)(width / spanR);
+                    ? side.PxPerMetre * ((float)height / side.Height)
+                    : side.PxPerMetre * ((float)width / side.Width);
 
                 side.Width = width;
                 side.Height = height;
