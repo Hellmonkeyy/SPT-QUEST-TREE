@@ -4693,9 +4693,11 @@ namespace QuestTree.QuestGraph
 
                 if (entry.Mesh.Bytes > ClientMeshCeiling)
                 {
-                    result.Debug.Add(
-                        $"QuestTree: the host's mesh for {key} is {Mb(entry.Mesh.Bytes)} MB, over the " +
-                        $"{Mb(ClientMeshCeiling)} MB this machine takes - the pictures are taken without it.");
+                    // 2026-09-30: at Info, not Debug - with stored meshes up to 180 MiB, a machine under ~9 GB of RAM meets
+                    // this on real maps, and "why is this map flat" has to be answerable from the log
+                    result.Info.Add(
+                        $"QuestTree: this machine's RAM allows {Mb(ClientMeshCeiling)} MiB meshes; {key}'s mesh is " +
+                        $"{Mb(entry.Mesh.Bytes)} MiB - drawn flat (the pictures are taken without it).");
                     return null;
                 }
 

@@ -61,7 +61,9 @@
 # Usage:  .\package.ps1                 build, stage, zip, verify
 #         .\package.ps1 -RefreshZones   first copy zones\*.json from the install into the repo
 #         .\package.ps1 -RefreshMaps    first copy maps\<key>\*.jpg, *.map.json and *-mesh.bin from
-#                                       the install (refuses while SPT.Server.exe is up)
+#                                       the install (refuses while SPT.Server.exe is up); a mesh over
+#                                       90 MiB is written as 90 MiB parts plus a manifest instead
+#                                       (tools\mesh_parts.py, self-test: python tools\mesh_parts.py --self-test)
 #         .\package.ps1 -RefreshBuilds  first copy the trained cache\weapon-builds.json over the seed
 #                                       (refuses while SPT.Server.exe is up, and prints the seed's
 #                                       stamp, build count and trader/flea/unpriced split either side
@@ -245,6 +247,10 @@ if ($zoneFiles.Count -eq 0) { Fail "no zone files in $zonesDir - run with -Refre
 # them is about the code. What
 # is NOT gated is how many maps are covered - see the warning further down.
 $mapsDir = Join-Path $server "maps"
+# The most one file in maps\ may weigh: 90 MiB, under GitHub's 100,000,000-byte refusal with room. A mesh past it
+# is shipped in parts of at most this (below). The same number as tools\mesh_parts.py's SHIP_PART_BYTES and
+# MapStore.ShippedMeshPartBytes - change the three together.
+$shipPartBytes = 90MB
 
 if ($RefreshMaps) {
     $installMaps = Join-Path $SptPath "SPT_Runtime\user\mods\QuestTree\maps"
@@ -284,6 +290,13 @@ if ($RefreshMaps) {
         # serves), named by the meta's alphaFile and checked by the pack gate as the page is.
         $picked = @(Get-ChildItem $src.FullName -File |
             Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -like "*-mesh.bin" -or $_.Name -like "*-alpha.png" })
+        # 2026-09-30: a host installed from a release holds a big mesh as its shipped PARTS until its first boot
+        # joins them (MapStore.JoinShippedMesh). Taken as they are only when there is no whole file to split -
+        # the pack check then holds them to the meta exactly as it holds a split it wrote.
+        if (-not @($picked | Where-Object { $_.Name -like "*-mesh.bin" }).Count) {
+            $picked += @(Get-ChildItem $src.FullName -File |
+                Where-Object { $_.Name -match "-mesh\.bin\.part[0-9]{2}$" -or $_.Name -like "*-mesh.bin.parts.json" })
+        }
         if ($picked.Count -eq 0) {
             Write-Host "  skipped $($src.Name)\ - no .jpg, .map.json, -mesh.bin or -alpha.png in it" -ForegroundColor DarkGray
             continue
@@ -296,10 +309,28 @@ if ($RefreshMaps) {
         # sharper one: a stale .bin beside a fresh meta is a mesh of a DIFFERENT extent, and the gate
         # that catches it is a sha256, not an eye. Only these globs are deleted, so anything else in
         # there survives to be named by the layout gate below rather than silently thrown away.
+        # The parts and their manifest go with the mesh, for the stale-mesh reason: a set that now ships whole (or
+        # in fewer parts) must not keep the last refresh's parts beside it.
         Get-ChildItem $dst -File |
-            Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -like "*-mesh.bin" } |
+            Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -like "*-mesh.bin" -or
+                           $_.Name -match "-mesh\.bin\.part[0-9]{2}(\.tmp)?$" -or $_.Name -like "*-mesh.bin.parts.json*" } |
             Remove-Item -Force
-        foreach ($file in $picked) { Copy-Item $file.FullName (Join-Path $dst $file.Name) -Force }
+        # A mesh over $shipPartBytes is written as <key>-mesh.bin.partNN (00, 01, ...), each at most that size,
+        # plus <key>-mesh.bin.parts.json naming the parts, the whole file's bytes and its sha256 - and the whole
+        # file is NOT copied: GitHub refuses a file over 100 MB in a push, and that is the only reason the parts
+        # exist. tools\mesh_parts.py refuses a whole file that is not the meta's mesh (sha and bytes) and reads
+        # the written parts back before it returns. The host joins them into <key>-mesh.bin at its first boot
+        # (MapStore.JoinShippedMesh). A smaller mesh stays one file, as before.
+        foreach ($file in $picked) {
+            if ($file.Name -like "*-mesh.bin" -and $file.Length -gt $shipPartBytes) {
+                $metaOfSet = @($picked | Where-Object { $_.Name -like "*.map.json" })
+                if ($metaOfSet.Count -ne 1) { Fail "$($src.Name)\ holds $($metaOfSet.Count) meta(s) - cannot check $($file.Name) against its meta before splitting it" }
+                & python (Join-Path $repo "tools\mesh_parts.py") split $file.FullName $dst --meta $metaOfSet[0].FullName --part-bytes $shipPartBytes
+                if ($LASTEXITCODE -ne 0) { Fail "could not split $($src.Name)\$($file.Name) into parts (see above) - nothing of it was shipped whole" }
+                continue
+            }
+            Copy-Item $file.FullName (Join-Path $dst $file.Name) -Force
+        }
         $refreshed++
         Write-Host ("  {0,-16} {1} file(s)" -f $src.Name, $picked.Count) -ForegroundColor Yellow
     }
@@ -334,7 +365,8 @@ if ($mapsPresent) {
 
 # GATE 1 - LAYOUT. maps\ holds nothing but the floors <key>\<key>-<level>.jpg, the oblique side
 # pictures <key>\<key>-side-<N|S|E|W>.jpg, the atlas pages <key>\<key>-atlas-<0..7>.jpg, <key>\*.map.json
-# and the one file <key>\<key>-mesh.bin. The allowlist below is BUILT from this folder, so anything else in here is a
+# and the one file <key>\<key>-mesh.bin - or, for a mesh over $shipPartBytes, its parts <key>\<key>-mesh.bin.partNN
+# and their manifest <key>\<key>-mesh.bin.parts.json (2026-09-30). The allowlist below is BUILT from this folder, so anything else in here is a
 # file the zip carries: a raw .png capture, a ".incoming" directory a refresh skipped but a hand-copy
 # did not, an editor's .bak, a stray .svg from the DynamicMaps era. The depth test is what catches the
 # directories - a file two levels down is not in a key folder, it is in something nested inside one -
@@ -363,13 +395,25 @@ $strayMapFiles = @($mapFiles | ForEach-Object {
     $named = $false
     if ($parts.Count -eq 2) {
         $keyPattern = [regex]::Escape($parts[0])
+        # The mesh's shipped parts and manifest by the same exact names (2026-09-30), whether they belong to the
+        # meta's mesh is check-maps-pack.py's to say
         $named = $_.Name -match "^$keyPattern-((-?[0-9]+|side-[NSEW]|atlas-[0-7])\.jpg|atlas-[0-7]-alpha\.png)$" -or
-                 $_.Name -like "*.map.json" -or $_.Name -eq "$($parts[0])-mesh.bin"
+                 $_.Name -like "*.map.json" -or $_.Name -eq "$($parts[0])-mesh.bin" -or
+                 $_.Name -match "^$keyPattern-mesh\.bin\.part[0-9]{2}$" -or $_.Name -eq "$($parts[0])-mesh.bin.parts.json"
     }
     if (-not $named) { $rel }
 })
 if ($strayMapFiles.Count -gt 0) {
-    Fail "maps\ holds $($strayMapFiles.Count) file(s) that are not <key>\<key>-<level>.jpg, <key>\<key>-side-<N|S|E|W>.jpg, <key>\<key>-atlas-<0..7>.jpg, <key>\*.map.json or <key>\<key>-mesh.bin, and the allowlist is built from this folder: $($strayMapFiles -join ', ')"
+    Fail "maps\ holds $($strayMapFiles.Count) file(s) that are not <key>\<key>-<level>.jpg, <key>\<key>-side-<N|S|E|W>.jpg, <key>\<key>-atlas-<0..7>.jpg, <key>\*.map.json, <key>\<key>-mesh.bin or its parts (<key>-mesh.bin.partNN, <key>-mesh.bin.parts.json), and the allowlist is built from this folder: $($strayMapFiles -join ', ')"
+}
+
+# GATE 1b - NO FILE IN maps\ OVER $shipPartBytes (2026-09-30): what keeps the folder committable at all, since GitHub
+# refuses a file over 100 MB in a push. A mesh past it is split by -RefreshMaps; anything else past it is far over its
+# own gate below. check-maps-pack.py holds every set to the same rule, and the parts to the meta.
+$overPart = @($mapFiles | Where-Object { $_.Length -gt $shipPartBytes } |
+    ForEach-Object { "{0} ({1:N0} bytes)" -f $_.FullName.Substring($mapsDir.Length + 1), $_.Length })
+if ($overPart.Count -gt 0) {
+    Fail "maps\ holds file(s) over $($shipPartBytes / 1MB) MiB, which GitHub would refuse (re-run -RefreshMaps, which ships a mesh that size in parts): $($overPart -join ', ')"
 }
 
 # GATE 2 - PER IMAGE, floors and side pictures alike (both are *.jpg). A floor over 1.5 MB is a capture that came out at a resolution or a quality the
@@ -402,16 +446,18 @@ if ($fatPages.Count -gt 0) {
 # release that cannot be built at all rather than one that is large. Since stage V the warning is
 # EXPECTED to fire, and since WP7 the meshes are sized by the CAPTURING machine and the map's surfaces
 # (20 triangles a square metre of each building's surface, a map cap derived from what the buildings need
-# and that machine's memory; a stock map runs to ~50-90 MB of mesh, and no host takes one past 512 MB) - so
-# eleven maps are well past 80 MB, and each adds up to eight 2-4 MB atlas pages of building textures. A
-# single mesh over 100 MB is check-maps-pack.py's WARN: GitHub refuses such a file in a push. It still prints on every
+# and that machine's memory; a stock map runs to ~50-180 MB of mesh since the 180 MiB stored-mesh cap of 2026-09-30,
+# and no host takes one past 512 MB) - so eleven maps are well past 80 MB (and up to ~2 GB at the cap), and each adds
+# up to eight 2-4 MB atlas pages of building textures. 80 MB stays the level on purpose: it is the line past which
+# the share below is worth reading, not a size anybody expects to be under. A single file over $shipPartBytes is
+# GATE 1b's failure, and a mesh that size ships in parts. It still prints on every
 # run, with the 3D share beside the total, because the one thing that must not happen is the payload
 # growing unnoticed - and the share is what says whether it grew for the expected reason: meshes and
 # atlas pages most of it is stages V and W working; floor and side pictures most of it is something to
 # look at.
 $warnMapsBytes = 80MB
 $mapsBytes = ($mapFiles | Measure-Object -Property Length -Sum).Sum
-$mapsMeshBytes = (@($mapFiles | Where-Object { $_.Name -like "*-mesh.bin" -or $_.Name -match "-atlas-[0-7](-alpha\.png|\.jpg)$" }) | Measure-Object -Property Length -Sum).Sum
+$mapsMeshBytes = (@($mapFiles | Where-Object { $_.Name -like "*-mesh.bin" -or $_.Name -match "-mesh\.bin\.part[0-9]{2}$" -or $_.Name -match "-atlas-[0-7](-alpha\.png|\.jpg)$" }) | Measure-Object -Property Length -Sum).Sum
 if ($null -eq $mapsBytes) { $mapsBytes = 0 }
 if ($null -eq $mapsMeshBytes) { $mapsMeshBytes = 0 }
 $meshShare = if ($mapsBytes -gt 0) { [math]::Round(100 * $mapsMeshBytes / $mapsBytes) } else { 0 }
@@ -555,7 +601,11 @@ $stagedBody = ([string](Get-Content -Raw $stagedNotes)) -replace "(?m)^Archive s
 # "dynamicmaps" (the match is case-insensitive, so "DynamicMaps.dll" is caught too).
 # `\.png$` bars a capture's own PNG pictures (the host serves JPEGs) - but not an alpha page's mask, which is a PNG by
 # design (HQ S3.11) and is admitted by GATE 1's exact name.
-$forbidden = "objective-gps|tarkovdev|\.bak$|\.svg$|dynamicmaps|\.jsonc$|(?<!-alpha)\.png$"
+# `\.tmp$` (2026-09-30) is a part or manifest a split was writing when it stopped (mesh_parts.py writes each to
+# <name>.tmp and renames it), or a host's own join or atomic write - never a file a release carries. The shipped
+# parts themselves (<key>-mesh.bin.partNN, <key>-mesh.bin.parts.json) match nothing here; GATE 1 admits them by
+# their exact names.
+$forbidden = "objective-gps|tarkovdev|\.bak$|\.svg$|dynamicmaps|\.jsonc$|(?<!-alpha)\.png$|\.tmp$"
 $expected = @($allow | ForEach-Object { $_.Dest })
 $found = @(Get-ChildItem $staging -Recurse -File | ForEach-Object { $_.FullName.Substring($staging.Length + 1) })
 

@@ -303,6 +303,11 @@ namespace QuestTree
         /// can draw. On, their faces without an atlas texture are left out rather than projected from the side pictures.</summary>
         public static ConfigEntry<bool> MeshFoliage { get; private set; }
 
+        /// <summary>2026-09-30: the size a capture's stored 3D mesh AIMS for, MB (MiB) - 90, 120, 150 or 180, 180 the default and
+        /// MapMeshBuilder.ShippedMeshBytes the ceiling. Lower aims for a lighter mesh for a weaker machine; it sets the builder's
+        /// size bound, so it takes effect at the next capture, and a mesh already larger shrinks over the next captures.</summary>
+        public static ConfigEntry<int> MeshSizeTargetMb { get; private set; }
+
         /// <summary>THROWAWAY. The debug key of the 3D map experiments - see QuestGraph/MeshProbe.cs,
         /// which measures in one raid and one menu visit whether a scene mesh can be read back off the
         /// GPU, whether colliders stream out with the player, which layer has no renderer on it, and
@@ -1142,6 +1147,18 @@ namespace QuestTree
                 "texture are kept. About a million triangles and a page of leaf textures on a wooded map. Off, they are left " +
                 "out - the top-down picture already shows the canopy - and ones an earlier capture stored leave the mesh at " +
                 "the next capture.");
+
+            // 2026-09-30: out of Entries like the rest of the 3D map's build settings; F12 and the cfg file only.
+            MeshSizeTargetMb = config.Bind(
+                "Advanced", "3D map: mesh size target (MB)", 180,
+                new ConfigDescription(
+                    "The size a captured map's stored 3D mesh file aims for. 180, the default, keeps the most detail (about " +
+                    "20 million triangles on a big map, where the builder's own limits stop it anyway); 150, 120 or 90 aim for a " +
+                    "lighter mesh that loads faster and draws more smoothly on a weaker machine. It is a target, not a hard cut: " +
+                    "the mesh is sized when it is built, from what a triangle cost last time, so it takes effect at the next " +
+                    "capture of a map, and a mesh already larger shrinks over the next captures. Meshes downloaded from a host " +
+                    "are not changed. Each capture's log line gives the file's size against this target.",
+                    new AcceptableValueList<int>(90, 120, 150, 180)));
 
             Entries.AddRange(new ConfigEntryBase[]
             {

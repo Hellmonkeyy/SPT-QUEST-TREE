@@ -755,15 +755,31 @@ namespace QuestTree.QuestGraph
 
         /// <summary>
         /// HQ S3.13: the SHIPPED-SIZE bound on the map's cap - the maintainer's decision (2026-09-27): a shipped mesh
-        /// file stays under 90 MiB so package.ps1 -RefreshMaps can commit it (GitHub refuses a file over 100 MB). The
+        /// file stayed under 90 MiB so package.ps1 -RefreshMaps could commit it (GitHub refuses a file over 100 MB). The
         /// bound in triangles is this over the deflated bytes one triangle costs, MEASURED from the stored file when
         /// there is one (its bytes over its triangles - Customs: 8.2) and <see cref="DefaultDeflatedBytesPerTriangle"/>
         /// before the first build. Derived from the file, never from a map; when it binds, the flex scale re-targets the
         /// over-served stored buildings largest-excess-first as it does for any binding cap.
+        ///
+        /// 180 MiB since 2026-09-30 (the maintainer's request): the GitHub limit is met by SPLITTING the shipped file
+        /// instead (package.ps1 -RefreshMaps writes a mesh over 90 MiB as 90 MiB parts, tools/mesh_parts.py; the host joins
+        /// them, MapStore.JoinShippedMesh), so this is no longer what keeps the repo committable. At ~9 B a triangle that is
+        /// ~21 M triangles - past <see cref="BuilderAbsoluteTriangles"/> (20 M), which therefore binds first, with the memory
+        /// ceiling, on any map; Customs at 8.2 B/triangle is ~23 M by this bound. Every host's mesh ceiling and the
+        /// client's upload parts are above it (MapStore: a mesh ceiling never under this with the disk for it, MeshAbsolute 512 MiB; 16 MiB parts x 64). The player's
+        /// <see cref="Request.MeshSizeTargetBytes"/> (ModSettings.MeshSizeTargetMb) may lower it, never raise it. NOT in the
+        /// recipe: MeshRecipe carries the historic 90 MiB as a frozen literal, so the r9 string is unchanged and no stored mesh is
+        /// rebuilt from scratch for this (a stored mesh grows into the new bound at its next capture). Rollback: 90L &lt;&lt; 20.
         /// </summary>
-        internal const long ShippedMeshBytes = 90L << 20;
+        internal const long ShippedMeshBytes = 180L << 20;
 
         private const double DefaultDeflatedBytesPerTriangle = 9d;
+
+        /// <summary>2026-09-30: the stored-mesh size a player's setting asks for, in bytes - <paramref name="megabytes"/> MiB,
+        /// held to 1 MiB .. <see cref="ShippedMeshBytes"/>.</summary>
+        /// <param name="megabytes">ModSettings.MeshSizeTargetMb.</param>
+        internal static long MeshSizeTargetFor(int megabytes) =>
+            Math.Min(ShippedMeshBytes, Math.Max(1L, (long)megabytes) << 20);
 
         /// <summary>HQ S3.13: the shipped-size bound for a build, in triangles, and the bytes a triangle was measured at.</summary>
         /// <param name="job">The build.</param>
@@ -775,9 +791,15 @@ namespace QuestTree.QuestGraph
                 perTriangle = Math.Max(2d, Math.Min(64d, job.Request.BaseFileBytes / (double)job.StoredTriangles));
 
             job.BytesPerTriangle = perTriangle;
-            job.SizeBound = (long)(ShippedMeshBytes / perTriangle);
+            job.SizeBound = (long)(SizeLimitOf(job) / perTriangle);
             return job.SizeBound;
         }
+
+        /// <summary>The stored-mesh size a build is bound to: the request's (the player's setting), never past
+        /// <see cref="ShippedMeshBytes"/>.</summary>
+        /// <param name="job">The build.</param>
+        private static long SizeLimitOf(Job job) =>
+            Math.Min(ShippedMeshBytes, Math.Max(1L << 20, job.Request.MeshSizeTargetBytes));
 
         /// <summary>Seconds the capture sets aside for the atlas out of its budget (taken off the building
         /// phase's), and the ONE cap over the whole atlas phase - measuring, packing, capturing, filling, handing
@@ -930,7 +952,10 @@ namespace QuestTree.QuestGraph
             string.Join(",", MapMeshIndex.TextShaderMarks),
             // HQ S3.13: the high-quality constants
             RecipePart(TexelsPerMetre), RecipePart(CutoutAlphaTiles),
-            RecipePart(FoliageAtCoarsest), RecipePart(FoliageMaxTriangles), RecipePart(FoliageTileMax), RecipePart(ShippedMeshBytes),
+            RecipePart(FoliageAtCoarsest), RecipePart(FoliageMaxTriangles), RecipePart(FoliageTileMax),
+            // HISTORIC, frozen: ShippedMeshBytes as it was when r9 was cut (90 MiB). The bound moved to 180 MiB on 2026-09-30
+            // without a recipe bump, so no stored mesh is rebuilt for it - change it only with a recipe bump.
+            RecipePart(90L << 20),
             RecipePart(RequestFullMips), RecipePart(DefaultDeflatedBytesPerTriangle),
             RecipePart(AreaBudget.TrianglesPerSquareMetre), RecipePart(AreaBudget.MinTriangles),
             RecipePart(AreaBudget.MaxTrianglesPerBuilding), RecipePart(AreaBudget.TrianglesPerStorey),
@@ -1167,6 +1192,11 @@ namespace QuestTree.QuestGraph
             /// ModSettings.MeshFoliage, off by default. When they are, their faces without an atlas range are left out, never
             /// side-projected.</summary>
             internal bool IncludeFoliage;
+
+            /// <summary>2026-09-30: the stored-mesh size this build is bound to, bytes - ModSettings.MeshSizeTargetMb through
+            /// <see cref="MeshSizeTargetFor"/>, read by the capture on the main thread. Never past
+            /// <see cref="ShippedMeshBytes"/>, which is also the default.</summary>
+            internal long MeshSizeTargetBytes = ShippedMeshBytes;
 
             /// <summary>WP2: the stored mesh and its identity sidecar, read and checked by the capture
             /// (MapCapture.StartMeshBase). Null takes the from-scratch path, which is the pre-WP2 build exactly and writes
@@ -11930,7 +11960,7 @@ namespace QuestTree.QuestGraph
                 $"QuestTree: buildings for {job.Request.Map} - {N(job.Kept)} of {N(job.Candidates.Count)} " +
                 $"candidates kept, {N(job.Triangles)} triangles stored of the {N(job.Cap)} cap (demand {N(job.Demand)}, " +
                 $"memory ceiling {N(job.MemoryCeiling)} from RAM {N(job.RamMb)} MB / VRAM {N(job.VramMb)} MB, absolute " +
-                $"{N(BuilderAbsoluteTriangles)}, shipped-size bound {N(job.SizeBound)} from {ShippedMeshBytes >> 20} MiB at " +
+                $"{N(BuilderAbsoluteTriangles)}, shipped-size bound {N(job.SizeBound)} from {SizeLimitOf(job) >> 20} MiB at " +
                 $"{job.BytesPerTriangle.ToString("0.0", f1)} B/triangle); {AreaBudget.TrianglesPerSquareMetre.ToString("0.0", f1)}/m2 of box surface " +
                 $"(at least {N(AreaBudget.TrianglesPerStorey)} a {AreaBudget.StoreyMetres.ToString("0", f1)} m storey), " +
                 $"scaled x{job.BudgetScale.ToString("0.00", f1)}, {N(job.HeldAtFloor)} building(s) held at their pre-WP7 floor; " +

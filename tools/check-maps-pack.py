@@ -77,8 +77,13 @@ WP7 (dynamic budgets): the format's hard bounds are 40 M triangles / 80 M vertic
 1 M triangles and a file at most 512 MiB (the host's rules: an ERROR, a seed no host takes); more than the
 builder's absolute 20 M triangles is an ERROR; the inflate bound is computed from the meta's declared
 cells and triangles (the host's D14 rule, capped at 1 GiB); every band's cell is relief_cell_for(extent)
-- the builder's rule - with a 2 m band where the rule gives 1 m a WARN ("captured before WP7 at 2 m"); and
-a mesh over 100,000,000 bytes is a WARN, because GitHub refuses such a file in a push.
+- the builder's rule - with a 2 m band where the rule gives 1 m a WARN ("captured before WP7 at 2 m").
+
+Shipped parts (2026-09-30): GitHub refuses a file over 100 MB in a push, so a mesh over 90 MiB ships as
+<key>-mesh.bin.partNN plus <key>-mesh.bin.parts.json (tools/mesh_parts.py, written by -RefreshMaps). It is an
+ERROR for any file in a set to be over 90 MiB, for a whole mesh to sit beside its manifest, for the parts not
+to join to the manifest's bytes and sha256 (and so the meta's), for a manifest of one part, and for any part
+or manifest the named mesh does not account for. The joined bytes then pass every mesh check above.
 
 WP3 (upload once): with --against-captures CAPTURES, each set is also held to the LOCAL capture it was uploaded
 from - CAPTURES\\<key>\\, or the folder of the pair's other id (the host folds factory4_night onto
@@ -94,6 +99,11 @@ This is the check that the host holds the LAST capture of a campaign and not an 
   - the atlas page counts are equal, and each local page PNG hashes to the sha256 its local meta names (the host's
     pages are JPEGs, so only their count and size are compared).
 A host set with no local capture is reported and skipped.
+
+FOR THE RELEASE FOLDER ONLY (Source\\Tarkov-QuestTree-Server\\maps\\, what package.ps1 zips). A host's install
+store (SPT_Runtime\\user\\mods\\QuestTree\\maps\\) is a different shape on purpose: it holds whole meshes over 90 MiB
+(the host joins shipped parts back), stamp caches and an .incoming staging folder - so the part-size and stray-file
+rules here fail on it by design. The script says so when the folder looks like an install.
 
 Usage:  python tools/check-maps-pack.py <maps-root> --schema N [--against-captures CAPTURES]
 """
@@ -137,8 +147,15 @@ MESH_MAX_INFLATED = 1 << 30
 # The largest mesh FILE any host takes (MapStore.MeshAbsolute / MapTransfer.ClientMeshAbsolute). A shipped seed
 # past it would install and draw on this machine and then never reach anybody else: every host refuses it.
 MESH_MAX_FILE_BYTES = 512 * 1024 * 1024
-# GitHub refuses a file over 100 MB in a push, and the seed folder is not ignored.
+# GitHub refuses a file over 100 MB in a push, and the seed folder is not ignored - so a mesh over
+# mesh_parts.SHIP_PART_BYTES (90 MiB) ships as <key>-mesh.bin.partNN plus <key>-mesh.bin.parts.json, which
+# package.ps1 -RefreshMaps writes and the host joins back (MapStore.JoinShippedMesh). Every file in a set is
+# held to the part size, so none can reach this limit.
 GITHUB_FILE_LIMIT = 100_000_000
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import mesh_parts  # noqa: E402 - beside this script
+SHIP_PART_BYTES = mesh_parts.SHIP_PART_BYTES
+MESH_PART_RE = re.compile(r"-mesh\.bin\.part[0-9]{2}$", re.IGNORECASE)
 # The relief cell rule, identical to MapMeshBuilder.ReliefCellFor and check-capture.py's relief_cell_for.
 RELIEF_PREFERRED_CELL = 0.5    # HQ S3.13: was 1.0
 RELIEF_PRE_HQ_CELL = 1.0       # the preferred cell between WP7 and HQ S3.13 - a WARN, as the pre-WP7 2 m is
@@ -217,8 +234,9 @@ def jpeg_size(path):
     return None, "has no frame header (SOF) in it at all"
 
 
-def mesh_header(path, bound=MESH_MAX_INFLATED):
-    """(header dict, None) or (None, reason) for a mesh file - MapMeshFile's layout, read whole.
+def mesh_header(path, bound=MESH_MAX_INFLATED, raw=None):
+    """(header dict, None) or (None, reason) for a mesh file - MapMeshFile's layout, read whole. `raw` is the
+    file's bytes when they are already in hand (a mesh joined from its shipped parts); `path` is then unread.
 
     Inflated in chunks with a ceiling, because this file arrives from a capture, from a host, or from a
     hand-copy: a corrupt length must cost a bounded read rather than the machine. Every count is checked
@@ -227,10 +245,11 @@ def mesh_header(path, bound=MESH_MAX_INFLATED):
 
     The returned dict holds what the gates compare: version, extent, y range, bands (level, cell size,
     width, height), and the total cell, vertex and triangle counts."""
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        return None, f"cannot be read ({exc.strerror or exc})"
+    if raw is None:
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            return None, f"cannot be read ({exc.strerror or exc})"
     if not raw:
         return None, "is empty"
 
@@ -400,7 +419,12 @@ def mesh_header(path, bound=MESH_MAX_INFLATED):
 
 
 def check_mesh(meta, folder, key, extent, levels, errors):
-    """The mesh block against the file it names. Returns (its file name lower-cased or None, bytes).
+    """The mesh block against the file it names. Returns (its file name lower-cased or None, bytes, the
+    lower-cased names of its shipped parts and their manifest - empty when it ships whole).
+
+    A mesh over SHIP_PART_BYTES ships as parts (mesh_parts): <file>.partNN plus <file>.parts.json, never
+    beside the whole file. The parts are joined in memory and the join is held to everything below exactly
+    as the whole file would be.
 
     A meta with NO mesh block is the ordinary case and passes with nothing checked - the mesh is
     optional end to end, and a set without one draws flat on every client. A block that IS there is
@@ -408,21 +432,21 @@ def check_mesh(meta, folder, key, extent, levels, errors):
     looking that it is the wrong one."""
     mesh = meta.get("mesh")
     if mesh is None:
-        return None, 0
+        return None, 0, set()
     if not isinstance(mesh, dict):
         errors.append(f"{key}: mesh is present but not an object ({mesh!r})")
-        return None, 0
+        return None, 0, set()
 
     where = f"{key}: mesh"
 
     rel = mesh.get("file")
     if not isinstance(rel, str) or not rel.strip():
         errors.append(f"{where}.file is missing or empty, so nothing says which file the mesh is")
-        return None, 0
+        return None, 0, set()
     parts = Path(rel.replace("\\", "/"))
     if parts.is_absolute() or len(parts.parts) != 1:
         errors.append(f"{where}.file {rel!r} is not a plain file name inside {folder.name}")
-        return None, 0
+        return None, 0, set()
     # The EXACT name, not merely the suffix: the host stores the file as <key>-mesh.bin and reads it back
     # through a regex that admits nothing else (MapStore.StoredMeshFileName), which a bare "-mesh.bin"
     # also fails. A set naming anything else ships and is then refused by the host it shipped to - and a
@@ -435,19 +459,33 @@ def check_mesh(meta, folder, key, extent, levels, errors):
     named = parts.name.lower()
 
     path = folder / parts
-    if not path.is_file():
-        errors.append(f"{where}.file {rel!r} does not exist in {folder} - the meta names a mesh the set "
-                      f"does not carry, and the client refuses a set whose mesh is missing rather than "
-                      f"drawing it flat. Re-run -RefreshMaps.")
-        return named, 0
+    manifest_path = folder / mesh_parts.manifest_name(parts.name)
+    shipped_parts = set()
+    if path.is_file() and manifest_path.is_file():
+        errors.append(f"{where}: {rel} sits beside {manifest_path.name} - a mesh ships whole OR in parts, never "
+                      f"both, so one of them is a stray. Re-run -RefreshMaps.")
+    if path.is_file():
+        # a whole file over the part size is check_set's per-file rule ("re-run -RefreshMaps, which splits it")
+        data = path.read_bytes()
+    elif manifest_path.is_file():
+        data, manifest, why = mesh_parts.join_verified(folder, parts.name, SHIP_PART_BYTES)
+        if data is None:
+            errors.append(f"{where}: its shipped parts do not join - {why}. Re-run -RefreshMaps.")
+            return named, 0, {manifest_path.name.lower()}
+        shipped_parts = {manifest_path.name.lower()} | {p["file"].lower() for p in manifest["parts"]}
+        if len(manifest["parts"]) == 1:
+            errors.append(f"{where}: {manifest_path.name} names one part - a mesh that fits in one part ships "
+                          f"whole. Re-run -RefreshMaps.")
+    else:
+        errors.append(f"{where}.file {rel!r} does not exist in {folder}, whole or in parts - the meta names a "
+                      f"mesh the set does not carry, and the client refuses a set whose mesh is missing rather "
+                      f"than drawing it flat. Re-run -RefreshMaps.")
+        return named, 0, set()
 
-    size = path.stat().st_size
+    size = len(data)
     if size > MESH_MAX_FILE_BYTES:
         errors.append(f"{where}: {rel} is {size:,} bytes, past the {MESH_MAX_FILE_BYTES:,} any host takes - "
                       f"shipped, it would draw here and never travel; every host refuses it")
-    elif size > GITHUB_FILE_LIMIT:
-        WARNINGS.append(f"{where}: {rel} is {size:,} bytes - GitHub refuses a file over 100 MB in a push - "
-                        f"this seed cannot be committed")
     claimed_bytes = mesh.get("bytes")
     if isinstance(claimed_bytes, bool) or not isinstance(claimed_bytes, int) or claimed_bytes <= 0:
         errors.append(f"{where}.bytes {claimed_bytes!r} is not a positive integer")
@@ -461,7 +499,7 @@ def check_mesh(meta, folder, key, extent, levels, errors):
         errors.append(f"{where}.sha256 {claimed_sha!r} is not 64 hex digits")
         claimed_sha = None
     else:
-        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        actual = hashlib.sha256(data).hexdigest()
         if actual.lower() != claimed_sha.lower():
             errors.append(f"{where}: {rel} hashes to {actual[:16]} but the meta says "
                           f"{claimed_sha.lower()[:16]} - THIS IS THE STALE-MESH CASE: the file beside "
@@ -473,10 +511,11 @@ def check_mesh(meta, folder, key, extent, levels, errors):
              if isinstance(declared_cells, int) and isinstance(declared_triangles, int)
              and not isinstance(declared_cells, bool) and not isinstance(declared_triangles, bool)
              else MESH_MAX_INFLATED)
-    header, why = mesh_header(path, bound)
+    header, why = mesh_header(path, bound, raw=data)
+    del data
     if header is None:
         errors.append(f"{where}: {rel} {why}")
-        return named, size
+        return named, size, shipped_parts
 
     claimed_version = mesh.get("version")
     if claimed_version != header["version"]:
@@ -526,7 +565,7 @@ def check_mesh(meta, folder, key, extent, levels, errors):
         elif claimed != inside:
             errors.append(f"{where}.{field} says {claimed:,} but {rel} holds {inside:,}")
 
-    return named, size
+    return named, size, shipped_parts
 
 
 SIDE_DIRS = ("N", "S", "E", "W")
@@ -900,7 +939,7 @@ def check_set(folder, schema, errors):
 
     extent = check_extent(meta, key, errors)
     named, pixels, total, levels = check_floors(meta, folder, key, extent, px_per_metre, errors)
-    mesh_named, mesh_bytes = check_mesh(meta, folder, key, extent, levels, errors)
+    mesh_named, mesh_bytes, mesh_parts_named = check_mesh(meta, folder, key, extent, levels, errors)
 
     # The sides' names join the floors' for the orphan rule below: a side JPEG the meta does not name is
     # dead weight exactly as an unnamed floor is, and it is what a re-capture that drew fewer sides leaves.
@@ -932,7 +971,26 @@ def check_set(folder, schema, errors):
                       f"an earlier capture is a mesh of a different extent and nothing would draw it. "
                       f"Delete them or re-run -RefreshMaps.")
 
-    floor_count = len(meta["floors"]) if isinstance(meta.get("floors"), list) else 0
+    # And for a mesh's shipped parts: a part or manifest the named mesh's own manifest does not account for -
+    # parts of a mesh no meta names, a part past the manifest's last, the parts left behind by a mesh that now
+    # ships whole - ships as megabytes no host joins.
+    stray_parts = sorted(p.name for p in folder.iterdir()
+                         if p.is_file() and (MESH_PART_RE.search(p.name)
+                                             or p.name.lower().endswith(MESH_SUFFIX + mesh_parts.MANIFEST_SUFFIX))
+                         and p.name.lower() not in mesh_parts_named)
+    if stray_parts:
+        errors.append(f"{key}: {', '.join(stray_parts)} - mesh part(s) or manifest(s) the meta's mesh does not "
+                      f"account for. Delete them or re-run -RefreshMaps.")
+
+    # Every file in the set is held to the part size, which is what keeps maps\ committable.
+    fat = sorted(f"{p.name} ({p.stat().st_size:,} bytes)" for p in folder.iterdir()
+                 if p.is_file() and p.stat().st_size > SHIP_PART_BYTES)
+    if fat:
+        errors.append(f"{key}: {', '.join(fat)} - over the {SHIP_PART_BYTES:,} bytes one file in maps\\ may be; "
+                      f"GitHub refuses a file over 100 MB in a push. A mesh is split into parts by -RefreshMaps - "
+                      f"re-run it")
+
+    floor_count =len(meta["floors"]) if isinstance(meta.get("floors"), list) else 0
     scale = f"{1 / px_per_metre:.2f} m/px" if px_per_metre else "? m/px"
     mesh_note = f", mesh {mesh_bytes / 1048576:.1f} MB" if mesh_named is not None else ", no mesh"
     mesh_note += f", {side_count} side(s) {side_bytes / 1048576:.1f} MB" if side_count else ", no sides"
@@ -1136,6 +1194,17 @@ def main():
 
     folders = [p for p in sorted(root.iterdir()) if p.is_dir()]
     errors, lines = [], []
+
+    # The release folder only (see the top): an install store is recognised by what only a host writes there.
+    install_signs = [sign for sign, seen in (
+        ("an SPT_Runtime path", "spt_runtime" in str(root.resolve()).lower()),
+        ("an .incoming folder", (root / ".incoming").is_dir()),
+        ("stamp caches", any(root.glob("*/*.stamp-cache.json")))) if seen]
+    if install_signs:
+        print(f"NOTE   {root} looks like a host's INSTALL store ({', '.join(install_signs)}), not the release folder "
+              f"this checks - a whole mesh over {SHIP_PART_BYTES:,} bytes is normal there, so expect errors that mean "
+              f"nothing for a host. Point it at Source\\Tarkov-QuestTree-Server\\maps.")
+        print()
 
     for folder in folders:
         line = check_set(folder, args.schema, errors)

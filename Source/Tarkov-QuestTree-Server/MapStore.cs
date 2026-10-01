@@ -88,13 +88,28 @@ namespace QuestTreeServer
 
         private long _mapCeiling = StoreFloor / 8;
 
-        private long _meshCeiling = Math.Min(StoreFloor / 8 - PicturesAndPagesPerMap, MeshAbsolute);
+        private long _meshCeiling = Math.Min(Math.Max(StoreFloor / 8 - PicturesAndPagesPerMap, MinMeshCeiling), MeshAbsolute);
 
         private bool _ceilingsSized;
 
-        /// <summary>The least the store ceiling is: the pre-WP7 fixed total, so no host holds less than before.
-        /// Rollback (with <see cref="StoreTop"/>): 1.5 GiB and 1.5 GiB.</summary>
-        private const long StoreFloor = 1536L << 20;
+        /// <summary>The free disk SizeCeilings measured, for the store ceiling's clamp once the sets are read; 0 unknown.</summary>
+        private long _freeAtBoot;
+
+        /// <summary>The least the store ceiling is. Since 2026-09-30 eight maps at <see cref="MinMeshCeiling"/> plus their
+        /// pictures and pages at their caps (2,448 MiB), so one map's floor holds a mesh at the client's stored-mesh cap
+        /// on any host; before, the pre-WP7 fixed total. Rollback (with <see cref="StoreTop"/>): 1.5 GiB and 1.5 GiB.</summary>
+        private const long StoreFloor = 8L * (MinMeshCeiling + PicturesAndPagesPerMap);
+
+        /// <summary>2026-09-30: the least a host's mesh ceiling is - the client's MapMeshBuilder.ShippedMeshBytes (180 MiB), the
+        /// most a capture stores. NOT a reference to it (the server cannot see the Unity assembly), so the one number both
+        /// halves change together. Rollback: 0 (the ceiling is then whatever the store floor leaves, 114 MiB at 1.5 GiB).</summary>
+        private const long MinMeshCeiling = 180L << 20;
+
+        /// <summary>2026-09-30: the free disk no upload may take, on the volume the maps live on: SPT's own profile saves and
+        /// logs need it. Every staging write is refused when free disk minus this is less than what the capture still brings
+        /// (<see cref="DiskShortfall"/>), and the store ceiling is clamped at boot to what is stored plus the free disk
+        /// minus this. Rollback: 0 with <see cref="StoreFloor"/> back at 1.5 GiB.</summary>
+        private const long DiskReserveBytes = 2L << 30;
 
         /// <summary>The most the store ceiling is, however much disk is free. Rollback: 1.5 GiB.</summary>
         private const long StoreTop = 32L << 30;
@@ -108,7 +123,7 @@ namespace QuestTreeServer
         private const long MeshAbsolute = 512L << 20;
 
         /// <summary>What a map's pictures and atlas pages may weigh at their own caps: 12 pictures (8 floors, 4
-        /// sides) and 8 pages - 78 MiB, taken off the map's ceiling for the mesh.</summary>
+        /// sides) and 8 pages - 126 MiB (HQ S3.10 raised a page to 12 MiB), taken off the map's ceiling for the mesh.</summary>
         private const long PicturesAndPagesPerMap = 12L * MaxImageBytes + 8L * MaxAtlasPageBytes;
 
         /// <summary>The most one PART of a mesh may weigh, decoded. The client sends 16 MiB parts; this is
@@ -126,6 +141,26 @@ namespace QuestTreeServer
         /// must also come in at least ceil(bytes / <see cref="MaxMeshPartBytes"/>) parts, so no part is ever
         /// asked to carry more than one post can. Rollback: 8.</summary>
         private const int MaxMeshPartsCeiling = 64;
+
+        /// <summary>2026-09-30: the most one SHIPPED part of a mesh may weigh. GitHub refuses a repo file over 100 MB, so
+        /// package.ps1 -RefreshMaps writes a mesh past this as &lt;key&gt;-mesh.bin.partNN (00, 01, ...) plus
+        /// &lt;key&gt;-mesh.bin.parts.json, and the release installs them into this store as they are;
+        /// <see cref="JoinShippedMesh"/> joins them back the first time the set is read. The same number as package.ps1's
+        /// $shipPartBytes and tools/mesh_parts.py's SHIP_PART_BYTES - change the three together.</summary>
+        private const long ShippedMeshPartBytes = 90L << 20;
+
+        /// <summary>The most shipped parts one mesh may come in: the two digits of a part's name.</summary>
+        private const int MaxShippedMeshParts = 100;
+
+        /// <summary>The shipped parts' manifest, beside the mesh name it rebuilds: &lt;key&gt;-mesh.bin.parts.json.</summary>
+        private const string ShippedPartsSuffix = ".parts.json";
+
+        /// <summary>What a manifest whose parts joined to the wrong sha256 is renamed with, so no later boot retries it.</summary>
+        private const string BadSuffix = ".bad";
+
+        /// <summary>A shipped part's name after the mesh's own: .part00 to .part99.</summary>
+        private static readonly Regex ShippedPartSuffix =
+            new(@"\.part[0-9]{2}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         /// <summary>
         /// The most a mesh file may INFLATE to while its header is being checked, from the meta's DECLARED counts
@@ -502,6 +537,10 @@ namespace QuestTreeServer
             // The mesh block, separately and NOT as a refusal - see the method. The sides and the atlas
             // pages likewise, the pages AFTER the mesh: a set whose mesh is dropped has nothing to drape
             // them on, so they go with it.
+            // 2026-09-30: a mesh this host would DROP over a map it already serves in 3D is a refusal, not a drop -
+            // stored flat, the new set's sweep (CommitSet) would delete the 3D map this host has.
+            if (WouldFlattenStoredMesh(key, meta, out var flattenWhy)) return Reject(key, flattenWhy);
+
             DropUnusableMesh(key, meta);
             DropUnusableSides(key, meta);
             DropUnusableAtlas(key, meta);
@@ -814,6 +853,16 @@ namespace QuestTreeServer
                     pendingMesh > 0 ? "mesh" : null,
                     pendingSides > 0 ? "sides" : null,
                     pendingPages > 0 ? "atlas pages" : null);
+
+                // 2026-09-30: the disk itself, whatever the ceilings say - the rest of this capture must fit with the reserve
+                // A disk shortfall refuses the post outright (the client may retry once disk is freed) - it must never take
+                // the side/page drop below, which would replace a textured stored map with an untextured one over a
+                // shortage that may pass (review of the disk reserve).
+                if (overBudget == null)
+                {
+                    var diskShort = DiskShortfall(pending + bytes.Length);
+                    if (diskShort != null) return Reject(key, diskShort);
+                }
 
                 if (overBudget == null && total + pending + bytes.Length > _storeCeiling)
                     overBudget = pending > 0 && total + bytes.Length <= _storeCeiling
@@ -1330,6 +1379,12 @@ namespace QuestTreeServer
                 var floors = FilesByLevel(staging);
                 var existing = SizeOf(MeshPath(staging));
 
+                // 2026-09-30: a REFUSAL, not a budget flattening - a full disk is temporary, and flattening would
+                // throw away a 3D map over it
+                var diskShort = DiskShortfall(bytes.Length - existing);
+
+                if (diskShort != null) return RejectMesh(key, diskShort);
+
                 if (permanent == null)
                 {
                     // Everything STAGED counts, the sides with the floors - they are on the disk and part of
@@ -1562,6 +1617,12 @@ namespace QuestTreeServer
                 if (others + part.Length > request.Bytes)
                     return RejectMesh(key,
                         $"the mesh's parts add up to more than the {request.Bytes:N0} bytes it says it is");
+
+                // 2026-09-30: the disk, for what this mesh still brings - its parts not yet held, and the join of them
+                // (a second copy of the whole, written beside the parts before they go) - refused, never flattened
+                var diskShort = DiskShortfall(request.Bytes - others + request.Bytes);
+
+                if (diskShort != null) return RejectMesh(key, diskShort);
 
                 // THE BUDGETS, judged on the WHOLE mesh at its FIRST part, and a failure is PERMANENT - it
                 // flattens the staged set exactly as a one-post mesh's budget failure does (AcceptMesh), rather
@@ -2383,6 +2444,8 @@ namespace QuestTreeServer
                 free = 0L;
             }
 
+            _freeAtBoot = free;
+
             var ceilings = CeilingsFor(free);
             _storeCeiling = ceilings.Store;
             _mapCeiling = ceilings.Map;
@@ -2403,13 +2466,63 @@ namespace QuestTreeServer
         {
             var store = Math.Clamp(Math.Max(0L, free) / 4, StoreFloor, StoreTop);
             var map = store / 8;
-            var mesh = Math.Min(map - PicturesAndPagesPerMap, MeshAbsolute);
+            // never under the client's stored-mesh cap (2026-09-30): the store floor already guarantees it, and this says so
+            var mesh = Math.Min(Math.Max(map - PicturesAndPagesPerMap, MinMeshCeiling), MeshAbsolute);
 
             return (store, map, mesh);
         }
 
         /// <summary>This host's mesh ceiling, as sized at boot (<see cref="SizeCeilings"/>).</summary>
         internal long MeshCeiling => _meshCeiling;
+
+        /// <summary>2026-09-30: the store ceiling never past what is stored and staged plus the free disk less
+        /// <see cref="DiskReserveBytes"/> - the floor (<see cref="StoreFloor"/>) no longer implies the disk has it. Said when it
+        /// binds. Unknown free disk (0) leaves it alone; <see cref="DiskShortfall"/> still guards each write. Caller holds the lock.</summary>
+        private void ClampStoreToDisk()
+        {
+            if (_freeAtBoot <= 0) return;
+
+            var held = _sets.Values.Sum(s => s.Bytes) + IncomingBytes();
+            var room = Math.Max(0L, held + _freeAtBoot - DiskReserveBytes);
+
+            if (room >= _storeCeiling) return;
+
+            var line = $"Quest Tracker: maps: the store ceiling is clamped from {Mb(_storeCeiling)} MB to {Mb(room)} MB - the " +
+                       $"{Mb(held)} MB held plus {Mb(_freeAtBoot)} MB free, less the {Mb(DiskReserveBytes)} MB kept free for SPT.";
+
+            _storeCeiling = room;
+
+            if (AcceptsUploads) _logger.Info(line);
+            else _logger.Detail(line);
+        }
+
+        /// <summary>2026-09-30: why a staging write of <paramref name="incoming"/> more bytes is refused for the disk itself -
+        /// the volume's free space less <see cref="DiskReserveBytes"/> is under it - or null. Measured at each call; free disk
+        /// that cannot be measured refuses nothing (the ceilings still bound it).</summary>
+        private string? DiskShortfall(long incoming)
+        {
+            if (incoming <= 0) return null;
+
+            long free;
+
+            try
+            {
+                var root = System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(Folder));
+
+                if (string.IsNullOrEmpty(root)) return null;
+
+                free = new System.IO.DriveInfo(root).AvailableFreeSpace;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+
+            return free - DiskReserveBytes >= incoming
+                ? null
+                : $"this host's disk has {Mb(free)} MB free, and this capture's {Mb(incoming)} MB would leave less than the " +
+                  $"{Mb(DiskReserveBytes)} MB kept free for SPT's own saves - refused; free some disk on the host";
+        }
 
         /// <summary>Rebuilds the stamp cache from the folders. Caller holds the lock.</summary>
         private void Load()
@@ -2446,6 +2559,7 @@ namespace QuestTreeServer
             }
 
             DropStaleStaging();
+            ClampStoreToDisk();
 
             _logger.Detail(
                 $"Quest Tracker: the host holds {_sets.Count} map picture set(s) " +
@@ -2586,15 +2700,47 @@ namespace QuestTreeServer
                         why = $"names a mesh file this server will not read ('{Clip(file, MaxFreeTextLength)}')";
                     else if (!Sha256Hex.IsMatch(meta.Mesh.Sha256 ?? ""))
                         why = $"names a mesh with no usable sha256 ('{Clip(meta.Mesh.Sha256 ?? "", 72)}')";
-                    else if (!System.IO.File.Exists(System.IO.Path.Combine(dir, file)))
-                        why = $"is missing {file}";
                     else
                     {
-                        var hash = ShaOf(file);
+                        var path = System.IO.Path.Combine(dir, file);
 
-                        if (!string.Equals(hash, meta.Mesh.Sha256, StringComparison.OrdinalIgnoreCase))
-                            why = $"holds a {file} that hashes to {Short(hash)}, not the " +
-                                  $"{Short(meta.Mesh.Sha256!)} its meta names";
+                        // 2026-09-30: a mesh the release shipped in PARTS (JoinShippedMesh) - joined here, once, when the
+                        // whole file is not already the meta's; when it is, the parts are only disk and go.
+                        if (System.IO.File.Exists(path + ShippedPartsSuffix))
+                        {
+                            if (System.IO.File.Exists(path) &&
+                                string.Equals(ShaOf(file), meta.Mesh.Sha256, StringComparison.OrdinalIgnoreCase))
+                            {
+                                DropShippedParts(key, dir, file);
+                            }
+                            else
+                            {
+                                var joinWhy = JoinShippedMesh(key, dir, file, meta.Mesh);
+
+                                if (joinWhy != null) why = joinWhy;
+                                else shas[file] = meta.Mesh.Sha256!.ToLowerInvariant();
+                            }
+                        }
+
+                        // a join's refusal stands as it is: the mesh is dropped below, as a missing one is
+                        if (why.Length == 0)
+                        {
+                            if (!System.IO.File.Exists(path))
+                            {
+                                why = System.IO.File.Exists(path + ShippedPartsSuffix + BadSuffix)
+                                    ? $"is missing {file} - its shipped parts were refused at an earlier boot " +
+                                      $"({file}{ShippedPartsSuffix}{BadSuffix})"
+                                    : $"is missing {file}";
+                            }
+                            else
+                            {
+                                var hash = ShaOf(file);
+
+                                if (!string.Equals(hash, meta.Mesh.Sha256, StringComparison.OrdinalIgnoreCase))
+                                    why = $"holds a {file} that hashes to {Short(hash)}, not the " +
+                                          $"{Short(meta.Mesh.Sha256!)} its meta names";
+                            }
+                        }
                     }
 
                     if (why.Length > 0)
@@ -2947,9 +3093,47 @@ namespace QuestTreeServer
         /// <param name="meta">The meta being stored. Its <c>Mesh</c> is nulled when unusable.</param>
         private void DropUnusableMesh(string key, MapCaptureMetaDto meta)
         {
+            var why = UnusableMeshReason(meta);
+
+            if (why == null) return;
+
+            meta.Mesh = null;
+
+            WarnOnce(key, $"its capture meta describes a mesh this host will not take - it {why}. The " +
+                          "pictures are stored without it, so that map draws flat");
+        }
+
+        /// <summary>2026-09-30: whether storing this meta would turn a map this host serves in 3D flat - its mesh block is
+        /// one <see cref="DropUnusableMesh"/> drops (over this host's ceiling, the wrong version, ...) while the stored set
+        /// has a mesh, which CommitSet's sweep would then delete. Such an upload is REFUSED with <paramref name="why"/>.</summary>
+        private bool WouldFlattenStoredMesh(string key, MapCaptureMetaDto meta, out string why)
+        {
+            why = "";
+
+            if (meta.Mesh == null) return false;
+
+            var meshWhy = UnusableMeshReason(meta);
+
+            if (meshWhy == null) return false;
+
+            bool stored;
+
+            lock (_lock) stored = _sets.TryGetValue(key, out var set) && set.Meta.Mesh != null;
+
+            if (!stored) return false;
+
+            why = $"its capture's 3D mesh {meshWhy}, and this host already serves a 3D mesh for that map, which storing " +
+                  "these pictures without one would remove - refused, so the stored 3D map is kept";
+            return true;
+        }
+
+        /// <summary>Why a meta's mesh block is one this host will not take, or null when it is usable (or absent). Normalises
+        /// its file and sha256 on the way, as <see cref="DropUnusableMesh"/> always has.</summary>
+        private string? UnusableMeshReason(MapCaptureMetaDto meta)
+        {
             var mesh = meta.Mesh;
 
-            if (mesh == null) return;
+            if (mesh == null) return null;
 
             mesh.File = Clip((mesh.File ?? "").Trim(), MaxFreeTextLength);
             mesh.Sha256 = (mesh.Sha256 ?? "").Trim().ToLowerInvariant();
@@ -2968,12 +3152,7 @@ namespace QuestTreeServer
             else if (mesh.Triangles < 0 || mesh.Triangles > MaxMeshTriangles)
                 why = $"claims {mesh.Triangles:N0} triangles";
 
-            if (why == null) return;
-
-            meta.Mesh = null;
-
-            WarnOnce(key, $"its capture meta describes a mesh this host will not take - it {why}. The " +
-                          "pictures are stored without it, so that map draws flat");
+            return why;
         }
 
         // ---------------------------------------------------------------------------------------
@@ -4456,6 +4635,13 @@ namespace QuestTreeServer
 
                 if (!MetaIsUsable(key, meta, out _)) return null;
 
+                // 2026-09-30: never completed into a flat set over a stored 3D one (WouldFlattenStoredMesh)
+                if (WouldFlattenStoredMesh(key, meta, out var flattenWhy))
+                {
+                    WarnOnce(key, flattenWhy);
+                    return null;
+                }
+
                 DropUnusableMesh(key, meta);
                 DropUnusableSides(key, meta);
                 DropUnusableAtlas(key, meta);
@@ -4706,6 +4892,201 @@ namespace QuestTreeServer
             using var stream = System.IO.File.OpenRead(path);
 
             return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// 2026-09-30: joins a mesh the release shipped in parts (<see cref="ShippedMeshPartBytes"/>) into
+        /// <paramref name="file"/> in this map's folder. Null on success; otherwise why not, worded for ReadSet's
+        /// "maps/&lt;key&gt; ..." line, which then drops the mesh - the set loads flat, exactly as with a mesh that is not
+        /// there.
+        ///
+        /// Everything is held to the meta, not merely to the manifest: the manifest's whole-file sha256 and bytes must be
+        /// the meta's, every part's name is DERIVED (&lt;file&gt;.partNN from 00, so a manifest naming "..\\x" names
+        /// nothing), each part is at most the part size and exactly its declared length on disk, and the joined bytes are
+        /// hashed as they are written. They are written to a temporary file beside the mesh and moved over it only once
+        /// that hash is the meta's, so a join cut short never leaves a truncated mesh under the served name. On success the
+        /// parts and the manifest are deleted: the whole file is now what is served, and the next boot finds it in place.
+        /// Caller holds the lock (ReadSet, at boot).
+        /// </summary>
+        private string? JoinShippedMesh(string key, string dir, string file, MapCaptureMeshDto mesh)
+        {
+            var path = System.IO.Path.Combine(dir, file);
+            var temp = path + ".join.tmp";
+
+            try
+            {
+                var manifest = JsonSerializer.Deserialize<ShippedMeshParts>(
+                    System.IO.File.ReadAllBytes(path + ShippedPartsSuffix), FileOptions);
+
+                if (manifest == null || manifest.Parts == null || manifest.Parts.Count == 0)
+                    return $"holds a {file}{ShippedPartsSuffix} that names no parts";
+
+                if (!string.Equals(manifest.File, file, StringComparison.OrdinalIgnoreCase))
+                    return $"holds a {file}{ShippedPartsSuffix} for '{Clip(manifest.File ?? "", MaxFreeTextLength)}', not {file}";
+
+                if (!string.Equals(manifest.Sha256 ?? "", mesh.Sha256, StringComparison.OrdinalIgnoreCase) ||
+                    manifest.Bytes != mesh.Bytes)
+                    return $"holds shipped parts of a mesh ({Short(manifest.Sha256 ?? "")}, {manifest.Bytes:N0} bytes) that is not " +
+                           $"the {Short(mesh.Sha256)} ({mesh.Bytes:N0} bytes) its meta names";
+
+                if (manifest.Bytes <= 0 || manifest.Bytes > MeshAbsolute || manifest.Parts.Count > MaxShippedMeshParts)
+                    return $"holds shipped parts of a {manifest.Bytes:N0}-byte mesh in {manifest.Parts.Count} part(s), which is " +
+                           $"not a mesh up to {MeshAbsolute:N0} bytes in up to {MaxShippedMeshParts} parts";
+
+                var partPaths = new List<string>();
+                long declared = 0;
+
+                for (var i = 0; i < manifest.Parts.Count; i++)
+                {
+                    var part = manifest.Parts[i];
+                    var name = file + ".part" + i.ToString("D2", CultureInfo.InvariantCulture);
+                    var info = new System.IO.FileInfo(System.IO.Path.Combine(dir, name));
+
+                    if (part == null || !string.Equals(part.File, name, StringComparison.OrdinalIgnoreCase))
+                        return $"holds a {file}{ShippedPartsSuffix} whose part {i} is not {name}";
+
+                    if (part.Bytes <= 0 || part.Bytes > ShippedMeshPartBytes)
+                        return $"holds a {file}{ShippedPartsSuffix} declaring {name} at {part.Bytes:N0} bytes, not 1 to {ShippedMeshPartBytes:N0}";
+
+                    if (!info.Exists)
+                        return $"is missing {name}, a shipped part of its mesh";
+
+                    if (info.Length != part.Bytes)
+                        return $"holds a {name} of {info.Length:N0} bytes, not the {part.Bytes:N0} its manifest names";
+
+                    declared += part.Bytes;
+                    partPaths.Add(info.FullName);
+                }
+
+                if (declared != manifest.Bytes)
+                    return $"holds shipped parts that add up to {declared:N0} bytes, not the {manifest.Bytes:N0} of its mesh";
+
+                string sha;
+                long written = 0;
+
+                using (var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+                {
+                    using (var output = new System.IO.FileStream(temp, System.IO.FileMode.Create, System.IO.FileAccess.Write,
+                               System.IO.FileShare.None))
+                    {
+                        var buffer = new byte[1024 * 1024];
+
+                        foreach (var partPath in partPaths)
+                        {
+                            using var input = new System.IO.FileStream(partPath, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                                System.IO.FileShare.Read);
+                            int read;
+
+                            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                            {
+                                output.Write(buffer, 0, read);
+                                hash.AppendData(buffer, 0, read);
+                                written += read;
+                            }
+                        }
+
+                        output.Flush(true);
+                    }
+
+                    sha = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+                }
+
+                if (written != mesh.Bytes || !string.Equals(sha, mesh.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Set aside, so the next boot does not read and hash the same bad parts again: the manifest becomes
+                    // <file>.parts.json.bad (ReadSet then names it), and this is said once, here.
+                    var bad = path + ShippedPartsSuffix + BadSuffix;
+
+                    try
+                    {
+                        System.IO.File.Move(path + ShippedPartsSuffix, bad, overwrite: true);
+                    }
+                    catch (Exception moveEx)
+                    {
+                        _logger.Detail($"Quest Tracker: maps/{key}: could not set aside {file}{ShippedPartsSuffix} ({moveEx.Message}).");
+                    }
+
+                    // Detail: ReadSet's one Warning for this map names the refusal and the .bad file
+                    _logger.Detail(
+                        $"Quest Tracker: maps/{key}: the shipped parts of {file} join to {Short(sha)} ({written:N0} bytes), not " +
+                        $"the {Short(mesh.Sha256)} ({mesh.Bytes:N0} bytes) its meta names - the release copy is damaged. The " +
+                        $"manifest is now {System.IO.Path.GetFileName(bad)} and is not tried again; reinstall the release's " +
+                        $"maps/{key} folder to get the 3D map back.");
+
+                    return $"holds shipped parts that join to {Short(sha)}, not the {Short(mesh.Sha256)} its meta names " +
+                           $"(set aside as {System.IO.Path.GetFileName(bad)})";
+                }
+
+                System.IO.File.Move(temp, path, overwrite: true);
+
+                _logger.Info(
+                    $"Quest Tracker: maps/{key}: joined the shipped 3D mesh {file} from {partPaths.Count} part(s) " +
+                    $"({Mb(written)} MB, sha256 {Short(sha)} - its meta's).");
+
+                DropShippedParts(key, dir, file);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return $"could not join the shipped parts of {file} ({ex.Message})";
+            }
+            finally
+            {
+                try { if (System.IO.File.Exists(temp)) System.IO.File.Delete(temp); } catch { /* the next join replaces it */ }
+            }
+        }
+
+        /// <summary>Deletes a mesh's shipped parts and their manifest once the whole file is the meta's: the parts first and
+        /// the manifest only when every part went, so a part that would not go is retried at the next boot.
+        /// Best effort - a part that will not go is disk, not a fault, and the next set this host stores sweeps it.</summary>
+        private void DropShippedParts(string key, string dir, string file)
+        {
+            var dropped = 0;
+            var kept = 0;
+
+            try
+            {
+                foreach (var part in System.IO.Directory.EnumerateFiles(dir, file + ".part*").ToList())
+                {
+                    if (!ShippedPartSuffix.IsMatch(System.IO.Path.GetFileName(part))) continue;
+
+                    try { System.IO.File.Delete(part); dropped++; } catch { kept++; }
+                }
+
+                // The manifest only once every part is gone: it is what brings a leftover part back here at the next boot.
+                if (kept > 0)
+                {
+                    _logger.Detail($"Quest Tracker: maps/{key}: deleted {dropped} shipped part(s) of {file}; {kept} would not go, " +
+                                   "so the manifest is kept for the next boot to try again.");
+                    return;
+                }
+
+                System.IO.File.Delete(System.IO.Path.Combine(dir, file + ShippedPartsSuffix));
+            }
+            catch (Exception ex)
+            {
+                _logger.Detail($"Quest Tracker: maps/{key}: could not delete the shipped parts of {file} ({ex.Message}).");
+                return;
+            }
+
+            _logger.Detail($"Quest Tracker: maps/{key}: deleted {dropped} shipped part(s) of {file} and their manifest - the whole mesh is in place.");
+        }
+
+        /// <summary>The manifest beside a mesh shipped in parts (tools/mesh_parts.py writes it): the whole file's name,
+        /// bytes and sha256, and each part's name and bytes in order.</summary>
+        private sealed class ShippedMeshParts
+        {
+            [System.Text.Json.Serialization.JsonPropertyName("file")] public string? File { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("bytes")] public long Bytes { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("sha256")] public string? Sha256 { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("parts")] public List<ShippedMeshPart?>? Parts { get; set; }
+        }
+
+        /// <summary>One shipped part in the manifest.</summary>
+        private sealed class ShippedMeshPart
+        {
+            [System.Text.Json.Serialization.JsonPropertyName("file")] public string? File { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("bytes")] public long Bytes { get; set; }
         }
 
         /// <summary>The stamp cache beside a stored set - see the class comment.</summary>

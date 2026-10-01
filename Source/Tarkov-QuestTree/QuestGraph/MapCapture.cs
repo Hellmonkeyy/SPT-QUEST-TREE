@@ -2807,6 +2807,8 @@ namespace QuestTree.QuestGraph
                         Sha256 = serialised.Sha256,
                     };
 
+                    job.Notes.Add(MeshTargetNote(serialised.Length));
+
                     foreach (var page in job.Pages)
                     {
                         var final = page.Value.Substring(0, page.Value.Length - HeldPageSuffix.Length);
@@ -13786,6 +13788,7 @@ namespace QuestTree.QuestGraph
                     CaptureOrdinal = plan.Captures,
                     BaseRefused = "this is MeshVerifyLastStop's comparison build",
                     IncludeFoliage = ModSettings.MeshFoliage?.Value ?? false,
+                    MeshSizeTargetBytes = MapMeshBuilder.MeshSizeTargetFor(ModSettings.MeshSizeTargetMb?.Value ?? 180),
                     AtlasPartPath = page => Path.Combine(plan.Dir, VerifyAtlasName(plan.Key, page)) + ".part",
                 };
 
@@ -13987,6 +13990,9 @@ namespace QuestTree.QuestGraph
 
                 // PART-10: trees and bushes in the model, or left out (the default)
                 IncludeFoliage = ModSettings.MeshFoliage?.Value ?? false,
+
+                // 2026-09-30: the stored-mesh size target (Advanced, "3D map: mesh size target (MB)"), never past ShippedMeshBytes
+                MeshSizeTargetBytes = MapMeshBuilder.MeshSizeTargetFor(ModSettings.MeshSizeTargetMb?.Value ?? 180),
             };
 
             foreach (var floor in plan.Floors)
@@ -14540,7 +14546,8 @@ namespace QuestTree.QuestGraph
                 // separately. The third number is what is actually on the disk.
                 plan.MeshNote =
                     $"{MB(mesh.ReliefBytes)} MB relief + {MB(mesh.BuildingBytes)} MB buildings, " +
-                    $"{MB(length)} MB deflated, sha256 {ShortSha(sha)}" + (mesh.Accumulated ? " (accumulated)" : "");
+                    $"{MB(length)} MB deflated, sha256 {ShortSha(sha)}" + (mesh.Accumulated ? " (accumulated)" : "") +
+                    "; " + MeshTargetNote(length);
             }
             catch (Exception ex)
             {
@@ -14701,6 +14708,18 @@ namespace QuestTree.QuestGraph
         /// <param name="bytes">The byte count.</param>
         private static string MB(long bytes) =>
             (bytes / (1024d * 1024d)).ToString("0.00", CultureInfo.InvariantCulture);
+
+        /// <summary>2026-09-30: the stored mesh file's size against the player's target (ModSettings.MeshSizeTargetMb). The
+        /// target is what the builder AIMS for, from bytes a triangle measured on the stored file: a mesh over it is brought
+        /// down at the next captures, not cut to it now.</summary>
+        /// <param name="length">The mesh file's bytes as written.</param>
+        private static string MeshTargetNote(long length)
+        {
+            var target = MapMeshBuilder.MeshSizeTargetFor(ModSettings.MeshSizeTargetMb?.Value ?? 180);
+
+            return $"mesh file {MB(length)} MiB against the {MB(target)} MiB target" +
+                   (length > target ? " - over it; the next captures shrink it toward the target" : "");
+        }
 
         // --- the meta --------------------------------------------------------------------------
 
