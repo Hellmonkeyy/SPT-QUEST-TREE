@@ -533,8 +533,17 @@ namespace QuestTree.QuestGraph
         internal const double BundleLoadCapSeconds = 600d;
 
         /// <summary>The wall-clock cap on the caller's work while the map is hosted. Past it the work is stopped (its finally
-        /// blocks run) and the map is unloaded, so a wedged capture never leaves the menu holding a map.</summary>
-        internal const double WhileLoadedCapSeconds = 1800d;
+        /// blocks run) and the map is unloaded, so a wedged capture never leaves the menu holding a map.
+        ///
+        /// Stage M2b: never under the menu capture's own worst case (MapCapture.MenuWorstCaseSeconds, 2178 s with the menu
+        /// budgets) plus <see cref="WhileLoadedMarginSeconds"/> for the wake and its restore - 2478 s today - so the host
+        /// never cuts a capture its own caps would have let finish. 1800 s stays the floor.</summary>
+        internal static readonly double WhileLoadedCapSeconds =
+            Math.Max(1800d, MapCapture.MenuWorstCaseSeconds + WhileLoadedMarginSeconds);
+
+        /// <summary>Stage M2b: the seconds the whileLoaded cap allows over the capture's worst case - the wake's survey and
+        /// switches, the directional lights, and the wake's restore (Customs: under 1 s together).</summary>
+        private const double WhileLoadedMarginSeconds = 300d;
 
         /// <summary>How many times the unload goes round for scenes that appeared during it before it gives up and says so.</summary>
         internal const int MaxUnloadPasses = 8;
@@ -1330,6 +1339,9 @@ namespace QuestTree.QuestGraph
                 TerrainEnabled,
                 LodEnabled,
                 AudioMuted,
+
+                /// <summary>Stage M2b: a hosted scene's directional light, off for the menu rig.</summary>
+                LightDisabled,
             }
 
             private struct Entry
@@ -1366,7 +1378,7 @@ namespace QuestTree.QuestGraph
             /// just before the first tile.</summary>
             internal string StillOff()
             {
-                int objects = 0, renderers = 0, forced = 0, lods = 0;
+                int objects = 0, renderers = 0, forced = 0, lods = 0, lights = 0;
 
                 foreach (var e in _journal)
                 {
@@ -1380,6 +1392,7 @@ namespace QuestTree.QuestGraph
                             case Kind.RendererEnabled when !((Renderer)e.Item).enabled: renderers++; break;
                             case Kind.ForceOffCleared when ((Renderer)e.Item).forceRenderingOff: forced++; break;
                             case Kind.LodEnabled when !((LODGroup)e.Item).enabled: lods++; break;
+                            case Kind.LightDisabled when ((Light)e.Item).enabled: lights++; break;
                         }
                     }
                     catch (Exception)
@@ -1390,7 +1403,10 @@ namespace QuestTree.QuestGraph
 
                 return $"{objects} of {Count(Kind.Activated)} woken object(s) inactive again, {renderers} of " +
                        $"{Count(Kind.RendererEnabled)} renderer(s) disabled again, {forced} of {Count(Kind.ForceOffCleared)} " +
-                       $"forceRenderingOff set again, {lods} of {Count(Kind.LodEnabled)} LODGroup(s) disabled again";
+                       $"forceRenderingOff set again, {lods} of {Count(Kind.LodEnabled)} LODGroup(s) disabled again" +
+                       (Count(Kind.LightDisabled) > 0
+                           ? $", {lights} of {Count(Kind.LightDisabled)} disabled directional light(s) enabled again"
+                           : "");
             }
 
             /// <summary>The restore, <see cref="WakeChunk"/> entries a frame.</summary>
@@ -1444,6 +1460,7 @@ namespace QuestTree.QuestGraph
                             case Kind.TerrainEnabled: ((Terrain)e.Item).enabled = false; break;
                             case Kind.LodEnabled: ((LODGroup)e.Item).enabled = false; break;
                             case Kind.AudioMuted: ((Behaviour)e.Item).enabled = true; break;
+                            case Kind.LightDisabled: ((Light)e.Item).enabled = true; break;
                         }
 
                         _back++;
@@ -1785,6 +1802,69 @@ namespace QuestTree.QuestGraph
                 $"{(firstThrow != null ? $" (first: {firstThrow})" : "")}, {errors[0] - errorsBefore[0]} exception(s) and " +
                 $"{errors[1] - errorsBefore[1]} error(s) logged by the game meanwhile; survey {surveyMs} ms, narrow " +
                 $"{narrowMs - surveyMs} ms, total {clock.ElapsedMilliseconds} ms. {Memory()}");
+        }
+
+        /// <summary>
+        /// Stage M2b: switches off every ENABLED directional light in the hosted scenes - active or under an inactive
+        /// parent, so one a later activation would bring back stays dark - recording each in <paramref name="wake"/>'s
+        /// journal before its switch, so <see cref="Wake.Restore"/> puts it back. The menu capture's rig is its whole light:
+        /// a scene sun (the scripts scene carries one) would add a second sun and a second set of shadows. Point and spot
+        /// lights are left as the raid capture leaves them. Returns how many were switched off; never throws.
+        /// </summary>
+        /// <param name="wake">The menu capture's wake journal.</param>
+        internal static int DisableHostedDirectionalLights(Wake wake)
+        {
+            var disabled = 0;
+            var threw = 0;
+            string first = null;
+            var names = new List<string>();
+            List<Scene> scenes = null;
+
+            if (wake == null || !Try("finding the hosted scenes", () => scenes = HostedScenes()) || scenes == null)
+            {
+                Log("directional lights: no hosted scene is loaded - none disabled.");
+                return 0;
+            }
+
+            foreach (var scene in scenes)
+            {
+                GameObject[] roots = null;
+                if (!Try("listing a hosted scene's roots", () => roots = IsLoaded(scene) ? scene.GetRootGameObjects() : null) ||
+                    roots == null)
+                    continue;
+
+                foreach (var root in roots)
+                {
+                    Light[] lights = null;
+                    if (!Try("listing a hosted root's lights", () => lights = root != null ? root.GetComponentsInChildren<Light>(true) : null) ||
+                        lights == null)
+                        continue;
+
+                    foreach (var light in lights)
+                    {
+                        try
+                        {
+                            if (light == null || light.type != LightType.Directional || !light.enabled) continue;
+
+                            wake.Record(light, Wake.Kind.LightDisabled);
+                            light.enabled = false;
+                            disabled++;
+                            if (names.Count < 8) names.Add($"'{light.name}' in '{light.gameObject.scene.name}'");
+                        }
+                        catch (Exception ex)
+                        {
+                            threw++;
+                            if (first == null) first = $"{ex.GetType().Name}: {ex.Message}";
+                        }
+                    }
+                }
+            }
+
+            Log($"directional lights: {disabled} enabled directional light(s) in the hosted scenes disabled for the capture's light " +
+                $"rig{(names.Count > 0 ? $" ({string.Join(", ", names)}{(disabled > names.Count ? ", ..." : "")})" : "")}; {threw} threw" +
+                $"{(first != null ? $" (first: {first})" : "")}.");
+
+            return disabled;
         }
 
         /// <summary>One culler-listed (or broad) component switched on: a capture-layer renderer enabled and its

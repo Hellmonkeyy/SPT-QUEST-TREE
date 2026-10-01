@@ -535,7 +535,11 @@ namespace QuestTree.QuestGraph
         /// nothing more is decimated; past this nothing new is taken from the list, and the drain after it
         /// is at most <see cref="DrainSeconds"/>.</summary>
         /// <param name="soft">The soft cap, seconds.</param>
-        internal static double HardSecondsFor(double soft) => soft + 10d;
+        internal static double HardSecondsFor(double soft) => soft + HardOverSoftSeconds;
+
+        /// <summary>The ten seconds <see cref="HardSecondsFor"/> adds, as a constant so MapCapture's menu watchdog
+        /// (MenuMeshWatchdogSeconds, stage M2b) can be summed from it at compile time.</summary>
+        internal const double HardOverSoftSeconds = 10d;
 
         /// <summary>Frames a readback is waited for before the mesh is given up as unreadable. The
         /// probe measured two frames for a real one; 120 is two seconds of being wrong.</summary>
@@ -1126,6 +1130,12 @@ namespace QuestTree.QuestGraph
             /// MEASURED seconds off it too and holds the rest to <see cref="MinBuildingSeconds"/> - the building
             /// phase's soft cap; <see cref="HardSecondsFor"/> of that is the hard one.</summary>
             internal double BuildingSeconds = 90d;
+
+            /// <summary>Stage M2b: the ONE cap over the whole atlas phase for this build, seconds on the atlas's own clock
+            /// (see <see cref="AtlasSecondsCap"/>, which a raid capture keeps). A main-menu capture has no raid to hand
+            /// the frames back to and sets MapCapture.MenuAtlasSeconds here; the share textures are captured in
+            /// (<see cref="AtlasCaptureShare"/>) scales with it.</summary>
+            internal double AtlasSeconds = AtlasSecondsCap;
 
             /// <summary>Set by the capture's watchdog: the build stops reading buildings at once, abandons
             /// what is queued or in flight, and finishes with what it has.</summary>
@@ -10203,7 +10213,7 @@ namespace QuestTree.QuestGraph
                                 x = info.FlatX;
                                 y = info.FlatY;
                             }
-                            else if (clock.Elapsed.TotalSeconds < AtlasSecondsCap * AtlasCaptureShare)
+                            else if (clock.Elapsed.TotalSeconds < job.Request.AtlasSeconds * AtlasCaptureShare)
                             {
                                 tile = CaptureTile(job, info, r[2], r[3]);
                                 tw = r[2];
@@ -10314,7 +10324,8 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>Whether the atlas phase must stop: the capture's abort, or the atlas's OWN clock - started
-        /// when BuildAtlas starts, not with the mesh phase - past <see cref="AtlasSecondsCap"/>. Records why.</summary>
+        /// when BuildAtlas starts, not with the mesh phase - past the request's <see cref="Request.AtlasSeconds"/>
+        /// (<see cref="AtlasSecondsCap"/> for a raid capture). Records why.</summary>
         /// <param name="job">The build.</param>
         private static bool OverCap(Job job)
         {
@@ -10325,15 +10336,20 @@ namespace QuestTree.QuestGraph
             }
 
             var seconds = job.AtlasClock?.Elapsed.TotalSeconds ?? 0d;
-            if (!PastAtlasCap(seconds)) return false;
+            if (!PastAtlasCap(seconds, job.Request.AtlasSeconds)) return false;
 
-            job.AtlasAbandonWhy = $"past the {N(AtlasSecondsCap)} s atlas cap ({seconds.ToString("0.0", CultureInfo.InvariantCulture)} s on the atlas's own clock)";
+            job.AtlasAbandonWhy = $"past the {N(job.Request.AtlasSeconds)} s atlas cap ({seconds.ToString("0.0", CultureInfo.InvariantCulture)} s on the atlas's own clock)";
             return true;
         }
 
         /// <summary>The cap rule on its own, for the harness: seconds on the atlas's own clock past the cap.</summary>
         /// <param name="atlasSeconds">Seconds since the atlas phase started.</param>
-        internal static bool PastAtlasCap(double atlasSeconds) => atlasSeconds > AtlasSecondsCap;
+        internal static bool PastAtlasCap(double atlasSeconds) => PastAtlasCap(atlasSeconds, AtlasSecondsCap);
+
+        /// <summary>Stage M2b: the cap rule against a build's own cap (<see cref="Request.AtlasSeconds"/>).</summary>
+        /// <param name="atlasSeconds">Seconds since the atlas phase started.</param>
+        /// <param name="cap">The build's atlas cap, seconds.</param>
+        internal static bool PastAtlasCap(double atlasSeconds, double cap) => atlasSeconds > cap;
 
         /// <summary>Starts one page's encode on a worker: streamed to <paramref name="path"/>, hashed, then the
         /// buffer cleared for reuse. A method, so the closure holds these parameters and nothing the caller does
@@ -11027,7 +11043,7 @@ namespace QuestTree.QuestGraph
             info.AvgG = (byte)(Mathf.Clamp01(info.Tint.g) * 255f);
             info.AvgB = (byte)(Mathf.Clamp01(info.Tint.b) * 255f);
 
-            if (job.AtlasClock == null || job.AtlasClock.Elapsed.TotalSeconds >= AtlasSecondsCap * AtlasCaptureShare) return;
+            if (job.AtlasClock == null || job.AtlasClock.Elapsed.TotalSeconds >= job.Request.AtlasSeconds * AtlasCaptureShare) return;
 
             // WP8 (D4): a texture refused as a normal map is not the colour either - the tint alone.
             if (info.NormalRefused) return;
@@ -12440,7 +12456,7 @@ namespace QuestTree.QuestGraph
                 $"{job.AtlasSeconds.ToString("0.0", f1)} s; " +
                 $"{N(used)} material(s) in use, {N(job.TexturesFailed)} texture(s) would not capture, " +
                 $"{N(job.TilesUnplaced)} tile(s) over the {MapMeshFile.MaxAtlasPages}-page cap, " +
-                $"{N(job.TilesLate)} left flat past {N(AtlasSecondsCap * AtlasCaptureShare)} s of the {N(AtlasSecondsCap)} s atlas cap, " +
+                $"{N(job.TilesLate)} left flat past {N(job.Request.AtlasSeconds * AtlasCaptureShare)} s of the {N(job.Request.AtlasSeconds)} s atlas cap, " +
                 $"materials: {N(job.TransparentMaterials)} transparent (queue > 2500), {N(cutoutTaken)} cutout taken as opaque, " +
                 $"{N(cutoutLeft)} cutout left, {N(cutoutAlpha)} cutout as alpha tiles on {N(AlphaPageCount(job.File.AlphaPages))} alpha page(s); " +
                 $"{N(whiteLeft)} white flat left to the fallback; {N(job.NormalMapsRefused)} normal " +

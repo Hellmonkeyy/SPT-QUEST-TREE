@@ -903,6 +903,13 @@ namespace QuestTree.QuestGraph
                 // and hash of the mesh below (tens of MB, up to 512 MiB) landed in that same frame.
                 yield return null;
 
+                // Stage M2b (review): the proof M3 needs - that a coroutine on the plugin object ticks at all where this upload
+                // was started (a plugin-made DontDestroyOnLoad object may not tick in EFT's main menu). Said on its first step
+                // after that yield, which only a ticking host reaches.
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the upload of {key} took its first step {(Now() - _uploadStartedAt).ToString("0.0", CultureInfo.InvariantCulture)} s " +
+                    $"after it was started, {(Comfort.Common.Singleton<EFT.GameWorld>.Instance != null ? "with a GameWorld set (a raid or the hideout)" : "with no GameWorld (the main menu)")}.");
+
                 // Q6: this upload reads the newest capture on disk, so every request for this map queued before
                 // this frame is satisfied by it. A request queued AFTER it - a newer capture - stays queued. The commit
                 // counters are taken in the same frame (WP3), so "newer" means exactly a commit after this read.

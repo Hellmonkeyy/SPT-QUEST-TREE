@@ -886,7 +886,8 @@ namespace QuestTree.QuestGraph
             ";reach" + (ReachEnabled && _reachBuilt ? (ReachIsAlpha ? "2" : "1") : "0") +
             ";ss" + SupersampleFactor.ToString(CultureInfo.InvariantCulture) +
             ";msaa" + _msaa.ToString(CultureInfo.InvariantCulture) +
-            ";layers" + LayerListVersion.ToString(CultureInfo.InvariantCulture);
+            ";layers" + LayerListVersion.ToString(CultureInfo.InvariantCulture) +
+            (_rig != null ? ";" + MenuRigTag : "");
 
         /// <summary>Added to the far plane so the band's own floor is comfortably inside it rather
         /// than exactly on it.</summary>
@@ -1119,6 +1120,121 @@ namespace QuestTree.QuestGraph
         /// drawn. Stage M2b/M3 decides when a menu capture writes the location's own key; "" does that now.</summary>
         internal const string MenuCaptureKeySuffix = "-menu";
 
+        // --- stage M2b: a menu capture's time budgets ----------------------------------------------------------------------
+        //
+        // The raid's caps are sized so a player standing in a raid gets the frames back: the building phase is what
+        // MapMeshBuilder.CaptureSecondsBudget leaves after the floors and the sides' estimate (Customs' menu capture got a
+        // 36 s soft cap and kept 3,238 of 43,552 candidates, "hard cap reached with 34,557 not looked at"). In the main menu
+        // nobody is waiting in a raid, so a menu capture takes the budgets below instead - every one routed through the
+        // Plan (floors, watchdog) or the builder's Request (buildings, atlas), so a raid capture never reads them.
+
+        /// <summary>Stage M2b rollback: false gives a menu capture the raid's time caps exactly (stage M2a).</summary>
+        internal static readonly bool MenuCaptureBudgets = true;
+
+        /// <summary>Stage M2b: seconds the menu capture's relief and building phase is given (the Request's BuildingSeconds;
+        /// the builder takes the relief's measured seconds off and the hard cap is ten more) - in place of the raid's
+        /// min(MaxBuildingSeconds 100, CaptureSecondsBudget 210 - floors - sides - atlas).</summary>
+        internal const double MenuBuildingSeconds = 600d;
+
+        /// <summary>Stage M2b: the menu capture's atlas cap (the Request's AtlasSeconds) - in place of the raid's 40 s
+        /// MapMeshBuilder.AtlasSecondsCap. More buildings bring more materials to capture.</summary>
+        internal const double MenuAtlasSeconds = 180d;
+
+        /// <summary>Stage M2b: what the menu watchdog allows beyond the phases it bounds - the relief's cast, the atlas's
+        /// settling and the build's own bookkeeping, which no cap covers (the raid's 200 s watchdog has 42 s over its 158).</summary>
+        private const double MenuMeshWatchdogMarginSeconds = 60d;
+
+        /// <summary>Stage M2b: the menu capture's mesh watchdog - the building soft cap, its hard cap's ten, the drain, the
+        /// atlas cap and the margin: 858 s, in place of the raid's <see cref="MeshWatchdogSeconds"/> (200).</summary>
+        internal const double MenuMeshWatchdogSeconds =
+            MenuBuildingSeconds + MapMeshBuilder.HardOverSoftSeconds + MapMeshBuilder.DrainSeconds + MenuAtlasSeconds +
+            MenuMeshWatchdogMarginSeconds;
+
+        /// <summary>Stage M2b: the menu capture's floor phase cap, in place of <see cref="FloorPhaseSeconds"/> (180). A menu
+        /// capture renders EVERY tile of every floor (there is no nearer earlier capture to keep), about 60 s a floor at the
+        /// 1 GB floor budget (Customs 45 tiles in 41 s plus its encode), so a map of three or more floors would be cut at
+        /// 180. The sides keep <see cref="SidePhaseSeconds"/>: they are four views at 4 px/m whatever the floors (Customs
+        /// 43 s of 180).</summary>
+        internal const double MenuFloorPhaseSeconds = 600d;
+
+        /// <summary>Stage M2b: the longest a menu capture can run with every cap in force - <see cref="WorstCaseSeconds"/>'s
+        /// terms with the menu's floor cap and watchdog, and without a campaign checkpoint (a menu capture holds none):
+        /// 2178 s. MenuMapHost's whileLoaded cap is sized from it.</summary>
+        internal const double MenuWorstCaseSeconds =
+            MenuFloorPhaseSeconds * FloorPhaseOverrun +             // 750
+            MeshBaseWaitSeconds +                                   //  20
+            MenuMeshWatchdogSeconds + MeshWatchdogGraceSeconds +    // 873
+            AtlasEncodeWaitSeconds +                                //  60
+            SidePhaseSeconds * SidePhaseOverrun +                   // 225
+            FinishAllowanceSeconds +                                //  60
+            CommitWaitSeconds +                                     //  10
+            2 * EncodeWaitSeconds;                                  // 180
+
+        // --- stage M2b: a menu capture's light ------------------------------------------------------------------------------
+        //
+        // A raid capture photographs the raid's sun plus its own straight-down light. The menu has no TOD sky and no weather,
+        // so a menu capture brings the whole of its light: one directional sun at a fixed height and bearing that casts
+        // soft shadows (the relief and the buildings read as shapes), plus a flat ambient so a face turned from the sun is
+        // not black - the same for every map, and written into the meta's lighting block so the 3D view's sun matches.
+
+        /// <summary>Stage M2b rollback: false lights a menu capture as stage M2a did (the raid rig: the own straight-down
+        /// light, the scene's lights as loaded, no lighting block).</summary>
+        internal static readonly bool MenuLightingRig = true;
+
+        /// <summary>Degrees above the horizon of the menu rig's sun. High enough that a street between two blocks is not in
+        /// shadow all day, low enough that a building's shadow says how tall it is; inside the 3D view's accepted 15..55.</summary>
+        internal const float MenuSunElevation = 50f;
+
+        /// <summary>The menu rig sun's bearing, degrees clockwise from world +z (north) towards +x - the convention the 3D
+        /// view reads a sun direction back with (Atan2(x, z)). 135: from the south-east.</summary>
+        internal const float MenuSunAzimuth = 135f;
+
+        /// <summary>The menu rig sun's intensity: the raid capture's own light's (<see cref="CaptureLightIntensity"/>), so
+        /// the percentile stretch lands the ground on the mid-greys the raid pictures have.</summary>
+        internal const float MenuSunIntensity = 1.5f;
+
+        /// <summary>The menu rig sun's shadow strength. Full: the flat ambient is what lifts a shadowed face, as it is in
+        /// the 3D view, which draws its spot sun at the strength the lighting block records.</summary>
+        internal const float MenuSunShadowStrength = 1f;
+
+        /// <summary>The menu rig sun's colour when the hosted map has no LevelSettings: a neutral warm white.</summary>
+        internal static readonly Color MenuSunFallbackColour = new Color(1f, 0.96f, 0.88f, 1f);
+
+        /// <summary>The menu rig's flat ambient as a share of the sun (colour times intensity, per channel, at most 1).</summary>
+        internal const float MenuAmbientOfSun = 0.35f;
+
+        /// <summary>The least shadow distance the menu rig renders with: twice a tile's side at the full 8 px/m (2048 samples
+        /// at 16 samples a metre, supersampled 2x, is a 128 m tile), so a tile at a lower pixels per metre is covered too.
+        /// The render uses the camera's far plane when that is further, which on a floor it always is - the top band's
+        /// camera stands 300 m over the roofs, so its shadows must reach past that to the ground.</summary>
+        private const float MenuShadowMinDistance = 256f;
+
+        /// <summary>The menu rig's shadow cascades: one. An orthographic view has every pixel at the same scale, so a split by
+        /// distance would only spend the shadow map on depth slices no nearer than another.</summary>
+        private const int MenuShadowCascades = 1;
+
+        /// <summary>The <see cref="RenderTag"/> term a menu-rig capture adds - so a set lit by the rig replaces a raid-lit
+        /// set once (LoadPrevious refuses the merge) instead of merging exposures taken under two different lights.</summary>
+        private const string MenuRigTag = "menu-rig-1";
+
+        /// <summary>Stage M2b (review) rollback: false makes a raid capture replace a menu-rig set (the tags differ) rather
+        /// than merge into it (LoadPrevious).</summary>
+        internal static readonly bool MenuRigMerge = true;
+
+        // --- stage M2b: a menu capture's upload ----------------------------------------------------------------------------
+
+        /// <summary>Stage M2b rollback: false never offers a menu capture to the host. True: a menu capture of a map's REAL
+        /// key (stage M3) holds the map's uploads for the capture and releases the hold after the write, so exactly one
+        /// upload follows. A <see cref="MenuCaptureKeySuffix"/> test set is never uploaded either way.</summary>
+        internal static readonly bool MenuCaptureUploads = true;
+
+        /// <summary>Whether a menu capture of <paramref name="key"/> is offered to the host: the switch on and the key a
+        /// real one, not a "-menu" test set.</summary>
+        /// <param name="key">The capture's key.</param>
+        internal static bool MenuUploads(string key) =>
+            MenuCaptureUploads && !string.IsNullOrEmpty(key) &&
+            !key.EndsWith(MenuCaptureKeySuffix, StringComparison.OrdinalIgnoreCase);
+
         /// <summary>
         /// Stage M2: one main-menu capture - what stands in for the raid's GameWorld. The map key (the location's Id plus
         /// <see cref="MenuCaptureKeySuffix"/>), the identity the mesh builder's scene cache is keyed on (a raid keys it on
@@ -1142,6 +1258,10 @@ namespace QuestTree.QuestGraph
             /// <summary>Run once, just before the capture's first tile - RunMenuCapture sets it to the wake's "switched
             /// off again" count.</summary>
             internal Action BeforeFirstTile;
+
+            /// <summary>Stage M2b: how many of the hosted scenes' directional lights were disabled for the menu rig, for the
+            /// capture header; -1 when none were looked for (the rig off).</summary>
+            internal int DirectionalLightsDisabled = -1;
 
             /// <param name="locationId">As asked for.</param>
             /// <param name="locationKey">The location's own Id (MenuMapHost.LocationKey).</param>
@@ -1223,6 +1343,7 @@ namespace QuestTree.QuestGraph
             var clock = Stopwatch.StartNew();
             MapCapture runner = null;
             var wake = new MenuMapHost.Wake();
+            MapTransfer.UploadHold uploads = null;
 
             try
             {
@@ -1238,9 +1359,23 @@ namespace QuestTree.QuestGraph
                 var waking = MenuMapHost.WakeHosted(wake, MenuCaptureMask());
                 while (waking.MoveNext()) yield return waking.Current;
 
+                // Stage M2b: the menu rig is the capture's whole light, so no scene sun (the scripts scene's directional
+                // light, say) may add to it - every directional light in the hosted scenes is switched off, in the same
+                // journal the wake restores from. After the wake, so one a woken object brought along is off as well.
+                if (MenuLightingRig) session.DirectionalLightsDisabled = MenuMapHost.DisableHostedDirectionalLights(wake);
+
                 // (review) whether anything switched the wake back off between the wake and the first tile
                 session.BeforeFirstTile = () =>
                     Plugin.LogSource?.LogInfo($"{tag}{session.Key} just before the first tile: {wake.StillOff()}.");
+
+                // Stage M2b: a menu capture of a map's real key is uploaded ONCE, after its write - the hold makes the
+                // write's UploadCapture an owed upload, and the release below issues it. A "-menu" test set never goes up.
+                if (MenuUploads(session.Key))
+                {
+                    uploads = MapTransfer.HoldUploads(runner, session.Key, "menu capture", preempts: false);
+                    Plugin.LogSource?.LogInfo(
+                        $"{tag}{session.Key}'s uploads are held for the capture{(uploads == null ? " (no hold was taken - WP3's switch is off, so the write uploads it itself)" : "")}; one upload follows the write.");
+                }
 
                 // As the key press sets them: a person asked for this map, so it builds the mesh and takes the sides.
                 runner._running = true;
@@ -1253,6 +1388,13 @@ namespace QuestTree.QuestGraph
                 // to tick.
                 yield return runner.Run();
 
+                // Stage M2b: the write is done (or the capture wrote nothing, and nothing is owed) - the one upload goes now.
+                if (uploads != null)
+                {
+                    var outcome = MapTransfer.ReleaseUploads(uploads);
+                    Plugin.LogSource?.LogInfo($"{tag}{session.Key}'s upload hold released after the write: {outcome}.");
+                }
+
                 // The capture has cleaned up (its own finally ran as it finished); the switches go back a chunk a frame. The
                 // finally below finishes whatever this did not get to.
                 yield return wake.RestoreSpread();
@@ -1264,6 +1406,20 @@ namespace QuestTree.QuestGraph
                 // After the capture's own finally (the host disposes the innermost enumerator first): the capture has let
                 // the scene go before its original switches come back.
                 wake.Restore();
+
+                // Stage M2b: a run the host stopped part way still ends its hold - idempotent, and an upload is issued only
+                // when the write had happened (the map is owed only then).
+                if (uploads != null)
+                {
+                    try
+                    {
+                        MapTransfer.ReleaseUploads(uploads);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogWarning($"{tag}its upload hold could not be released ({ex.Message}).");
+                    }
+                }
 
                 if (runner != null)
                 {
@@ -2321,7 +2477,8 @@ namespace QuestTree.QuestGraph
                 CaptureLighting lighting = null;
                 try
                 {
-                    lighting = ReadLighting();
+                    // Stage M2b: a menu-rig capture describes the rig it was lit by, not the (absent) raid's light
+                    lighting = _rig != null ? MenuLighting(plan.Key) : ReadLighting();
                 }
                 catch (Exception ex)
                 {
@@ -2348,9 +2505,10 @@ namespace QuestTree.QuestGraph
                     FirstCapturedAt = string.IsNullOrEmpty(plan.FirstCapturedAt) ? now : plan.FirstCapturedAt,
                     Captures = plan.Captures,
                     ModVersion = ModInfo.Stamp,
-                    Render = RenderTag,
-                    TimeOfDay = TimeOfDay(),
-                    Lighting = lighting,
+                    // Stage M2b (review): a campaign stop that merged into a menu set keeps it one, as WriteMeta does
+                    Render = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.Render : RenderTag,
+                    TimeOfDay = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.TimeOfDay : TimeOfDay(),
+                    Lighting = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.Lighting : lighting,
                     Floors = floors,
                     Labels = plan.Labels,
                     Mesh = mesh,
@@ -3794,7 +3952,7 @@ namespace QuestTree.QuestGraph
                 {
                     // The floor phase's budget (review F45): past it the floors not yet started are skipped - an
                     // earlier capture's picture of them is carried - so a campaign stop stays inside WorstCaseSeconds.
-                    if (floorsClock.Elapsed.TotalSeconds > FloorPhaseSeconds)
+                    if (floorsClock.Elapsed.TotalSeconds > plan.FloorCapSeconds)
                     {
                         floor.Failed = true;
                         floorsCut++;
@@ -3842,7 +4000,7 @@ namespace QuestTree.QuestGraph
                     {
                         // A floor still rendering well past the budget is abandoned too - half a floor is not a
                         // picture - at a margin, so the one floor that started in time normally finishes.
-                        if (floorsClock.Elapsed.TotalSeconds <= FloorPhaseSeconds * FloorPhaseOverrun) return false;
+                        if (floorsClock.Elapsed.TotalSeconds <= plan.FloorCapSeconds * FloorPhaseOverrun) return false;
 
                         floorsCut++;
                         return true;
@@ -3969,7 +4127,7 @@ namespace QuestTree.QuestGraph
 
                 if (floorsCut > 0)
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: {plan.Key} - {floorsCut} floor(s) were cut at the {FloorPhaseSeconds:0} s floor budget " +
+                        $"QuestTree: {plan.Key} - {floorsCut} floor(s) were cut at the {F0(plan.FloorCapSeconds)} s floor budget " +
                         $"({plan.FloorSeconds:0} s spent); the pictures an earlier capture took of them are kept.");
 
                 // WP2 (2.5): the stored mesh and its identity sidecar, read and checked on a worker while the frames go on -
@@ -4020,6 +4178,7 @@ namespace QuestTree.QuestGraph
                 //
                 // ReleaseScene is idempotent and Cleanup calls it too, so a raid that ends in the
                 // middle of the build leaves the scene as the game had it.
+                var meshPhase = Stopwatch.StartNew();
                 var mesh = plan.Refused || !plan.WantsMesh || plan.MeshBaseTemporary ? null : BeginMesh(plan);
 
                 if (mesh != null)
@@ -4050,7 +4209,7 @@ namespace QuestTree.QuestGraph
                         var more = false;
                         var elapsed = meshClock.Elapsed.TotalSeconds;
 
-                        if (!asked && elapsed > MeshWatchdogSeconds && _meshRequest != null)
+                        if (!asked && elapsed > plan.MeshWatchdogCapSeconds && _meshRequest != null)
                         {
                             asked = true;
                             _meshRequest.Abort = true;
@@ -4059,7 +4218,7 @@ namespace QuestTree.QuestGraph
                                 "what is built so far is written.");
                         }
 
-                        if (asked && elapsed > MeshWatchdogSeconds + MeshWatchdogGraceSeconds)
+                        if (asked && elapsed > plan.MeshWatchdogCapSeconds + MeshWatchdogGraceSeconds)
                         {
                             Plugin.LogSource?.LogWarning(
                                 $"QuestTree: the 3D mesh of {plan.Key} did not finish {MeshWatchdogGraceSeconds:0} s after " +
@@ -4202,6 +4361,9 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
+                plan.MeshSeconds = meshPhase.Elapsed.TotalSeconds;
+                var sidesPhase = Stopwatch.StartNew();
+
                 // The four side views, after the mesh because the box they frame is the mesh's y range.
                 // Behind the same "wrote a picture" test BeginMesh asks: WriteMeta writes nothing
                 // without one, so sides staged for it would only be dropped. Driven through a guarded
@@ -4253,6 +4415,8 @@ namespace QuestTree.QuestGraph
                 // hung disk, and then the commit goes ahead as it always did.
                 // WP4 B2, BARRIER 5: a defensive no-op - nothing is committed while an encode is outstanding (a side view
                 // whose loop was abandoned after its encode started is staged here, as it would have been before).
+                plan.SidesSeconds = sidesPhase.Elapsed.TotalSeconds;
+
                 var lastFloors = SettleEncodes(plan, plan.Floors, null);
                 while (lastFloors.MoveNext()) yield return lastFloors.Current;
 
@@ -4267,7 +4431,11 @@ namespace QuestTree.QuestGraph
                 // Nothing is in place until this runs: it commits every staged picture and then
                 // writes the meta. A refused capture skips it, which is the whole of what makes the
                 // refusal cost nothing.
+                var writePhase = Stopwatch.StartNew();
                 if (!plan.Refused && plan.Hold == null) WriteMeta(plan, clock);
+
+                // Stage M2b: a menu capture says where its time went, phase by phase
+                if (plan.MenuMode) LogMenuPhases(plan, writePhase.Elapsed.TotalSeconds, clock.Elapsed.TotalSeconds);
 
                 // Campaign speed step 2: a held stop ends by holding its meta - the stop is then whole in memory - and every
                 // CampaignCheckpointStops stops by writing the held set, which this stop waits for (so does the campaign).
@@ -4422,6 +4590,14 @@ namespace QuestTree.QuestGraph
                     MenuMode = _menu != null && _menu.MenuMode,
                 };
 
+                // Stage M2b: a menu capture's time caps - see MenuCaptureBudgets. Never set on a raid plan.
+                if (plan.MenuMode && MenuCaptureBudgets)
+                {
+                    plan.MenuBudgets = true;
+                    plan.FloorCapSeconds = MenuFloorPhaseSeconds;
+                    plan.MeshWatchdogCapSeconds = MenuMeshWatchdogSeconds;
+                }
+
                 if (plan.WidthPx < 1 || plan.HeightPx < 1)
                 {
                     Plugin.LogSource?.LogWarning(
@@ -4551,7 +4727,20 @@ namespace QuestTree.QuestGraph
                 if (budgetNote != null) note = $"{note}, {budgetNote}";
 
                 // Stage M2: said in the header, so a set's log says which kind of capture wrote it
-                if (plan.MenuMode) note = $"{note}, MENU capture (every pixel step 0, no stand, no upload)";
+                if (plan.MenuMode)
+                {
+                    note = $"{note}, MENU capture (every pixel step 0, no stand, " +
+                           $"{(MenuUploads(key) ? "one upload after the write" : "no upload")})";
+
+                    // Stage M2b: the light and the time caps it was taken under
+                    if (_rig != null) note = $"{note}, {MenuRigNote(plan)}";
+
+                    note = plan.MenuBudgets
+                        ? $"{note}, menu budgets: floors {F0(plan.FloorCapSeconds)} s, buildings {F0(MenuBuildingSeconds)} s, " +
+                          $"atlas {F0(MenuAtlasSeconds)} s, mesh watchdog {F0(plan.MeshWatchdogCapSeconds)} s, sides " +
+                          $"{F0(SidePhaseSeconds)} s, worst case {F0(MenuWorstCaseSeconds)} s"
+                        : $"{note}, the raid's time budgets (MenuCaptureBudgets off)";
+                }
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: capturing {key} - {plan.WidthPx}x{plan.HeightPx} px, " +
@@ -6810,6 +6999,11 @@ namespace QuestTree.QuestGraph
         {
             var path = Path.Combine(plan.Dir, $"{plan.Key}.map.json");
 
+            // Stage M2b (review): set only on the success return below, so a set refused by a later check (or the retry
+            // without the held set) never leaves the flag standing over a null Previous
+            plan.IntoMenuSet = false;
+            var intoMenuSet = false;
+
             try
             {
                 if (held == null && !File.Exists(path)) return null;
@@ -6849,7 +7043,19 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
-                if (!string.Equals(meta.Render, renderTag, StringComparison.Ordinal))
+                // Stage M2b (review): a raid capture of a map whose set a menu capture wrote MERGES into it. The menu set's
+                // tag is the raid recipe plus the rig term; its pixels are all step 0, so they win every distance test and
+                // the raid adds only what the menu never drew, developed with the exposure the menu set stored (Stored).
+                // The set keeps the menu's recipe, light and time (WriteMeta), so it stays a menu set for the next merge.
+                // One way only: a menu capture over a raid set still replaces it once (its own tag carries the rig term).
+                if (!plan.MenuMode && MenuRigMerge && string.Equals(meta.Render, renderTag + ";" + MenuRigTag, StringComparison.Ordinal))
+                {
+                    intoMenuSet = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {plan.Key} - merging into a menu-captured set (rendered {meta.Render}): its step-0 pixels are " +
+                        "kept everywhere and this capture adds only what it never drew, under its stored exposure.");
+                }
+                else if (!string.Equals(meta.Render, renderTag, StringComparison.Ordinal))
                 {
                     // The render recipe is part of what a pixel IS. A capture taken before the recipe was
                     // recorded is one of the black rain-era or building-less pictures this replaces; one
@@ -6890,6 +7096,7 @@ namespace QuestTree.QuestGraph
                 // disk, so not for a held meta (the campaign's first stop did it)
                 if (held == null) RestoreOld(plan, meta);
 
+                plan.IntoMenuSet = intoMenuSet;
                 return meta;
             }
             catch (Exception ex)
@@ -10776,7 +10983,10 @@ namespace QuestTree.QuestGraph
             // capture that cannot have been deferred.
             note = $"{note} ({_camera.renderingPath}/{_camera.actualRenderingPath}, orthographic)";
 
-            BuildLight(mask);
+            // Stage M2b: a menu capture brings its whole light (BuildMenuRig) and has no own straight-down light; a raid
+            // capture - and a menu capture with the rig switched off or failed - builds the own light exactly as before.
+            if (_menu == null || !MenuLightingRig || !BuildMenuRig(mask)) BuildLight(mask);
+
             BuildTarget();
 
             // Assigned for the whole capture, not per tile: WorldToScreenPoint reads the camera's
@@ -10840,6 +11050,380 @@ namespace QuestTree.QuestGraph
                     "the picture will be as bright as the scene's own lighting makes it.");
             }
         }
+
+        /// <summary>Stage M2b: the menu rig as this capture built it - what the renders apply, what the header and the
+        /// lighting block say, and the proof counts the closing line reports. Null on a raid capture.</summary>
+        private sealed class MenuRig
+        {
+            /// <summary>Towards the sun, unit, world axes (the lighting block's convention).</summary>
+            internal Vector3 TowardsSun;
+
+            internal Color SunColour;
+
+            /// <summary>True when <see cref="SunColour"/> is the hosted level's LevelSettings.SunColor.</summary>
+            internal bool FromLevel;
+
+            internal string ColourSource = "";
+
+            /// <summary>The flat ambient, <see cref="MenuAmbientOfSun"/> of the sun's colour times its intensity.</summary>
+            internal Color Ambient;
+
+            /// <summary>Renders taken under the rig.</summary>
+            internal int Renders;
+
+            /// <summary>Times our pre-cull hook ran for the capture camera, and how many of those found the ambient no longer
+            /// ours - rewritten between our set before Render and the cull, which is LevelSettings' hook at work.</summary>
+            internal int PreCulls;
+
+            internal int Rewritten;
+
+            /// <summary>At the first render: the Camera.onPreCull hooks ahead of ours, how many of them are a
+            /// LevelSettings', and whether ours was the last in the list (-1 / false until read).</summary>
+            internal int HooksAhead = -1;
+
+            internal int LevelHooksAhead = -1;
+
+            internal bool OursLast;
+        }
+
+        /// <summary>What <see cref="ApplyMenuRig"/> changed, read before it changed anything, for
+        /// <see cref="ReleaseMenuRig"/> to put back.</summary>
+        private sealed class MenuRigHold
+        {
+            internal AmbientMode Mode;
+            internal Color Light;
+            internal Color Sky;
+            internal Color Equator;
+            internal Color Ground;
+            internal float Intensity;
+            internal SphericalHarmonicsL2 Probe;
+            internal float ShadowDistance;
+            internal int Cascades;
+            internal ShadowProjection Projection;
+            internal ShadowQuality Shadows;
+            internal ShadowResolution Resolution;
+        }
+
+        /// <summary>Stage M2b: the menu rig this capture built, or null (every raid capture).</summary>
+        private MenuRig _rig;
+
+        /// <summary>Stage M2b: the menu rig's sun - enabled only for the instant a tile renders, as the own light is.</summary>
+        private Light _sun;
+
+        /// <summary>Stage M2b: our Camera.onPreCull hook, one instance so the -= finds the += (see <see cref="MenuPreCull"/>).</summary>
+        private Camera.CameraCallback _menuPreCull;
+
+        /// <summary>Metres past the camera's far plane the menu rig's shadows reach, so the far plane's own surface is in.</summary>
+        private const float MenuShadowFarSlack = 1f;
+
+        /// <summary>
+        /// Stage M2b: the menu rig's sun, disabled until a tile renders, and its description. The colour is the hosted
+        /// level's LevelSettings.SunColor when it has one (read in <see cref="LevelSunColour"/>, its own method for
+        /// ReadLighting's JIT reason), else <see cref="MenuSunFallbackColour"/>; the direction is
+        /// <see cref="MenuSunElevation"/> up at bearing <see cref="MenuSunAzimuth"/>; the shadows are soft, at the
+        /// light's highest resolution, on the capture's own layers. False - having said why, with nothing left behind -
+        /// when it cannot be built; the caller then builds the own light, and the render tag says so (no rig term).
+        /// </summary>
+        /// <param name="mask">The capture's culling mask.</param>
+        private bool BuildMenuRig(int mask)
+        {
+            GameObject go = null;
+
+            try
+            {
+                var colour = MenuSunFallbackColour;
+                var fromLevel = false;
+                var source = "fallback warm white - the level has no LevelSettings";
+
+                try
+                {
+                    if (LevelSunColour(out var level))
+                    {
+                        colour = level;
+                        fromLevel = true;
+                        source = "LevelSettings.SunColor";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    source = $"fallback warm white - LevelSettings could not be read ({ex.GetType().Name})";
+                }
+
+                var elevation = MenuSunElevation * Mathf.Deg2Rad;
+                var azimuth = MenuSunAzimuth * Mathf.Deg2Rad;
+                var towards = new Vector3(
+                    Mathf.Sin(azimuth) * Mathf.Cos(elevation),
+                    Mathf.Sin(elevation),
+                    Mathf.Cos(azimuth) * Mathf.Cos(elevation)).normalized;
+
+                go = new GameObject("QuestTreeMenuSun");
+                go.transform.SetParent(null, worldPositionStays: true);
+
+                // A directional light shines along its forward: away from the sun
+                go.transform.rotation = Quaternion.LookRotation(-towards);
+
+                var sun = go.AddComponent<Light>();
+                sun.type = LightType.Directional;
+                sun.color = colour;
+                sun.intensity = MenuSunIntensity;
+                sun.shadows = LightShadows.Soft;
+                sun.shadowStrength = MenuSunShadowStrength;
+                sun.shadowResolution = UnityEngine.Rendering.LightShadowResolution.VeryHigh;
+                sun.cullingMask = mask;
+                sun.renderMode = LightRenderMode.ForcePixel;
+
+                // Off until a tile renders - see ApplyMenuRig - so it never lights a frame of the menu.
+                sun.enabled = false;
+
+                _sun = sun;
+                _menuPreCull = MenuPreCull;
+                _rig = new MenuRig
+                {
+                    TowardsSun = towards,
+                    SunColour = colour,
+                    FromLevel = fromLevel,
+                    ColourSource = source,
+                    Ambient = new Color(
+                        Mathf.Min(1f, colour.r * MenuSunIntensity * MenuAmbientOfSun),
+                        Mathf.Min(1f, colour.g * MenuSunIntensity * MenuAmbientOfSun),
+                        Mathf.Min(1f, colour.b * MenuSunIntensity * MenuAmbientOfSun), 1f),
+                };
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _sun = null;
+                _rig = null;
+                _menuPreCull = null;
+                if (go != null) Destroy(go);
+
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the menu capture's light rig could not be built ({ex.GetType().Name}: {ex.Message}) - it is lit " +
+                    "by the raid capture's own straight-down light instead.");
+                return false;
+            }
+        }
+
+        /// <summary>Stage M2b: the hosted level's declared sun colour, opaque - a LevelSettings in a hosted scene first, else
+        /// any. Its own method so a game update that removes
+        /// LevelSettings fails the JIT here, inside the caller's try, and not in <see cref="BuildMenuRig"/>.</summary>
+        /// <param name="colour">The colour, when there is a LevelSettings.</param>
+        private static bool LevelSunColour(out Color colour)
+        {
+            colour = default;
+
+            // (review) the hosted map's own, when several exist - FindObjectOfType's first could be any scene's
+            var all = UnityEngine.Object.FindObjectsOfType<LevelSettings>();
+            if (all == null || all.Length == 0) return false;
+
+            var hosted = new HashSet<int>(MenuMapHost.HostedScenes().Select(s => s.handle));
+            var settings = all.FirstOrDefault(s => s != null && hosted.Contains(s.gameObject.scene.handle)) ??
+                           all.FirstOrDefault(s => s != null);
+            if (settings == null) return false;
+
+            colour = settings.SunColor;
+            colour.a = 1f;
+            return true;
+        }
+
+        /// <summary>
+        /// Stage M2b: the flat ambient, set for the capture camera only, from Camera.onPreCull. It has to be set THERE:
+        /// LevelSettings (decompile, LevelSettings.cs:166-170 and 240-262) adds its own OnPreCullCallback to
+        /// Camera.onPreCull in Awake, and for EVERY camera - ours included - rewrites RenderSettings.ambientMode,
+        /// ambientSkyColor/EquatorColor/GroundColor, ambientLight and ambientIntensity from its own fields, so an ambient
+        /// set before Render is gone by the cull. Delegates run in the order they were added, and ours is added right
+        /// before each render (<see cref="ApplyMenuRig"/>) and removed right after, so it runs after LevelSettings' and
+        /// its values are the ones the render uses. The game's hook is never removed or edited.
+        /// </summary>
+        /// <param name="cam">The camera about to cull.</param>
+        private void MenuPreCull(Camera cam)
+        {
+            var rig = _rig;
+            if (rig == null || cam == null || cam != _camera) return;
+
+            rig.PreCulls++;
+            if (RenderSettings.ambientMode != AmbientMode.Flat || RenderSettings.ambientLight != rig.Ambient) rig.Rewritten++;
+
+            SetMenuAmbient(rig);
+        }
+
+        /// <summary>The flat ambient itself.</summary>
+        private static void SetMenuAmbient(MenuRig rig)
+        {
+            RenderSettings.ambientMode = AmbientMode.Flat;
+            RenderSettings.ambientLight = rig.Ambient;
+            RenderSettings.ambientIntensity = 1f;
+        }
+
+        /// <summary>Stage M2b: reads what <see cref="ApplyMenuRig"/> will change. Changes nothing, so a throw here leaves
+        /// nothing to put back.</summary>
+        private static MenuRigHold SnapshotMenuRig() => new MenuRigHold
+        {
+            Mode = RenderSettings.ambientMode,
+            Light = RenderSettings.ambientLight,
+            Sky = RenderSettings.ambientSkyColor,
+            Equator = RenderSettings.ambientEquatorColor,
+            Ground = RenderSettings.ambientGroundColor,
+            Intensity = RenderSettings.ambientIntensity,
+            Probe = RenderSettings.ambientProbe,
+            ShadowDistance = QualitySettings.shadowDistance,
+            Cascades = QualitySettings.shadowCascades,
+            Projection = QualitySettings.shadowProjection,
+            Shadows = QualitySettings.shadows,
+            Resolution = QualitySettings.shadowResolution,
+        };
+
+        /// <summary>
+        /// Stage M2b: the menu rig for one render - the sun on; soft shadows at the highest resolution, one cascade, STABLE
+        /// fit (review: its shadow map is fitted to a sphere round the view and snapped to whole texels, so every tile of the
+        /// same size gets the same world texel grid and the same softness - a close fit sizes the map to each tile's own
+        /// contents, and neighbouring tiles would meet at a seam of different softness), reaching past the camera's far plane (at least <see cref="MenuShadowMinDistance"/>), so the whole depth an
+        /// orthographic tile sees is shadowed; the flat ambient set now AND from our pre-cull hook, appended last to
+        /// Camera.onPreCull (see <see cref="MenuPreCull"/>). Every change is put back by <see cref="ReleaseMenuRig"/>.
+        /// </summary>
+        private void ApplyMenuRig()
+        {
+            var rig = _rig;
+            if (rig == null || _sun == null) return;
+
+            rig.Renders++;
+
+            QualitySettings.shadows = ShadowQuality.All;
+            QualitySettings.shadowResolution = ShadowResolution.VeryHigh;
+            QualitySettings.shadowProjection = ShadowProjection.StableFit;
+            QualitySettings.shadowCascades = MenuShadowCascades;
+            QualitySettings.shadowDistance = Mathf.Max(MenuShadowMinDistance, _camera.farClipPlane + MenuShadowFarSlack);
+
+            SetMenuAmbient(rig);
+
+            if (_menuPreCull != null)
+            {
+                Camera.onPreCull += _menuPreCull;
+
+                // Once: who else is on the hook, and that ours runs last - the proof the ambient is ours at the cull
+                if (rig.HooksAhead < 0)
+                {
+                    var list = Camera.onPreCull?.GetInvocationList() ?? new Delegate[0];
+                    rig.HooksAhead = Math.Max(0, list.Length - 1);
+                    rig.LevelHooksAhead = list.Count(d => d.Target is LevelSettings);
+                    rig.OursLast = list.Length > 0 && Equals(list[list.Length - 1], _menuPreCull);
+                }
+            }
+
+            _sun.enabled = true;
+        }
+
+        /// <summary>Stage M2b: puts back everything <see cref="ApplyMenuRig"/> changed, the hook first. Never throws.</summary>
+        /// <param name="held">What was there before, or null when nothing was read (then nothing was changed).</param>
+        private void ReleaseMenuRig(MenuRigHold held)
+        {
+            if (held == null) return;
+
+            try
+            {
+                if (_menuPreCull != null) Camera.onPreCull -= _menuPreCull;
+                if (_sun != null) _sun.enabled = false;
+
+                QualitySettings.shadowDistance = held.ShadowDistance;
+                QualitySettings.shadowCascades = held.Cascades;
+                QualitySettings.shadowProjection = held.Projection;
+                QualitySettings.shadowResolution = held.Resolution;
+                QualitySettings.shadows = held.Shadows;
+
+                RenderSettings.ambientMode = held.Mode;
+                RenderSettings.ambientSkyColor = held.Sky;
+                RenderSettings.ambientEquatorColor = held.Equator;
+                RenderSettings.ambientGroundColor = held.Ground;
+                RenderSettings.ambientLight = held.Light;
+                RenderSettings.ambientIntensity = held.Intensity;
+
+                // Last: the colours above re-derive a flat or gradient probe; the one the scene had is put back over it
+                RenderSettings.ambientProbe = held.Probe;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the menu rig could not be put back after a render ({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        /// <summary>Stage M2b: the far plane of the tallest floor band this capture renders - the top band's reaches from
+        /// 300 m over the roofs to 50 m under its floor - for the header's shadow distance (BeginFloor's arithmetic).</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private static float MenuShadowDistanceFor(Plan plan)
+        {
+            var far = 0f;
+
+            foreach (var floor in plan.Floors)
+            {
+                if (floor?.Dto == null) continue;
+
+                var top = !IsFinite(floor.NextMinY);
+                var f = BandCameraY(floor.Dto.MaxY, floor.NextMinY) - floor.Dto.MinY + FarClipSlack + (top ? TopBandDepthBelow : 0f);
+                if (IsFinite(f) && f > far) far = f;
+            }
+
+            return Mathf.Max(MenuShadowMinDistance, far + MenuShadowFarSlack);
+        }
+
+        /// <summary>Stage M2b: the header's rig phrase - "menu rig: sun 50/135 colour r/g/b intensity x, shadows soft to N m,
+        /// ambient flat r/g/b, scene directional lights disabled N".</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private string MenuRigNote(Plan plan)
+        {
+            var rig = _rig;
+            if (rig == null) return "no menu rig";
+
+            var lights = _menu != null && _menu.DirectionalLightsDisabled >= 0
+                ? _menu.DirectionalLightsDisabled.ToString(CultureInfo.InvariantCulture)
+                : "none looked for";
+
+            return $"menu rig: sun {F0(MenuSunElevation)}/{F0(MenuSunAzimuth)} colour {Rgb3(rig.SunColour)} ({rig.ColourSource}) " +
+                   $"intensity {MenuSunIntensity.ToString("0.###", CultureInfo.InvariantCulture)}, shadows soft to " +
+                   $"{F0(MenuShadowDistanceFor(plan))} m ({MenuShadowCascades} cascade, stable fit, very high; strength " +
+                   $"{MenuSunShadowStrength.ToString("0.##", CultureInfo.InvariantCulture)}; each render to its own far plane, at least " +
+                   $"{F0(MenuShadowMinDistance)} m), ambient flat {Rgb3(rig.Ambient)}, scene directional lights disabled {lights}, " +
+                   "own light off";
+        }
+
+        /// <summary>Stage M2b: a menu capture's closing line - its phases' seconds and the rig's proof counts.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="writeSeconds">The write's seconds (WriteMeta).</param>
+        /// <param name="totalSeconds">The capture's seconds so far.</param>
+        private void LogMenuPhases(Plan plan, double writeSeconds, double totalSeconds)
+        {
+            try
+            {
+                var rig = _rig;
+                var rigLine = rig == null
+                    ? "no menu rig (the raid's own light)"
+                    : $"menu rig on {rig.Renders} render(s): our pre-cull hook set the ambient {rig.PreCulls} time(s) and found it " +
+                      $"rewritten {rig.Rewritten} time(s) (LevelSettings' hook at work); {rig.HooksAhead} onPreCull hook(s) ahead of " +
+                      $"ours, {rig.LevelHooksAhead} of them LevelSettings', ours last: {(rig.OursLast ? "yes" : "NO")}";
+
+                // Stage M2b (review): the proof, said loudly when it fails - a render our hook did not reach, or a hook
+                // added after ours, means the flat ambient may not be what those tiles were lit by
+                if (rig != null && rig.Renders > 0 && (rig.PreCulls != rig.Renders || !rig.OursLast))
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: menu capture of {plan.Key} - the rig's ambient hook ran {rig.PreCulls} time(s) for " +
+                        $"{rig.Renders} render(s) and was {(rig.OursLast ? "" : "NOT ")}last on Camera.onPreCull - some tiles may " +
+                        "carry the level's own ambient rather than the rig's.");
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: menu capture of {plan.Key} - phases: floors {F(plan.FloorSeconds)} s (cap {F0(plan.FloorCapSeconds)}), " +
+                    $"3D mesh {F(plan.MeshSeconds)} s (watchdog {F0(plan.MeshWatchdogCapSeconds)}), sides {F(plan.SidesSeconds)} s " +
+                    $"(cap {F0(SidePhaseSeconds)}), write {F(writeSeconds)} s, total {F(totalSeconds)} s; {rigLine}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the menu capture's phase line failed ({ex.Message}).");
+            }
+        }
+
+        private static string F0(double v) => IsFinite(v) ? v.ToString("0", CultureInfo.InvariantCulture) : "n/a";
+
+        private static string Rgb3(Color c) =>
+            string.Format(CultureInfo.InvariantCulture, "{0:0.00}/{1:0.00}/{2:0.00}", c.r, c.g, c.b);
 
         /// <summary>The render target and the texture tiles are read back into, half-float when the
         /// hardware renders one.</summary>
@@ -10982,10 +11566,20 @@ namespace QuestTree.QuestGraph
             // changed under the finally that puts it back.
             List<KeyValuePair<Terrain, float>> basemaps = null;
 
+            // Stage M2b: the menu rig's snapshot - null on a raid capture, which never has a sun
+            MenuRigHold rigHeld = null;
+
             try
             {
                 RenderSettings.fog = false;
                 if (_light != null) _light.enabled = true;
+
+                if (_sun != null)
+                {
+                    rigHeld = SnapshotMenuRig();
+                    ApplyMenuRig();
+                }
+
                 basemaps = HoldTerrainBasemaps();
 
                 // The scene's own distance culling and its water are NOT held here: they are held once
@@ -11014,6 +11608,7 @@ namespace QuestTree.QuestGraph
                 // All four restored by the statements that changed them, and for the same reason: the
                 // player's next frame must be drawn with the scene's own fog, the scene's own lights, the
                 // player's own LOD distances and the terrain's own detail.
+                ReleaseMenuRig(rigHeld);
                 RenderSettings.reflectionIntensity = reflectionIntensity;
                 RenderSettings.customReflectionTexture = customReflection;
                 RenderSettings.defaultReflectionMode = reflectionMode;
@@ -11233,6 +11828,30 @@ namespace QuestTree.QuestGraph
                     _light.enabled = false;
                     _light = null;
                     Destroy(light);
+                }
+
+                // Stage M2b: the menu rig's sun, and our hook in case a render never reached its release - in a try of
+                // their own (review), so a throw here cannot keep the render target and the rest below from going
+                try
+                {
+                    if (_menuPreCull != null) Camera.onPreCull -= _menuPreCull;
+
+                    if (_sun != null)
+                    {
+                        var sun = _sun.gameObject;
+                        _sun.enabled = false;
+                        Destroy(sun);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: the menu rig could not be taken down ({ex.GetType().Name}: {ex.Message}).");
+                }
+                finally
+                {
+                    _menuPreCull = null;
+                    _sun = null;
+                    _rig = null;
                 }
 
                 if (_rt != null)
@@ -12176,6 +12795,15 @@ namespace QuestTree.QuestGraph
                     _light.intensity = CaptureLightIntensity * SideLightGain;
                 }
 
+                // Stage M2b (review): the menu rig's sun likewise - held at its bearing, the sides facing away from it (N and W
+                // under a south-east sun) would be ambient only under the top band's reused exposure. RestoreTopCamera puts
+                // the rig's direction and intensity back.
+                if (_sun != null)
+                {
+                    _sun.transform.rotation = Quaternion.LookRotation(V(f));
+                    _sun.intensity = MenuSunIntensity * SideLightGain;
+                }
+
                 _camera.orthographicSize = TileSize / (2f * side.SamplePpm);
                 _camera.aspect = 1f;
                 _camera.nearClipPlane = SideStandOffMetres - 1f;
@@ -12617,6 +13245,13 @@ namespace QuestTree.QuestGraph
                 {
                     _light.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
                     _light.intensity = CaptureLightIntensity;
+                }
+
+                // Stage M2b (review): the rig's sun back to its own bearing and strength
+                if (_sun != null && _rig != null)
+                {
+                    _sun.transform.rotation = Quaternion.LookRotation(-_rig.TowardsSun);
+                    _sun.intensity = MenuSunIntensity;
                 }
             }
             catch (Exception ex)
@@ -13401,6 +14036,14 @@ namespace QuestTree.QuestGraph
             request.BuildingSeconds = Math.Min(MapMeshBuilder.MaxBuildingSeconds,
                 MapMeshBuilder.CaptureSecondsBudget - floors - sides - MapMeshBuilder.AtlasSecondsReserve);
 
+            // Stage M2b: a menu capture has no raid to give the frames back to - its building phase and atlas take the
+            // menu's own budgets (MenuBuildingSeconds, MenuAtlasSeconds), which its watchdog is summed from.
+            if (plan.MenuBudgets)
+            {
+                request.BuildingSeconds = MenuBuildingSeconds;
+                request.AtlasSeconds = MenuAtlasSeconds;
+            }
+
             // Stage W: each atlas page is streamed by its encoder (a worker) to its staged name plus ".part",
             // renamed to the staged name once the capture has waited for it after the hold (SettleAtlasPages), and
             // committed with the mesh in WriteMeta.
@@ -13665,9 +14308,9 @@ namespace QuestTree.QuestGraph
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: building {plan.Key}'s 3D map - the scene is held for up to about " +
-                    $"{(MapMeshBuilder.HardSecondsFor(soft) + MapMeshBuilder.DrainSeconds + MapMeshBuilder.AtlasSecondsReserve).ToString("0", CultureInfo.InvariantCulture)} s " +
+                    $"{(MapMeshBuilder.HardSecondsFor(soft) + MapMeshBuilder.DrainSeconds + request.AtlasSeconds).ToString("0", CultureInfo.InvariantCulture)} s " +
                     $"(decimating for the first {soft.ToString("0", CultureInfo.InvariantCulture)}, then up to " +
-                    $"{MapMeshBuilder.AtlasSecondsReserve.ToString("0", CultureInfo.InvariantCulture)} s of textures), so distant " +
+                    $"{request.AtlasSeconds.ToString("0", CultureInfo.InvariantCulture)} s of textures), so distant " +
                     "geometry stays drawn while it runs; the side views after it announce their own" +
                     (request.Base != null
                         ? $" - accumulating: {request.Base.Buildings.Count.ToString("#,##0", CultureInfo.InvariantCulture)} stored building(s) will not be read again unless degraded."
@@ -14304,7 +14947,8 @@ namespace QuestTree.QuestGraph
                 CaptureLighting lighting = null;
                 try
                 {
-                    lighting = ReadLighting();
+                    // Stage M2b: a menu-rig capture describes the rig it was lit by, not the (absent) raid's light
+                    lighting = _rig != null ? MenuLighting(plan.Key) : ReadLighting();
                 }
                 catch (Exception ex)
                 {
@@ -14329,9 +14973,9 @@ namespace QuestTree.QuestGraph
                     FirstCapturedAt = string.IsNullOrEmpty(plan.FirstCapturedAt) ? now : plan.FirstCapturedAt,
                     Captures = plan.Captures,
                     ModVersion = ModInfo.Stamp,
-                    Render = RenderTag,
-                    TimeOfDay = TimeOfDay(),
-                    Lighting = lighting,
+                    Render = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.Render : RenderTag,
+                    TimeOfDay = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.TimeOfDay : TimeOfDay(),
+                    Lighting = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.Lighting : lighting,
                     Floors = floors,
                     Labels = plan.Labels,
                     Mesh = mesh,
@@ -14400,12 +15044,14 @@ namespace QuestTree.QuestGraph
                 // this one, so an upload outlives the raid the capture was taken in. While a campaign or
                 // automatic capture holds this map (WP3) the capture is recorded as owed instead, and the
                 // hold's release uploads it once.
-                // Stage M2 (M2a): a menu capture is not offered yet - stage M2b takes MapTransfer's upload hold around it so
-                // exactly one upload follows the final write. Until then it stays on this machine.
-                if (plan.MenuMode)
+                // Stage M2b: a menu capture of a real key is offered like any other - RunMenuCapture holds the map's uploads
+                // around the capture, so this call is recorded as owed and the hold's release uploads it once. A "-menu"
+                // test set (or the switch off) is never offered.
+                if (plan.MenuMode && !MenuUploads(plan.Key))
                 {
                     Plugin.LogSource?.LogInfo(
-                        $"QuestTree: the menu capture of {plan.Key} is not offered to the host (menu uploads come in a later stage).");
+                        $"QuestTree: the menu capture of {plan.Key} is not offered to the host (" +
+                        (MenuCaptureUploads ? $"a '{MenuCaptureKeySuffix}' test set is never uploaded" : "MenuCaptureUploads is off") + ").");
                 }
                 else
                 {
@@ -14561,6 +15207,9 @@ namespace QuestTree.QuestGraph
         /// night capture can be recognised and retaken.</summary>
         private string TimeOfDay()
         {
+            // Stage M2b: a menu-rig capture has no raid clock - its light is the rig's, named as such
+            if (_rig != null) return "menu";
+
             try
             {
                 var clock = _gameWorld?.GameDateTime;
@@ -14574,6 +15223,73 @@ namespace QuestTree.QuestGraph
                 return "";
             }
         }
+
+        /// <summary>Stage M2b: the lighting block of a menu-rig capture - the rig it was lit by (<see cref="BuildMenuRig"/>),
+        /// with its flat ambient as harmonics - and one line saying what the 3D view will make of it.</summary>
+        /// <param name="key">The capture's key, for the line.</param>
+        private CaptureLighting MenuLighting(string key)
+        {
+            var rig = _rig;
+            float[] Rgb(Color c) => FiniteOrNull(new[] { c.r, c.g, c.b });
+
+            // The flat ambient as harmonics, by Unity's own convention (AddAmbientLight puts the colour in the L0 terms), so
+            // the 3D view's convention check - EFT's top formula sh1 + sh0 - sh6 - sh8 against Unity's Evaluate - reads it
+            var sh = new SphericalHarmonicsL2();
+            sh.AddAmbientLight(rig.Ambient);
+
+            var coefficients = new float[27];
+            for (var c = 0; c < 3; c++)
+                for (var i = 0; i < 9; i++)
+                    coefficients[c * 9 + i] = sh[c, i];
+
+            var l = new CaptureLighting
+            {
+                Source = MenuRigTag,
+                SunDirection = FiniteOrNull(new[] { rig.TowardsSun.x, rig.TowardsSun.y, rig.TowardsSun.z }),
+                SunColor = Rgb(rig.SunColour),
+                SunIntensity = Finite(MenuSunIntensity),
+                SunShadowStrength = Finite(MenuSunShadowStrength),
+
+                // The viewer refuses a night sun; the rig is a day's
+                IsDay = true,
+                Fogginess = 0f,
+                AmbientSh = FiniteOrNull(coefficients),
+                LevelSunColor = rig.FromLevel ? Rgb(rig.SunColour) : null,
+                Fog = false,
+                AmbientMode = AmbientMode.Flat.ToString(),
+                AmbientIntensity = 1f,
+                ColorSpace = QualitySettings.activeColorSpace.ToString(),
+            };
+
+            // What the 3D view will make of it (Map3DView.ResolveLight/ResolveAmbient's rules, restated): its sun where the
+            // block's elevation is inside 15..55 and the intensity over 0.05 on a day sun, else its preset; the ambient's top
+            // by Unity's evaluation, which must equal EFT's top formula (the view's convention check) to be drawn.
+            var up = new Color[1];
+            sh.Evaluate(new[] { Vector3.up }, up);
+            var eftTop = new Color(sh[0, 1] + sh[0, 0] - sh[0, 6] - sh[0, 8], sh[1, 1] + sh[1, 0] - sh[1, 6] - sh[1, 8],
+                sh[2, 1] + sh[2, 0] - sh[2, 6] - sh[2, 8], 1f);
+            var elevation = Mathf.Asin(Mathf.Clamp(rig.TowardsSun.y, -1f, 1f)) * Mathf.Rad2Deg;
+            var azimuth = Mathf.Atan2(rig.TowardsSun.x, rig.TowardsSun.z) * Mathf.Rad2Deg;
+            var sunUsed = elevation >= 15f && MenuSunIntensity >= 0.05f && l.SunColor != null && l.SunDirection != null;
+            var sunTop = Mathf.Max(0.0001f, MenuSunIntensity * rig.SunColour.maxColorComponent);
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: {key}'s lighting block describes the menu rig - sun towards {V3(rig.TowardsSun)} (elevation " +
+                $"{F(elevation)}, azimuth {F(azimuth < 0 ? azimuth + 360f : azimuth)}), colour {Rgb3(rig.SunColour)}, intensity " +
+                $"{F(MenuSunIntensity)}, shadow strength {F(MenuSunShadowStrength)}, day, time 'menu', ambient flat " +
+                $"{Rgb3(rig.Ambient)} as harmonics. The 3D view will use: " +
+                (sunUsed
+                    ? $"the captured sun at {F(Mathf.Min(elevation, 55f))} deg{(elevation > 55f ? " (clamped from " + F(elevation) + ")" : "")}"
+                    : "its preset sun (the block's sun fails its checks)") +
+                $", the ambient's top {Rgb3(up[0])} by Unity's evaluation against {Rgb3(eftTop)} by EFT's formula (" +
+                $"{(Mathf.Abs(up[0].maxColorComponent - eftTop.maxColorComponent) <= 0.02f * Mathf.Max(0.0001f, eftTop.maxColorComponent) ? "passes" : "FAILS")} " +
+                $"the convention check), {F(up[0].maxColorComponent / sunTop)} of the sun.");
+
+            return l;
+        }
+
+        private static string V3(Vector3 v) =>
+            string.Format(CultureInfo.InvariantCulture, "({0:0.000}, {1:0.000}, {2:0.000})", v.x, v.y, v.z);
 
         /// <summary>
         /// Lighting stage 2: the raid's light, read on the main thread where the meta is written, each part in its own
@@ -15416,6 +16132,28 @@ namespace QuestTree.QuestGraph
             /// <summary>Stage M2: a main-menu capture (<see cref="RunMenuCapture"/>) - every pixel and relief cell it writes
             /// records step 0 (<see cref="StepZero"/>), it records no stand and offers no upload. False on every raid plan.</summary>
             public bool MenuMode;
+
+            /// <summary>Stage M2b (review): a raid capture merging into a set a menu capture wrote (LoadPrevious) - the meta
+            /// keeps that set's render recipe, lighting block and time.</summary>
+            public bool IntoMenuSet;
+
+            /// <summary>Stage M2b: the time caps this capture runs under - the raid's constants unless a menu capture set the
+            /// menu's (<see cref="MenuCaptureBudgets"/>), so a raid plan reads exactly the numbers it always did. The floor
+            /// phase's cap (<see cref="FloorPhaseSeconds"/> / <see cref="MenuFloorPhaseSeconds"/>) ...</summary>
+            public double FloorCapSeconds = FloorPhaseSeconds;
+
+            /// <summary>... the mesh watchdog (<see cref="MeshWatchdogSeconds"/> / <see cref="MenuMeshWatchdogSeconds"/>) ...</summary>
+            public double MeshWatchdogCapSeconds = MeshWatchdogSeconds;
+
+            /// <summary>... and whether the builder's request takes <see cref="MenuBuildingSeconds"/> and
+            /// <see cref="MenuAtlasSeconds"/> in place of the raid's budget arithmetic (MeshRequest).</summary>
+            public bool MenuBudgets;
+
+            /// <summary>Stage M2b: the menu capture's phases, seconds, for its closing line (the floors' are
+            /// <see cref="FloorSeconds"/>).</summary>
+            public double MeshSeconds;
+
+            public double SidesSeconds;
 
             /// <summary>The meta of a capture of this map already on disk that this one may be merged
             /// into: same extent, same scale, same floors, same encoding. Null for a fresh capture -
