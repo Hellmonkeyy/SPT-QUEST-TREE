@@ -207,6 +207,11 @@ ZONES = Path(_POSITIONAL[1]) if len(_POSITIONAL) > 1 else Path(
 
 SCHEMA_VERSION = 1     # the capture-meta shape this script reads
 MAX_PNG_BYTES = 192 * 1024 * 1024  # MapCapture.MaxFloorPngBytes: 0.125 m/px floors, ~40-100 MB
+MENU_MAX_PNG_BYTES = 512 * 1024 * 1024  # MapCapture.MenuMaxFloorPngBytes (stage M2c): a menu capture's finer ground,
+                                        # up to 16 px/m and 16384 px long - Customs ~230 MB. A set is a menu set when
+                                        # its meta says capturedIn: "menu" (MENU_SET_MARKER), which a raid capture
+                                        # merged into one keeps (WriteMeta) and which does not depend on the menu rig
+MENU_SET_MARKER = "menu"                # MapCapture.MenuSetMarker, the meta's capturedIn on a menu set
 PIXEL_TOLERANCE = 1     # px, on each axis, a FLOOR against ceil(extent span * pxPerMetre) - exact since the
                         # capture widens its extent to its rounded picture (MapCapture.PictureExtent)
 SIDE_PIXEL_TOLERANCE = 4  # px, a SIDE against ceil(box span * pxPerMetre): the capture rounds a side up to a
@@ -588,6 +593,10 @@ def check_floors(meta, folder, key, extent, px_per_metre, errors, warnings):
                       f"has no picture")
         return set(), "-", 0
 
+    # Stage M2c: a menu set's floors may be up to MENU_MAX_PNG_BYTES; every other set keeps the raid's cap
+    menu_set = meta.get("capturedIn") == MENU_SET_MARKER
+    png_cap = MENU_MAX_PNG_BYTES if menu_set else MAX_PNG_BYTES
+
     levels, seen_levels, pixels, total = set(), [], None, 0
     for index, floor in enumerate(floors):
         where = f"{key}: floors[{index}]"
@@ -640,9 +649,9 @@ def check_floors(meta, folder, key, extent, px_per_metre, errors, warnings):
 
         size = png.stat().st_size
         total += size
-        if size > MAX_PNG_BYTES:
+        if size > png_cap:
             errors.append(f"{where}: {rel} is {size / 1048576:.1f} MB, over the "
-                          f"{MAX_PNG_BYTES // 1048576} MB cap")
+                          f"{png_cap // 1048576} MB {'menu ' if menu_set else ''}cap")
 
         actual, why = png_size(png)
         if actual is None:

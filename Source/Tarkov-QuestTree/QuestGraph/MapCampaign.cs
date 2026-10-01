@@ -832,6 +832,14 @@ namespace QuestTree.QuestGraph
                 return false;
             }
 
+            // Stage M2c: this raid already found the map's stored set is a menu set raid captures leave alone - every stop
+            // would be refused, so the campaign is, up front and with the real reason.
+            if (MapCapture.IsGuardedMenuSet(map))
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: no capture campaign on {map} - {MapCapture.GuardedMenuSetReason}.");
+                return false;
+            }
+
             // The same rectangle the harvest measured and a capture is drawn to - not a measurement
             // of our own, so the grid covers exactly the map the pictures will cover.
             var extent = MapExtentProbe.TryProbeForCapture(map);
@@ -1694,6 +1702,14 @@ namespace QuestTree.QuestGraph
                         skipped++;
                         failures++;
 
+                        // Stage M2c: the first stop found the stored set is a menu set raid captures leave alone - every
+                        // later stop would be refused the same way, so the campaign stops now, saying why
+                        if (MapCapture.IsGuardedMenuSet(map))
+                        {
+                            stopped = MapCapture.GuardedMenuSetReason;
+                            break;
+                        }
+
                         Plugin.LogSource?.LogInfo(
                             $"QuestTree: campaign stop {i + 1} of {stops.Count} at {At(stop)} - the capture " +
                             "did not start.");
@@ -2409,6 +2425,13 @@ namespace QuestTree.QuestGraph
                 if (string.IsNullOrEmpty(map))
                 {
                     Skip("this raid does not say which map it is");
+                    return;
+                }
+
+                // Stage M2c: the map's stored set is a menu set raid captures leave alone (found earlier this raid)
+                if (MapCapture.IsGuardedMenuSet(map))
+                {
+                    Skip(MapCapture.GuardedMenuSetReason);
                     return;
                 }
 

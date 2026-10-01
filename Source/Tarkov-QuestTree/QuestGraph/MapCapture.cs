@@ -1099,6 +1099,9 @@ namespace QuestTree.QuestGraph
                 // must not carry the last raid's heap (hotfix review): the first capture would otherwise collect late.
                 _heapAfterCollect = -1;
 
+                // Stage M2c: a new raid asks the disk again - a menu capture since the last raid may have changed the set
+                _guardedMenuSets.Clear();
+
                 var go = new GameObject("QuestTreeMapCapture");
                 go.transform.SetParent(gameWorld.transform, worldPositionStays: false);
 
@@ -1154,21 +1157,126 @@ namespace QuestTree.QuestGraph
         /// capture renders EVERY tile of every floor (there is no nearer earlier capture to keep), about 60 s a floor at the
         /// 1 GB floor budget (Customs 45 tiles in 41 s plus its encode), so a map of three or more floors would be cut at
         /// 180. The sides keep <see cref="SidePhaseSeconds"/>: they are four views at 4 px/m whatever the floors (Customs
-        /// 43 s of 180).</summary>
-        internal const double MenuFloorPhaseSeconds = 600d;
+        /// 43 s of 180).
+        ///
+        /// 1200 s (rollback: 600) since the finer ground (stage M2c): at about 0.9 s a tile, Customs at 14.3 px/m is 144
+        /// tiles (about 130 s) and Interchange at 13.5 px/m is 169 tiles a floor, five floors about 770 s - which 600 would
+        /// cut at the fourth or fifth floor.</summary>
+        internal const double MenuFloorPhaseSeconds = 1200d;
 
         /// <summary>Stage M2b: the longest a menu capture can run with every cap in force - <see cref="WorstCaseSeconds"/>'s
         /// terms with the menu's floor cap and watchdog, and without a campaign checkpoint (a menu capture holds none):
-        /// 2178 s. MenuMapHost's whileLoaded cap is sized from it.</summary>
+        /// 3438 s (2178 s before the finer ground: its floor cap is 1200 s; the settles no phase cap covers are the in-loop
+        /// floor settle and the last floor's, each at <see cref="MenuEncodeWaitSeconds"/>, and the last side's at
+        /// <see cref="EncodeWaitSeconds"/>). Counted at the finer ground's numbers whatever <see cref="MenuFineGround"/> says -
+        /// a cap too high only waits longer for a capture that is truly hung, and one too low cuts a capture that was
+        /// working. MenuMapHost's whileLoaded cap is sized from it.</summary>
         internal const double MenuWorstCaseSeconds =
-            MenuFloorPhaseSeconds * FloorPhaseOverrun +             // 750
+            MenuFloorPhaseSeconds * FloorPhaseOverrun +             // 1500
             MeshBaseWaitSeconds +                                   //  20
             MenuMeshWatchdogSeconds + MeshWatchdogGraceSeconds +    // 873
             AtlasEncodeWaitSeconds +                                //  60
             SidePhaseSeconds * SidePhaseOverrun +                   // 225
             FinishAllowanceSeconds +                                //  60
             CommitWaitSeconds +                                     //  10
-            2 * EncodeWaitSeconds;                                  // 180
+            2 * MenuEncodeWaitSeconds +                             // 600 (the in-loop floor settle and the last floor's)
+            EncodeWaitSeconds;                                      //  90 (the last side's settle)
+
+        // --- stage M2c: a menu capture's finer ground ----------------------------------------------------------------------
+        //
+        // The ground picture is the one part of a capture drawn by the game's own terrain shader under the capture's own
+        // light, and in the main menu nobody is waiting in a raid for the frames - so a menu capture takes it at up to twice
+        // the raid's density. Every number below reaches the capture through the Plan (Prepare sets it only on a menu plan),
+        // so a raid capture reads exactly the constants it always did. The sides keep the raid's scale and caps: they are
+        // walls seen at 45 degrees, where density buys less (SidePixelsPerMetre).
+
+        /// <summary>Stage M2c rollback: false gives a menu capture the raid's ground exactly - <see cref="MaxPixelsPerMetre"/>,
+        /// <see cref="CaptureMemoryBudgetBytes"/>, <see cref="MaxFloorPngBytes"/> and <see cref="EncodeWaitSeconds"/>.</summary>
+        internal static readonly bool MenuFineGround = true;
+
+        /// <summary>Stage M2c: the most pixels per metre a menu capture's floors are taken at (the raid's
+        /// <see cref="MaxPixelsPerMetre"/> is 8). A CAP, like the raid's: on a big map the long side binds first - the picture
+        /// may be at most Resolution() long, min(16384, DynamicMapsLibrary.MaxPictureSide), the largest single texture the
+        /// GPU takes - so Customs (1,143 m) lands at about 14.3 px/m and 16384 px, and only a map under about 1 km is held
+        /// by this number. Then <see cref="MenuCaptureMemoryBudgetBytes"/> may lower it in half steps, as it does a raid's.
+        /// The header line says which of the three decided it.</summary>
+        private const float MenuMaxPixelsPerMetre = 16f;
+
+        /// <summary>Stage M2c: one floor's working-set budget for a menu capture, in place of
+        /// <see cref="CaptureMemoryBudgetBytes"/> (1 GiB), at the same <see cref="WorkingSetBytesPerPixel"/> through the same
+        /// <see cref="Budget"/>. 4 GiB: Customs at its cap-bound 14.3 px/m is 16384x8512, 139 million pixels and 3,458 MiB,
+        /// and is not touched; Interchange's 965x925 m rectangle walks 16 -> 13.5 px/m (about 13030x12490, 4,035 MiB). The
+        /// largest single allocation is the float buffer, 12 of the 26 bytes: 1,596 MiB on Customs, about 1,862 on Interchange -
+        /// both under 2 GiB, so not even a runtime with the CLR's 2 GB object limit would refuse it, and every int index
+        /// (W x H x 3 floats, at most 16384 x 16384 x 3 = 805 million) is far under int.MaxValue. This budget also keeps a
+        /// floor under 165 million pixels, which is under the 179 million PIL refuses outright (tools/check-capture.py
+        /// --pixels). The machine this was sized on has 63 GB; one floor is worked at a time and collected between.
+        ///
+        /// Gated by the machine's RAM: at most an eighth of SystemInfo.systemMemorySize, so a 16 GB machine works a floor in
+        /// 2 GiB and an 8 GB one in the raid's 1 GiB - and Budget lowers the scale to fit, which costs sharpness rather than
+        /// an OutOfMemoryException. A machine that reports no memory gets the raid's <see cref="CaptureMemoryBudgetBytes"/>.
+        /// MAIN THREAD (SystemInfo): read in Prepare. The capture header says which number it was.</summary>
+        private static long MenuCaptureMemoryBudgetBytes
+        {
+            get
+            {
+                var ramMb = SystemInfo.systemMemorySize;
+                if (ramMb <= 0) return CaptureMemoryBudgetBytes;
+
+                return Math.Min(MenuCaptureMemoryBudgetCapBytes, ((long)ramMb << 20) / MenuCaptureMemoryRamShare);
+            }
+        }
+
+        /// <summary>Stage M2c: the most <see cref="MenuCaptureMemoryBudgetBytes"/> can be, whatever the RAM. 4 GiB.</summary>
+        private const long MenuCaptureMemoryBudgetCapBytes = 4L << 30;
+
+        /// <summary>Stage M2c: the share of the machine's RAM one menu floor may work in: an eighth.</summary>
+        private const long MenuCaptureMemoryRamShare = 8L;
+
+        /// <summary>Stage M2c: a menu floor's PNG cap, in place of <see cref="MaxFloorPngBytes"/> (192 MiB). Customs at 8 px/m
+        /// encoded to 63 MB (8576x4456); at 16384x8512 that is about 230 MB, over the raid's cap - 512 MiB keeps the cap a
+        /// test for noise rather than for a map. The managed encoder writes chunked parts with a long length
+        /// (PngEncoder.Result), so nothing in it counts bytes in an int; the menu set is never uploaded at this size (a
+        /// host copy is downscaled to 2048).</summary>
+        private const int MenuMaxFloorPngBytes = 512 * 1024 * 1024;
+
+        /// <summary>Stage M2c: how long a menu floor's settle waits for its managed encode, in place of
+        /// <see cref="EncodeWaitSeconds"/> (90 s). Up to 3.6x the pixels of an 8 px/m floor, and a fallback is Unity's encoder
+        /// on the main thread for a 557 MB picture - a far longer freeze than this wait - so 300 s.</summary>
+        private const double MenuEncodeWaitSeconds = 300d;
+
+        /// <summary>Stage M2c: the meta's <c>capturedIn</c> value on a set a menu capture wrote (CaptureMeta.CapturedIn) - an
+        /// explicit marker, so a menu set is known as one whatever its render recipe says (with the menu rig off it carries
+        /// no rig term). A raid capture merged into a menu set keeps it. tools/check-capture.py reads it.</summary>
+        internal const string MenuSetMarker = "menu";
+
+        /// <summary>Stage M2c rollback: false lets a raid capture replace a menu set it cannot merge into, as before. True:
+        /// a RAID capture that finds a stored menu set it may not merge into - a different density or extent, which the
+        /// finer ground makes the normal case, or any other of LoadPrevious's refusals - is REFUSED for that map and the
+        /// set is left untouched, because a raid picture is coarser than the menu's and "starting fresh" would replace the
+        /// sharper set with it. A merge picture to picture cannot take two densities, so there is no third way.
+        ///
+        /// The refusal is PERMANENT for that map until a fresh menu capture is taken over it: a SchemaVersion bump, or a
+        /// re-harvested extent (the zone harvester measuring the map differently), makes every later raid capture mismatch
+        /// a menu set that no raid capture may replace - so after either, recapture the map in the menu. With the switch
+        /// off a raid capture replaces the set as before. A guarded map is remembered for the raid
+        /// (<see cref="IsGuardedMenuSet"/>), so AutoCapture and the campaign stop asking.</summary>
+        internal static readonly bool RaidLeavesMenuSets = true;
+
+        /// <summary>Stage M2c: the maps whose stored menu set refused a raid capture in THIS raid (LoadPrevious) - so the
+        /// next capture of one stops in Prepare at once, and AutoCapture and the campaign can refuse up front with the real
+        /// reason. Cleared per GameWorld (Install): a menu capture taken between raids may have made the set mergeable, or
+        /// replaced it.</summary>
+        private static readonly HashSet<string> _guardedMenuSets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Stage M2c: whether this raid already found that <paramref name="key"/>'s stored set is a menu set a raid
+        /// capture must leave alone. Main thread.</summary>
+        /// <param name="key">The map key (MapKey).</param>
+        internal static bool IsGuardedMenuSet(string key) => !string.IsNullOrEmpty(key) && _guardedMenuSets.Contains(key);
+
+        /// <summary>Stage M2c: the reason a guarded map's capture is refused, worded for the campaign's and AutoCapture's
+        /// lines.</summary>
+        internal const string GuardedMenuSetReason = "the stored set is a sharper menu capture; raid captures leave it alone";
 
         // --- stage M2b: a menu capture's light ------------------------------------------------------------------------------
         //
@@ -2508,6 +2616,7 @@ namespace QuestTree.QuestGraph
                     // Stage M2b (review): a campaign stop that merged into a menu set keeps it one, as WriteMeta does
                     Render = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.Render : RenderTag,
                     TimeOfDay = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.TimeOfDay : TimeOfDay(),
+                    CapturedIn = plan.MenuMode || plan.IntoMenuSet ? MenuSetMarker : null,
                     Lighting = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.Lighting : lighting,
                     Floors = floors,
                     Labels = plan.Labels,
@@ -3206,6 +3315,7 @@ namespace QuestTree.QuestGraph
             ModVersion = m.ModVersion,
             Render = m.Render,
             TimeOfDay = m.TimeOfDay,
+            CapturedIn = m.CapturedIn,
             Lighting = m.Lighting,
             Floors = m.Floors,
             Labels = m.Labels,
@@ -4518,6 +4628,14 @@ namespace QuestTree.QuestGraph
                 var dir = CaptureDir(key);
                 if (dir == null) return false;
 
+                // Stage M2c: this raid already found the map's stored set is a menu set raid captures leave alone - said
+                // once at Warning when found (LoadPrevious); every retry stops here, before any scene read or camera.
+                if (!(_menu != null && _menu.MenuMode) && IsGuardedMenuSet(key))
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: nothing was captured on {key} - {GuardedMenuSetReason}.");
+                    return false;
+                }
+
                 // Campaign speed step 2: a checkpoint's write owns the held set and its files until it finishes - a capture
                 // started under it would merge into copies the worker is writing and stage files it may sweep.
                 if (CampaignWriting)
@@ -4565,8 +4683,16 @@ namespace QuestTree.QuestGraph
                 // then pass the cap - and a picture over DynamicMapsLibrary.MaxPictureSide is refused by the
                 // viewer. Resolution() hands back a multiple of four, so cap - 4 rounds up to at most cap.
                 var capPx = AlignPictureSides ? cap - PictureBlock : cap;
-                var wanted = (float)Math.Min(capPx / longSide, MaxPixelsPerMetre);
-                var ppm = Budget(wanted, widthM, heightM, out var budgetNote);
+
+                // Stage M2c: a menu capture's floors take the finer ground's cap and budget - decided here, before the
+                // plan exists, because the scale is; the plan then carries the PNG cap and encode wait that go with it.
+                var menu = _menu != null && _menu.MenuMode;
+                var fineGround = menu && MenuFineGround;
+                var ppmCap = fineGround ? MenuMaxPixelsPerMetre : MaxPixelsPerMetre;
+                var budgetBytes = fineGround ? MenuCaptureMemoryBudgetBytes : CaptureMemoryBudgetBytes;
+
+                var wanted = (float)Math.Min(capPx / longSide, ppmCap);
+                var ppm = Budget(wanted, widthM, heightM, budgetBytes, out var budgetNote);
 
                 if (!(ppm > 0f))
                 {
@@ -4589,8 +4715,15 @@ namespace QuestTree.QuestGraph
                     WidthPx = widthPx,
                     HeightPx = heightPx,
                     MeshFile = MapMeshFile.FileNameFor(key),
-                    MenuMode = _menu != null && _menu.MenuMode,
+                    MenuMode = menu,
                 };
+
+                // Stage M2c: the finer ground's file cap and encode wait. Never set on a raid plan.
+                if (fineGround)
+                {
+                    plan.FloorPngCapBytes = MenuMaxFloorPngBytes;
+                    plan.EncodeWaitCapSeconds = MenuEncodeWaitSeconds;
+                }
 
                 // Stage M2b: a menu capture's time caps - see MenuCaptureBudgets. Never set on a raid plan.
                 if (plan.MenuMode && MenuCaptureBudgets)
@@ -4681,11 +4814,19 @@ namespace QuestTree.QuestGraph
                 var hold = plan.MenuMode ? null : LiveHold(key);
                 plan.Previous = LoadPrevious(plan, _needsGamma, RenderTag, hold?.Meta);
 
-                if (hold?.Meta != null && plan.Previous == null)
+                if (hold?.Meta != null && plan.Previous == null && !plan.MenuSetGuarded)
                 {
                     DropHold(hold, "the held set no longer fits this capture", raidEnded: false);
                     hold = null;
                     plan.Previous = LoadPrevious(plan, _needsGamma, RenderTag);
+                }
+
+                // Stage M2c: the stored set is a menu set this raid capture may not merge into - LoadPrevious said so.
+                // Stop here, before anything is held or written, so the set stays exactly as it is.
+                if (plan.MenuSetGuarded)
+                {
+                    plan = null;
+                    return false;
                 }
 
                 plan.Hold = plan.MenuMode ? null : hold ?? NewHold(plan);
@@ -4736,6 +4877,19 @@ namespace QuestTree.QuestGraph
 
                     // Stage M2b: the light and the time caps it was taken under
                     if (_rig != null) note = $"{note}, {MenuRigNote(plan)}";
+
+                    // Stage M2c: the ground's density and what decided it - the px/m cap, the long side's pixel cap
+                    // (the GPU's one-texture limit), or the memory budget - so a set's log says why it is as sharp as it is
+                    var decidedBy = plan.Ppm < wanted
+                        ? "the memory budget"
+                        : wanted < ppmCap ? $"the {cap.ToString(CultureInfo.InvariantCulture)} px long side" : "the px/m cap";
+                    note = fineGround
+                        ? $"{note}, finer ground {Ppm(plan.Ppm)} px/m (cap {Ppm(ppmCap)}, set by {decidedBy}; " +
+                          $"{Mb(budgetBytes)} MB floor budget (the less of {Mb(MenuCaptureMemoryBudgetCapBytes)} MB and an " +
+                          $"eighth of {SystemInfo.systemMemorySize.ToString(CultureInfo.InvariantCulture)} MB RAM), " +
+                          $"{MenuMaxFloorPngBytes / (1024 * 1024)} MB PNG cap, " +
+                          $"{F0(MenuEncodeWaitSeconds)} s encode wait)"
+                        : $"{note}, the raid's ground {Ppm(plan.Ppm)} px/m (MenuFineGround off)";
 
                     note = plan.MenuBudgets
                         ? $"{note}, menu budgets: floors {F0(plan.FloorCapSeconds)} s, buildings {F0(MenuBuildingSeconds)} s, " +
@@ -6074,7 +6228,8 @@ namespace QuestTree.QuestGraph
                 return;
             }
 
-            if (!held && length > MaxFloorPngBytes)
+            // Stage M2c: the plan's cap - MaxFloorPngBytes on every raid plan, MenuMaxFloorPngBytes on a menu capture's
+            if (!held && length > plan.FloorPngCapBytes)
             {
                 // Not written rather than written and large: these files ship in the release zip
                 // and are uploaded to Fika hosts, and a floor this size is a sign the picture is
@@ -6082,7 +6237,7 @@ namespace QuestTree.QuestGraph
                 floor.Failed = true;
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" encoded to {length} bytes, over the " +
-                    $"{MaxFloorPngBytes / (1024 * 1024)} MB a floor may take - it was not written. Set Settings > " +
+                    $"{plan.FloorPngCapBytes / (1024 * 1024)} MB a floor may take - it was not written. Set Settings > " +
                     "Map > Capture resolution to 2048 and capture again.");
                 return;
             }
@@ -6293,8 +6448,11 @@ namespace QuestTree.QuestGraph
         /// finished in EncodeWaitSeconds, an error, or a round trip that failed - which turns the managed encoder off for
         /// the session).</summary>
         /// <param name="task">The encode.</param>
+        /// <param name="waitSeconds">How long the settle waited for it, for the line (the plan's EncodeWaitCapSeconds
+        /// for a floor and its sidecar, EncodeWaitSeconds for a side).</param>
         /// <param name="why">Why it cannot be used.</param>
-        private static PngEncoder.Result Settled(System.Threading.Tasks.Task<PngEncoder.Result> task, out string why)
+        private static PngEncoder.Result Settled(System.Threading.Tasks.Task<PngEncoder.Result> task, double waitSeconds,
+            out string why)
         {
             why = null;
 
@@ -6306,7 +6464,7 @@ namespace QuestTree.QuestGraph
 
             if (!task.IsCompleted)
             {
-                why = $"the managed encode did not finish in {EncodeWaitSeconds:0} s";
+                why = $"the managed encode did not finish in {F0(waitSeconds)} s";
                 return null;
             }
 
@@ -6404,7 +6562,7 @@ namespace QuestTree.QuestGraph
                 var clock = Stopwatch.StartNew();
 
                 while ((!floor.PictureEncode.IsCompleted || (floor.SidecarEncode != null && !floor.SidecarEncode.IsCompleted)) &&
-                       clock.Elapsed.TotalSeconds < EncodeWaitSeconds)
+                       clock.Elapsed.TotalSeconds < plan.EncodeWaitCapSeconds)
                     yield return null;
 
                 if (plan.Refused)
@@ -6434,10 +6592,10 @@ namespace QuestTree.QuestGraph
         {
             try
             {
-                var result = Settled(floor.PictureEncode, out var why);
+                var result = Settled(floor.PictureEncode, plan.EncodeWaitCapSeconds, out var why);
 
-                if (result != null && result.Length > MaxFloorPngBytes)
-                    why = $"the managed file is {result.Length} bytes, over the {MaxFloorPngBytes / (1024 * 1024)} MB a " +
+                if (result != null && result.Length > plan.FloorPngCapBytes)
+                    why = $"the managed file is {result.Length} bytes, over the {plan.FloorPngCapBytes / (1024 * 1024)} MB a " +
                           "floor may take - the cap is judged on Unity's encode";
 
                 if (why == null)
@@ -6501,7 +6659,7 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
-                var result = Settled(task, out var why);
+                var result = Settled(task, plan.EncodeWaitCapSeconds, out var why);
 
                 if (why == null)
                 {
@@ -7017,22 +7175,40 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
+                // Stage M2c: a raid capture never replaces a menu set - every refusal below refuses THIS capture instead
+                // (RaidLeavesMenuSets), and Prepare stops on plan.MenuSetGuarded with the set on disk untouched. Every
+                // refusal from here on goes through Refuse, so none can slip past it.
+                var guardMenu = !plan.MenuMode && RaidLeavesMenuSets && IsMenuSet(meta);
+
+                void Refuse(Plan p, string why)
+                {
+                    if (!guardMenu)
+                    {
+                        Fresh(p, why);
+                        return;
+                    }
+
+                    p.MenuSetGuarded = true;
+                    _guardedMenuSets.Add(p.Key);
+                    Plugin.LogSource?.LogWarning($"QuestTree: nothing was captured on {p.Key} - {GuardedMenuSetReason} ({why}).");
+                }
+
                 if (meta.SchemaVersion != SchemaVersion)
                 {
-                    Fresh(plan, $"the capture already there is schema {meta.SchemaVersion} and this build writes {SchemaVersion}");
+                    Refuse(plan, $"the capture already there is schema {meta.SchemaVersion} and this build writes {SchemaVersion}");
                     return null;
                 }
 
                 if (meta.Extent.MinX != plan.Extent.MinX || meta.Extent.MinZ != plan.Extent.MinZ ||
                     meta.Extent.MaxX != plan.Extent.MaxX || meta.Extent.MaxZ != plan.Extent.MaxZ)
                 {
-                    Fresh(plan, "the map has been measured differently since (its extent moved)");
+                    Refuse(plan, "the map has been measured differently since (its extent moved)");
                     return null;
                 }
 
                 if (meta.PxPerMetre != plan.Ppm)
                 {
-                    Fresh(plan, $"it was captured at {Ppm(meta.PxPerMetre)} px/m and this one is {Ppm(plan.Ppm)}");
+                    Refuse(plan, $"it was captured at {Ppm(meta.PxPerMetre)} px/m and this one is {Ppm(plan.Ppm)}");
                     return null;
                 }
 
@@ -7041,7 +7217,7 @@ namespace QuestTree.QuestGraph
 
                 if (!mine.SequenceEqual(theirs))
                 {
-                    Fresh(plan, $"its floors were {Levels(theirs)} and this capture's are {Levels(mine)}");
+                    Refuse(plan, $"its floors were {Levels(theirs)} and this capture's are {Levels(mine)}");
                     return null;
                 }
 
@@ -7064,7 +7240,7 @@ namespace QuestTree.QuestGraph
                     // taken under a different light would merge into a visible seam, and one taken without
                     // the LOD bias would win the distance test over ground that actually has buildings in
                     // it. Any difference at all, and this capture starts fresh.
-                    Fresh(plan, string.IsNullOrEmpty(meta.Render)
+                    Refuse(plan, string.IsNullOrEmpty(meta.Render)
                         ? $"it was taken before the render recipe was recorded, and this one is rendered {renderTag}"
                         : $"it was rendered {meta.Render} and this one is rendered {renderTag}");
                     return null;
@@ -7076,19 +7252,19 @@ namespace QuestTree.QuestGraph
                 {
                     if (floor.Exposure == null)
                     {
-                        Fresh(plan, "it does not record the exposure it was developed with");
+                        Refuse(plan, "it does not record the exposure it was developed with");
                         return null;
                     }
 
                     if (floor.Exposure.High - floor.Exposure.Low < MinExposureRange)
                     {
-                        Fresh(plan, "the exposure it records is degenerate");
+                        Refuse(plan, "the exposure it records is degenerate");
                         return null;
                     }
 
                     if (Math.Abs(floor.Exposure.Gamma - gamma) > 1e-4f)
                     {
-                        Fresh(plan, $"it was developed with gamma {G(floor.Exposure.Gamma)} and this machine " +
+                        Refuse(plan, $"it was developed with gamma {G(floor.Exposure.Gamma)} and this machine " +
                                     $"renders in {(needsGamma ? "half-float linear" : "eight bits")}, which needs {G(gamma)}");
                         return null;
                     }
@@ -7127,6 +7303,17 @@ namespace QuestTree.QuestGraph
         /// <param name="meta">The previous meta.</param>
         private static string FirstOf(CaptureMeta meta) =>
             string.IsNullOrEmpty(meta.FirstCapturedAt) ? meta.CapturedAt : meta.FirstCapturedAt;
+
+        /// <summary>Stage M2c: whether a stored set is a menu capture's - its explicit <see cref="CaptureMeta.CapturedIn"/>
+        /// marker, or, for a set written before the marker existed, the menu rig's term in its render recipe.</summary>
+        /// <param name="meta">The stored meta.</param>
+        private static bool IsMenuSet(CaptureMeta meta) =>
+            meta != null &&
+            (string.Equals(meta.CapturedIn, MenuSetMarker, StringComparison.Ordinal) ||
+             (meta.Render ?? "").Split(';').Any(term => term.StartsWith(MenuRigTermStem, StringComparison.Ordinal)));
+
+        /// <summary>Stage M2c: what every version of <see cref="MenuRigTag"/> starts with.</summary>
+        private const string MenuRigTermStem = "menu-rig-";
 
         /// <summary>The exposure the previous capture of this floor was developed with, or null when
         /// there is no previous capture to match.</summary>
@@ -12513,7 +12700,7 @@ namespace QuestTree.QuestGraph
 
                     MapSideView.Frame(f, r, u, e.MinX, e.MinZ, e.MaxX, e.MaxZ, yMin, yMax, out var frame);
 
-                    var ppm = Budget(SideWantedPpm(frame), frame[1], frame[3], out _);
+                    var ppm = Budget(SideWantedPpm(frame), frame[1], frame[3], CaptureMemoryBudgetBytes, out _);
                     pixels += (long)SidePictureSide(frame[1], ppm) * SidePictureSide(frame[3], ppm);
                 }
 
@@ -12714,7 +12901,7 @@ namespace QuestTree.QuestGraph
                 var e = plan.Extent;
                 MapSideView.Frame(f, r, u, e.MinX, e.MinZ, e.MaxX, e.MaxZ, yMin, yMax, out var frame);
 
-                var ppm = Budget(SideWantedPpm(frame), frame[1], frame[3], out var budgetNote);
+                var ppm = Budget(SideWantedPpm(frame), frame[1], frame[3], CaptureMemoryBudgetBytes, out var budgetNote);
 
                 var side = new Plan
                 {
@@ -13197,7 +13384,7 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                var result = Settled(floor.PictureEncode, out var why);
+                var result = Settled(floor.PictureEncode, EncodeWaitSeconds, out var why);
 
                 if (result != null && result.Length > MaxFloorPngBytes)
                     why = $"the managed file is {result.Length} bytes, over the {MaxFloorPngBytes / (1024 * 1024)} MB a " +
@@ -14994,6 +15181,7 @@ namespace QuestTree.QuestGraph
                     ModVersion = ModInfo.Stamp,
                     Render = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.Render : RenderTag,
                     TimeOfDay = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.TimeOfDay : TimeOfDay(),
+                    CapturedIn = plan.MenuMode || plan.IntoMenuSet ? MenuSetMarker : null,
                     Lighting = plan.IntoMenuSet && plan.Previous != null ? plan.Previous.Lighting : lighting,
                     Floors = floors,
                     Labels = plan.Labels,
@@ -15926,9 +16114,11 @@ namespace QuestTree.QuestGraph
         /// <param name="wanted">The scale the resolution setting and the pixel cap ask for.</param>
         /// <param name="widthM">The extent's width in metres.</param>
         /// <param name="heightM">Its height in metres.</param>
+        /// <param name="budgetBytes">The working set one floor may take: <see cref="CaptureMemoryBudgetBytes"/>, or
+        /// <see cref="MenuCaptureMemoryBudgetBytes"/> for a menu capture's floors (stage M2c).</param>
         /// <param name="note">A phrase for the capture header when the budget lowered the scale, or when
         /// it could not lower it far enough; null when the scale asked for fits as it is.</param>
-        private static float Budget(float wanted, double widthM, double heightM, out string note)
+        private static float Budget(float wanted, double widthM, double heightM, long budgetBytes, out string note)
         {
             note = null;
 
@@ -15943,7 +16133,7 @@ namespace QuestTree.QuestGraph
             // floor. On any extent where 1.197 px/m is over the budget and 1 px/m is not - a 2900 m square
             // is 299 MiB against 208 - that abandoned the walk one step early and captured the floor over
             // budget anyway, which is the OutOfMemoryException this method exists to prevent.
-            while (ppm > MinBudgetPpm && WorkingSet(widthM, heightM, ppm) > CaptureMemoryBudgetBytes)
+            while (ppm > MinBudgetPpm && WorkingSet(widthM, heightM, ppm) > budgetBytes)
             {
                 ppm = Math.Max(MinBudgetPpm, ppm - BudgetPpmStep);
             }
@@ -15956,11 +16146,11 @@ namespace QuestTree.QuestGraph
             // walk moved, because a scale already at or under the floor never enters the loop at all -
             // the pixel cap hands one back for an extent over 8 km on its long side - and the test below
             // would then return with no note and nothing said.
-            if (settled > CaptureMemoryBudgetBytes)
+            if (settled > budgetBytes)
             {
                 note =
                     $"{Ppm(wanted)} px/m would need {Mb(first)} MB a floor and even {Ppm(ppm)} px/m, the lowest " +
-                    $"scale there is, needs {Mb(settled)} MB - over the {Mb(CaptureMemoryBudgetBytes)} MB budget " +
+                    $"scale there is, needs {Mb(settled)} MB - over the {Mb(budgetBytes)} MB budget " +
                     "even at the floor, so this is captured over budget";
 
                 return ppm;
@@ -15969,7 +16159,7 @@ namespace QuestTree.QuestGraph
             if (ppm >= wanted) return ppm;
 
             note =
-                $"{Ppm(wanted)} px/m would need {Mb(first)} MB a floor, over the {Mb(CaptureMemoryBudgetBytes)} MB " +
+                $"{Ppm(wanted)} px/m would need {Mb(first)} MB a floor, over the {Mb(budgetBytes)} MB " +
                 $"budget, so {Ppm(ppm)} px/m ({Mb(settled)} MB)";
 
             return ppm;
@@ -16156,6 +16346,10 @@ namespace QuestTree.QuestGraph
             /// keeps that set's render recipe, lighting block and time.</summary>
             public bool IntoMenuSet;
 
+            /// <summary>Stage M2c: a raid capture LoadPrevious refused because the stored set is a menu set it may not merge
+            /// into (<see cref="RaidLeavesMenuSets"/>) - Prepare stops, and nothing on disk is touched.</summary>
+            public bool MenuSetGuarded;
+
             /// <summary>Stage M2b: the time caps this capture runs under - the raid's constants unless a menu capture set the
             /// menu's (<see cref="MenuCaptureBudgets"/>), so a raid plan reads exactly the numbers it always did. The floor
             /// phase's cap (<see cref="FloorPhaseSeconds"/> / <see cref="MenuFloorPhaseSeconds"/>) ...</summary>
@@ -16163,6 +16357,15 @@ namespace QuestTree.QuestGraph
 
             /// <summary>... the mesh watchdog (<see cref="MeshWatchdogSeconds"/> / <see cref="MenuMeshWatchdogSeconds"/>) ...</summary>
             public double MeshWatchdogCapSeconds = MeshWatchdogSeconds;
+
+            /// <summary>Stage M2c: the largest PNG a FLOOR of this capture may write - <see cref="MaxFloorPngBytes"/> unless a
+            /// menu capture's finer ground set <see cref="MenuMaxFloorPngBytes"/> (<see cref="MenuFineGround"/>). A side's own
+            /// plan never sets it, and RecordSide keeps the raid's constant.</summary>
+            public long FloorPngCapBytes = MaxFloorPngBytes;
+
+            /// <summary>Stage M2c: how long a floor's settle waits for its managed encode - <see cref="EncodeWaitSeconds"/>
+            /// unless the finer ground set <see cref="MenuEncodeWaitSeconds"/>.</summary>
+            public double EncodeWaitCapSeconds = EncodeWaitSeconds;
 
             /// <summary>... and whether the builder's request takes <see cref="MenuBuildingSeconds"/> and
             /// <see cref="MenuAtlasSeconds"/> in place of the raid's budget arithmetic (MeshRequest).</summary>
@@ -17160,6 +17363,11 @@ namespace QuestTree.QuestGraph
             /// <summary>The raid's own clock, "HH:mm", or "" when it could not be read. A map
             /// captured at 03:00 is a dark map and worth taking again.</summary>
             [JsonProperty("timeOfDay")] public string TimeOfDay { get; set; }
+
+            /// <summary>Stage M2c: <see cref="MenuSetMarker"/> on a set a menu capture wrote (and kept by a raid capture merged
+            /// into one); ABSENT on every raid set, so a raid meta is written exactly as before. See
+            /// <see cref="IsMenuSet"/>.</summary>
+            [JsonProperty("capturedIn", NullValueHandling = NullValueHandling.Ignore)] public string CapturedIn { get; set; }
 
             /// <summary>Lighting stage 2 (2026-09-28): the raid's LIGHT as the game had it when this capture was written -
             /// its sun, its ambient harmonics, its sky and fog colours, its tonemap - so the 3D map can be lit like the

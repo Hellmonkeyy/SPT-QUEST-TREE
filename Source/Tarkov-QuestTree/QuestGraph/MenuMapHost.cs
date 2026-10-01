@@ -535,8 +535,8 @@ namespace QuestTree.QuestGraph
         /// <summary>The wall-clock cap on the caller's work while the map is hosted. Past it the work is stopped (its finally
         /// blocks run) and the map is unloaded, so a wedged capture never leaves the menu holding a map.
         ///
-        /// Stage M2b: never under the menu capture's own worst case (MapCapture.MenuWorstCaseSeconds, 2178 s with the menu
-        /// budgets) plus <see cref="WhileLoadedMarginSeconds"/> for the wake and its restore - 2478 s today - so the host
+        /// Stage M2b: never under the menu capture's own worst case (MapCapture.MenuWorstCaseSeconds, 3438 s with the menu
+        /// budgets) plus <see cref="WhileLoadedMarginSeconds"/> for the wake and its restore - 3738 s today - so the host
         /// never cuts a capture its own caps would have let finish. 1800 s stays the floor.</summary>
         internal static readonly double WhileLoadedCapSeconds =
             Math.Max(1800d, MapCapture.MenuWorstCaseSeconds + WhileLoadedMarginSeconds);
