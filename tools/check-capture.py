@@ -212,6 +212,11 @@ MENU_MAX_PNG_BYTES = 512 * 1024 * 1024  # MapCapture.MenuMaxFloorPngBytes (stage
                                         # its meta says capturedIn: "menu" (MENU_SET_MARKER), which a raid capture
                                         # merged into one keeps (WriteMeta) and which does not depend on the menu rig
 MENU_SET_MARKER = "menu"                # MapCapture.MenuSetMarker, the meta's capturedIn on a menu set
+VIEW_PICTURE_SIDE = 8192                # MapCapture.ViewPictureSide (stage M3): a menu floor's optional viewing copy,
+                                        # <key>-<level>.view.png, box-filtered to at most this on its long side
+VIEW_SHAPE_TOLERANCE = 4                # px: the copy's short side is rounded to a multiple of 4 (MapCapture.ViewSize);
+                                        # MapCatalog.ViewCopy and MapTransfer.ViewSource allow the same
+SET_ASIDE_INFIX = ".bak-"               # MapCapture.SetAsideInfix: a set Replace moved aside, captures/<key>.bak-<time>/
 PIXEL_TOLERANCE = 1     # px, on each axis, a FLOOR against ceil(extent span * pxPerMetre) - exact since the
                         # capture widens its extent to its rounded picture (MapCapture.PictureExtent)
 SIDE_PIXEL_TOLERANCE = 4  # px, a SIDE against ceil(box span * pxPerMetre): the capture rounds a side up to a
@@ -680,6 +685,9 @@ def check_floors(meta, folder, key, extent, px_per_metre, errors, warnings):
 
         # The floor's distance sidecar, when there is one, has to be from the same capture as its picture
         # (review F09): a sidecar the capture could not write is deleted at commit, never left behind.
+        # Stage M3: the optional viewing copy - not counted in the floor's bytes or its cap (it is a quarter of them)
+        check_view_copy(floor, folder, where, png_w, png_h, menu_set, errors, warnings)
+
         if isinstance(level, int) and not isinstance(level, bool):
             dist_name = f"{key}-{level}.dist.png"
             dist_path = folder / dist_name
@@ -688,6 +696,71 @@ def check_floors(meta, folder, key, extent, px_per_metre, errors, warnings):
                                 f"older than its picture - a sidecar from an earlier capture (review F09)")
 
     return levels, pixels or "-", total
+
+
+def check_view_copy(floor, folder, where, png_w, png_h, menu_set, errors, warnings):
+    """Stage M3: a floor's optional viewing copy (viewFile/viewWidth/viewHeight). Absent is fine - pictures up to VIEW_PICTURE_SIDE
+    and older sets have none; any capture (menu or raid) writes one for a longer picture. Present, it must be a plain file in the folder, an RGBA PNG (the reach mask is its alpha) whose IHDR
+    is the size the meta says, no longer than VIEW_PICTURE_SIDE, smaller than the picture and of its shape. Returns its
+    bytes (0 when there is none)."""
+    rel = floor.get("viewFile")
+    view_w, view_h = floor.get("viewWidth"), floor.get("viewHeight")
+    if rel is None and view_w is None and view_h is None:
+        return 0
+    if not isinstance(rel, str) or not rel.strip():
+        errors.append(f"{where}: viewWidth/viewHeight are set but viewFile is missing or empty")
+        return 0
+    parts = Path(rel.replace("\\", "/"))
+    if parts.is_absolute() or ".." in parts.parts or len(parts.parts) != 1:
+        errors.append(f"{where}.viewFile {rel!r} is not a plain file name in the capture folder")
+        return 0
+    for field, value in (("viewWidth", view_w), ("viewHeight", view_h)):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            errors.append(f"{where}.{field} is missing or not a positive integer (viewFile {rel!r})")
+            return 0
+    path = folder / parts
+    if not path.is_file():
+        errors.append(f"{where}.viewFile {rel!r} does not exist in {folder} - the Maps tab falls back to the full picture")
+        return 0
+    try:
+        chunks = png_chunks(path)
+    except (OSError, ValueError) as exc:
+        errors.append(f"{where}: viewing copy {rel}: {exc}")
+        return 0
+    if not chunks or chunks[0][0] != "IHDR" or chunks[0][1] != 13:
+        errors.append(f"{where}: viewing copy {rel} does not start with an IHDR")
+        return 0
+    if any(not crc_ok for _, _, crc_ok, _ in chunks) or chunks[-1][0] != "IEND":
+        errors.append(f"{where}: viewing copy {rel} has a bad CRC or no IEND - it is cut short or damaged")
+    width, height, depth, colour, _method, _filtering, interlace = struct.unpack(">IIBBBBB", chunks[0][3])
+    if (width, height) != (view_w, view_h):
+        errors.append(f"{where}: viewWidth/viewHeight {view_w}x{view_h} do not match {rel}'s IHDR {width}x{height}")
+    if colour != 6 or depth != 8:
+        errors.append(f"{where}: viewing copy {rel} is colour type {colour} ({PNG_COLOUR_TYPES.get(colour, '?')}), bit depth "
+                      f"{depth} - it must be 8-bit RGBA, or the walkable mask (its alpha) is lost")
+    if interlace != 0:
+        warnings.append(f"{where}: viewing copy {rel} is interlaced")
+    if max(width, height) > VIEW_PICTURE_SIDE:
+        errors.append(f"{where}: viewing copy {rel} is {width}x{height}, longer than {VIEW_PICTURE_SIDE} px")
+    if png_w and png_h:
+        if width > png_w or height > png_h:
+            errors.append(f"{where}: viewing copy {rel} ({width}x{height}) is larger than its picture ({png_w}x{png_h})")
+        elif (abs(png_h * width / png_w - height) > VIEW_SHAPE_TOLERANCE and
+              abs(png_w * height / png_h - width) > VIEW_SHAPE_TOLERANCE):
+            errors.append(f"{where}: viewing copy {rel} ({width}x{height}) is not the shape of its picture ({png_w}x{png_h}) - "
+                          f"it is stretched onto the same extent, so it would not line up")
+    if PIXELS:
+        # The alpha must be a mask, not opaque everywhere: a copy whose alpha is all 255 over a picture that has a cut-out
+        # dropped it on the way.
+        try:
+            _w, _h, decoded_colour, rows = png_decode(path)
+            alphas = rows[3::4] if decoded_colour == 6 else b""
+            if alphas and min(alphas) == 255:
+                warnings.append(f"{where}: viewing copy {rel} is opaque everywhere (alpha 255) - check its picture has "
+                                f"no cut-out either")
+        except Exception as exc:  # the copy is optional: a check that cannot run is a warning
+            warnings.append(f"{where}: viewing copy {rel}'s alpha could not be read ({exc})")
+    return path.stat().st_size
 
 
 def check_zone(key, extent, levels, errors, warnings, px_per_metre=None):
@@ -2728,7 +2801,13 @@ def main():
         fail_hard(f"no captures folder at {CAPTURES} - pass one as the first argument")
 
     folders = [p for p in sorted(CAPTURES.iterdir()) if p.is_dir()]
+    # Stage M3: a set Replace moved aside is a backup, not a capture - the client skips it too (MapCatalog.ScanFolder)
+    backups = [p for p in folders if SET_ASIDE_INFIX in p.name.lower()]
+    folders = [p for p in folders if p not in backups]
     errors, warnings, lines = [], [], []
+    if backups:
+        warnings.append(f"{len(backups)} replaced set(s) kept as backups, not checked: " +
+                        ", ".join(p.name for p in backups))
 
     for folder in folders:
         result = check_capture(folder, errors, warnings)

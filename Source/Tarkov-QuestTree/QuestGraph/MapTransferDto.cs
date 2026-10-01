@@ -60,6 +60,14 @@ namespace QuestTree.QuestGraph
         [JsonProperty("width")] public int Width { get; set; }
         [JsonProperty("height")] public int Height { get; set; }
 
+        /// <summary>Stage M3: a menu floor's viewing copy beside the picture (MapCapture.ViewFileName) and its size -
+        /// optional. Read on THIS machine only: an upload encodes from it (it is a quarter of the pixels) and takes all
+        /// three out of the meta it sends, which describes the JPEG going up instead.</summary>
+        [JsonProperty("viewFile", NullValueHandling = NullValueHandling.Ignore)] public string ViewFile { get; set; }
+
+        [JsonProperty("viewWidth", NullValueHandling = NullValueHandling.Ignore)] public int? ViewWidth { get; set; }
+        [JsonProperty("viewHeight", NullValueHandling = NullValueHandling.Ignore)] public int? ViewHeight { get; set; }
+
         [JsonProperty("minY")] public float MinY { get; set; }
         [JsonProperty("maxY")] public float MaxY { get; set; }
     }

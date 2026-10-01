@@ -308,6 +308,9 @@ namespace QuestTree
         /// size bound, so it takes effect at the next capture, and a mesh already larger shrinks over the next captures.</summary>
         public static ConfigEntry<int> MeshSizeTargetMb { get; private set; }
 
+        /// <summary>Opt B (2026-10-01): whether the 3D map's small buildings and props (under about 6 m across) cast the sun's
+        /// shadow. Read by Map3DView at every redraw, which it triggers itself on a change - no mesh rebuild. F12 and the cfg
+        /// only, like the other 3D-map switches.</summary>
         /// <summary>THROWAWAY. The debug key of the 3D map experiments - see QuestGraph/MeshProbe.cs,
         /// which measures in one raid and one menu visit whether a scene mesh can be read back off the
         /// GPU, whether colliders stream out with the player, which layer has no renderer on it, and
@@ -348,6 +351,16 @@ namespace QuestTree
         /// key host that map in the main menu AND take a whole map capture of it while it is loaded
         /// (MapCapture.RunMenuCapture). Wins over <see cref="MenuMapHostLocation"/>. Empty by default.</summary>
         public static ConfigEntry<string> MenuCaptureLocation { get; private set; }
+
+        /// <summary>Stage M3: the scene-name suffixes a capture from game files does not load, as a comma list - audio-only
+        /// and culling-bake scenes, which carry nothing the capture draws. Read by QuestGraph.MenuMapHost.SkipSuffixes at
+        /// each run; MenuMapHost.SkipSuffixesFromSettings rolls it back to the built-in list. F12 and the cfg only.</summary>
+        public static ConfigEntry<string> MenuCaptureSkipSuffixes { get; private set; }
+
+        /// <summary>THROWAWAY (stage M3): when on, a map in the Maps tab draws from its "&lt;id&gt;-menu" test set (the probe
+        /// key's menu capture) when one exists, so the maintainer can look at the test sets. Off by default; F12 and the cfg
+        /// only. Delete with the probe settings.</summary>
+        public static ConfigEntry<bool> ShowMenuTestSets { get; private set; }
 
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
@@ -1097,9 +1110,25 @@ namespace QuestTree
                 "Debug only, and temporary. When set to a location id (bigmap, Interchange, ...), the menu scene probe key hosts " +
                 "that whole map in the main menu and takes a full map capture of it (floors, 3D mesh, side views) into the " +
                 "captures folder under its own key, <id>-menu (e.g. bigmap-menu), beside the raid set and never merged into it; " +
-                "the Maps tab does not show it. Nothing is uploaded. " +
+                "the Maps tab shows it only with \"Show -menu test sets in the Maps tab\" on. Nothing is uploaded. The Maps tab's " +
+                "\"Capture from game files\" writes the map's real set instead. " +
                 "Wins over the menu map host location. Its lines start \"QuestTree: menu capture:\", \"QuestTree: menu map host:\" " +
                 "and \"QuestTree: capturing\" in BepInEx/LogOutput.log. Restart the game after using this, before any raid.");
+
+            // Stage M3: the capture from game files' scene filter - out of Entries like the other capture internals.
+            MenuCaptureSkipSuffixes = config.Bind(
+                "Advanced", "Menu capture: skip scenes ending in", "_Sound,_Culling",
+                "A comma list of scene-name endings that \"Capture from game files\" (the Maps tab, in the main menu) does not " +
+                "load: audio-only and culling-bake scenes carry nothing a map picture shows and cost load time and memory. A " +
+                "scene ending in _AI (the map's navigation mesh) is always loaded. Empty loads every scene of the map. Takes " +
+                "effect at the next capture.");
+
+            // THROWAWAY (stage M3): out of Entries like the probe settings.
+            ShowMenuTestSets = config.Bind(
+                "Advanced", "Show -menu test sets in the Maps tab (throwaway)", false,
+                "Debug only, and temporary. On, a map in the Maps tab is drawn from its <id>-menu test set (what the menu " +
+                "capture location setting above writes, e.g. bigmap-menu) when one exists, instead of its real set - so a test " +
+                "capture can be looked at. Off, the default, the test sets are never drawn.");
 
             // WP2: the 3D mesh's accumulation - out of Entries, so the in-panel Settings tab shows no row for them; F12 and
             // the cfg file only.
@@ -1160,6 +1189,7 @@ namespace QuestTree
                     "are not changed. Each capture's log line gives the file's size against this target.",
                     new AcceptableValueList<int>(90, 120, 150, 180)));
 
+            // Opt B (2026-10-01): out of Entries like the other 3D map switches; F12 and the cfg file only.
             Entries.AddRange(new ConfigEntryBase[]
             {
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
@@ -1230,6 +1260,7 @@ namespace QuestTree
             // generation in its key, and without the bump a flip from the F12 menu would leave the 2D
             // picture on screen with the toggle beside it saying 3D.
             MapPictureSource.SettingChanged += Raise;
+            ShowMenuTestSets.SettingChanged += Raise;   // stage M3: what the map draws
             MapLabels.SettingChanged += Raise;
             MapMode.SettingChanged += Raise;
             MapLighting.SettingChanged += Raise;

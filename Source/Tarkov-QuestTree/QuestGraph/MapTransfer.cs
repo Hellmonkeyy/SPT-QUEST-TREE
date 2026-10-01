@@ -329,6 +329,89 @@ namespace QuestTree.QuestGraph
         /// <summary><see cref="Now"/> when the running upload started - a campaign hold taken after it preempts it (WP3).</summary>
         private static float _uploadStartedAt;
 
+        /// <summary>Stage M3 rollback: false runs every upload on the plugin object, as before. True: an upload started
+        /// with no GameWorld at all - the main menu, where a menu capture's one upload is released - runs on the tracker's
+        /// menu host (UI.TrackerHotkey), which is proven to tick there; a plugin-made DontDestroyOnLoad object is not
+        /// (memory ddol-objects-dead-in-menu). In a raid or the hideout the plugin object runs it, as before, so an upload
+        /// outlives the raid it was started in.</summary>
+        internal static readonly bool MenuUploadsOnTrackerHost = true;
+
+        /// <summary>Stage M3: the behaviour running the upload in progress, and whether it is the tracker's menu host -
+        /// which can be destroyed or deactivated with the menu (a raid loading), killing the coroutine WITHOUT its
+        /// finally. <see cref="CheckUploadHost"/> then frees the upload slot and queues the map again.</summary>
+        private static MonoBehaviour _uploadHost;
+
+        private static bool _uploadOnMenuHost;
+
+        /// <summary>Stage M3: the words for the host running the upload in progress, for its lines.</summary>
+        private static string _uploadHostName = "the plugin object";
+
+        /// <summary>Stage M3: where a new upload runs - see <see cref="MenuUploadsOnTrackerHost"/>. Null when there is no
+        /// behaviour at all.</summary>
+        /// <param name="name">Its words for the log.</param>
+        /// <param name="menuHost">Whether it is the tracker's menu host.</param>
+        private static MonoBehaviour UploadHost(out string name, out bool menuHost)
+        {
+            menuHost = false;
+
+            try
+            {
+                if (MenuUploadsOnTrackerHost && Comfort.Common.Singleton<EFT.GameWorld>.Instance == null)
+                {
+                    var tracker = QuestTree.UI.TrackerHotkey.Current;
+                    if (tracker != null && tracker.isActiveAndEnabled)
+                    {
+                        name = "the tracker's menu host (no GameWorld: the main menu)";
+                        menuHost = true;
+                        return tracker;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // The plugin object, as before.
+            }
+
+            name = "the plugin object";
+            return Plugin.Instance;
+        }
+
+        /// <summary>
+        /// Stage M3: an upload hosted on the tracker's menu host whose host has been destroyed or deactivated is DEAD - Unity
+        /// stopped its coroutine without running its finally, so the slot would stay taken for the session. Frees it, puts
+        /// the map back on the queue (offered again by the next upload start; its owed marker still stands for the next
+        /// session), and starts what is queued. Polled from TrackerHotkey.Update and from every upload start. Main thread,
+        /// never throws.
+        /// </summary>
+        internal static void CheckUploadHost()
+        {
+            try
+            {
+                if (!_uploading || !_uploadOnMenuHost) return;
+
+                var host = _uploadHost;
+                if (host != null && host.gameObject.activeInHierarchy) return;
+
+                var key = _uploadingKey;
+                _uploading = false;
+                _uploadingKey = null;
+                _uploadHost = null;
+                _uploadOnMenuHost = false;
+
+                if (!string.IsNullOrEmpty(key) && !_owed.Contains(key)) _pendingUploads.Add(key);
+
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the upload of {key ?? "a map"} stopped with its host (the tracker's menu host was " +
+                    $"{(host == null ? "destroyed" : "deactivated")}) - it is queued and offered again at the next upload start.");
+
+                StartNextPending();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the upload host check failed ({ex.Message}).");
+            }
+        }
+
         /// <summary>Captures that finished while another upload was running, offered one after another as each
         /// upload ends (<see cref="StartNextPending"/>). Main thread only, like everything upload-side.
         ///
@@ -813,6 +896,9 @@ namespace QuestTree.QuestGraph
             {
                 if (string.IsNullOrEmpty(key)) return UploadStart.NothingOwed;
 
+                // Stage M3: an upload whose menu host died holds the slot for nothing - freed first.
+                CheckUploadHost();
+
                 // The player's choice, and the default is on: a host that does not want uploads
                 // refuses them itself, so the setting is for the player who does not want to offer
                 // even that.
@@ -857,7 +943,8 @@ namespace QuestTree.QuestGraph
                     return UploadStart.Queued;
                 }
 
-                var host = Plugin.Instance;
+                // Stage M3: the menu or the plugin object - see MenuUploadsOnTrackerHost.
+                var host = UploadHost(out var hostName, out var menuHost);
                 if (host == null)
                 {
                     Plugin.LogSource?.LogDebug(
@@ -868,6 +955,11 @@ namespace QuestTree.QuestGraph
                 _uploading = true;
                 _uploadingKey = key;
                 _uploadStartedAt = Now();
+                _uploadHost = host;
+                _uploadOnMenuHost = menuHost;
+                _uploadHostName = hostName;
+
+                Plugin.LogSource?.LogInfo($"QuestTree: the upload of {key} starts on {hostName}.");
                 host.StartCoroutine(UploadRoutine(key));
                 return UploadStart.Started;
             }
@@ -875,6 +967,8 @@ namespace QuestTree.QuestGraph
             {
                 _uploading = false;
                 _uploadingKey = null;
+                _uploadHost = null;
+                _uploadOnMenuHost = false;
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the capture of {key} could not be offered to the host ({ex.GetType().Name}: {ex.Message}) " +
                     "- it is on this machine either way.");
@@ -908,7 +1002,8 @@ namespace QuestTree.QuestGraph
                 // after that yield, which only a ticking host reaches.
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: the upload of {key} took its first step {(Now() - _uploadStartedAt).ToString("0.0", CultureInfo.InvariantCulture)} s " +
-                    $"after it was started, {(Comfort.Common.Singleton<EFT.GameWorld>.Instance != null ? "with a GameWorld set (a raid or the hideout)" : "with no GameWorld (the main menu)")}.");
+                    $"after it was started, {(Comfort.Common.Singleton<EFT.GameWorld>.Instance != null ? "with a GameWorld set (a raid or the hideout)" : "with no GameWorld (the main menu)")}, " +
+                    $"on {_uploadHostName}.");
 
                 // Q6: this upload reads the newest capture on disk, so every request for this map queued before
                 // this frame is satisfied by it. A request queued AFTER it - a newer capture - stays queued. The commit
@@ -1362,6 +1457,8 @@ namespace QuestTree.QuestGraph
             {
                 _uploading = false;
                 _uploadingKey = null;
+                _uploadHost = null;
+                _uploadOnMenuHost = false;
 
                 // Step 7: off the owed marker, unless it is owed or queued again.
                 EndUpload(key);
@@ -1660,6 +1757,18 @@ namespace QuestTree.QuestGraph
                     var picture = Path.Combine(dir, floor.File);
                     if (!File.Exists(picture)) continue;
 
+                    // Stage M3: a menu floor's viewing copy, when it is there, is the source - the same picture at a
+                    // quarter of the pixels, so the read, the main-thread decode and the composite cost a quarter. The wire
+                    // size is still the FULL picture's (DescribeWire scales floor.Width/Height, untouched here), so a set
+                    // with and without copies describes its floors alike; Encode scales every floor to exactly that size
+                    // (DeclaredFloorSize), whatever its source. The view fields never leave this machine.
+                    var view = ViewSource(dir, floor, say);
+                    if (view != null) picture = view;
+
+                    floor.ViewFile = null;
+                    floor.ViewWidth = null;
+                    floor.ViewHeight = null;
+
                     floors.Add(new FloorUpload
                     {
                         Level = floor.Level,
@@ -1679,6 +1788,65 @@ namespace QuestTree.QuestGraph
                 meta = null;
                 floors = new List<FloorUpload>();
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Stage M3 (review): a FLOOR's JPEG size is the one DescribeWire declared in the meta being sent
+        /// (<see cref="FloorUpload.Entry"/>, rewritten before the first post) - not ScaleTo of whatever was decoded, because
+        /// the source may be the floor's viewing copy, whose own ScaleTo can round the short side a pixel differently from
+        /// the full picture's, and SizeMatches would then drop the floor. For a floor read from its full picture the two are
+        /// the same numbers as before. False for a side or a page (their own rules), or an entry with no size.
+        /// </summary>
+        private static bool DeclaredFloorSize(FloorUpload floor, out int width, out int height)
+        {
+            width = height = 0;
+            if (floor == null || floor.Side != null || floor.Atlas != null || floor.Entry == null) return false;
+            if (floor.Entry.Width <= 0 || floor.Entry.Height <= 0) return false;
+
+            width = floor.Entry.Width;
+            height = floor.Entry.Height;
+            return true;
+        }
+
+        /// <summary>Stage M3 rollback: false always encodes an upload from the full picture, as before.</summary>
+        internal static readonly bool UploadFromViewCopy = true;
+
+        /// <summary>Stage M3: the path of <paramref name="floor"/>'s viewing copy when the upload may encode from it - a plain
+        /// file name in the capture's folder, on disk, with a positive size whose shape is the picture's (within the copy's
+        /// rounding of its short side to a multiple of 4) - else null, and the upload reads the full picture.</summary>
+        /// <param name="dir">The capture's folder.</param>
+        /// <param name="floor">The floor's meta entry.</param>
+        /// <param name="say">Where its line goes.</param>
+        private static string ViewSource(string dir, MapCaptureFloorDto floor, LineBuffer say)
+        {
+            try
+            {
+                if (!UploadFromViewCopy || string.IsNullOrEmpty(floor.ViewFile)) return null;
+                if (!string.Equals(floor.ViewFile, Path.GetFileName(floor.ViewFile), StringComparison.Ordinal)) return null;
+
+                var vw = floor.ViewWidth ?? 0;
+                var vh = floor.ViewHeight ?? 0;
+                if (vw <= 0 || vh <= 0 || floor.Width <= 0 || floor.Height <= 0) return null;
+
+                // The copy's long side is exact and its short side rounded to 4 px: the shapes agree within that, measured
+                // on the short side (either axis may be it), as MapCatalog.ViewCopy measures it.
+                if (vw > floor.Width || vh > floor.Height) return null;
+                if (Math.Abs((double)floor.Height * vw / floor.Width - vh) > 4d &&
+                    Math.Abs((double)floor.Width * vh / floor.Height - vw) > 4d) return null;
+
+                var path = Path.Combine(dir, floor.ViewFile);
+                if (!File.Exists(path)) return null;
+
+                say.Debug(
+                    $"QuestTree: floor {floor.Level.ToString(CultureInfo.InvariantCulture)} is encoded for upload from its viewing copy " +
+                    $"{floor.ViewFile} ({vw.ToString(CultureInfo.InvariantCulture)}x{vh.ToString(CultureInfo.InvariantCulture)}), " +
+                    $"not the {floor.Width.ToString(CultureInfo.InvariantCulture)}x{floor.Height.ToString(CultureInfo.InvariantCulture)} picture.");
+                return path;
+            }
+            catch (Exception)
+            {
+                return null;
             }
         }
 
@@ -2349,7 +2517,7 @@ namespace QuestTree.QuestGraph
                     width = source.width;
                     height = source.height;
                 }
-                else
+                else if (!DeclaredFloorSize(floor, out width, out height))
                 {
                     ScaleTo(source.width, source.height, MaxLongSide, out width, out height,
                         ceilShort: floor.Side != null);
@@ -2865,7 +3033,7 @@ namespace QuestTree.QuestGraph
                     s.Width = s.SourceWidth;
                     s.Height = s.SourceHeight;
                 }
-                else
+                else if (!DeclaredFloorSize(floor, out s.Width, out s.Height))
                 {
                     ScaleTo(s.SourceWidth, s.SourceHeight, MaxLongSide, out s.Width, out s.Height, ceilShort: floor.Side != null);
                 }

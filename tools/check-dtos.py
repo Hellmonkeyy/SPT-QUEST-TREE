@@ -83,9 +83,15 @@ NO_MIRROR = {
 }
 
 # Client properties that are deliberately absent from the server, keyed (client class, wire name),
-# with the reason. Empty today; a field kept for an older server would be recorded here rather than
-# silencing the check.
-CLIENT_ONLY_OK = {}
+# with the reason. A field kept for an older server would be recorded here rather than silencing the check.
+_VIEW_COPY = ("stage M3: a menu floor's viewing copy, read from THIS machine's own capture meta only - MapTransfer's "
+              "ReadCapture uses it as the upload's source and nulls all three before the meta goes on the wire, so "
+              "the host never stores or sends them")
+CLIENT_ONLY_OK = {
+    ("MapCaptureFloorDto", "viewFile"): _VIEW_COPY,
+    ("MapCaptureFloorDto", "viewWidth"): _VIEW_COPY,
+    ("MapCaptureFloorDto", "viewHeight"): _VIEW_COPY,
+}
 
 CLASS_RE = re.compile(
     r"\b(?:public|internal|private|protected)\s+(?:static\s+|sealed\s+|abstract\s+|partial\s+)*class\s+(\w+)")

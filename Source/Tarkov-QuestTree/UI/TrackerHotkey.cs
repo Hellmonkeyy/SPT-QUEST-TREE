@@ -37,6 +37,11 @@ namespace QuestTree.UI
 
         private static TrackerHotkey _instance;
 
+        /// <summary>Stage M3: the live watcher, or null - the behaviour the Maps tab's capture from game files and a menu
+        /// upload (MapTransfer.UploadHost) run their coroutines on, because it is proven to tick in the menu. Unity's null
+        /// test, so a destroyed one reads as null.</summary>
+        internal static TrackerHotkey Current => _instance != null ? _instance : null;
+
         private void Update()
         {
             // THROWAWAY (the 3D map experiments' probe key): polled from here too, because this Update
@@ -56,6 +61,11 @@ namespace QuestTree.UI
             // Update is proven to tick there, so the write's main-thread end (the upload release, the Maps tab) runs from here
             // too, not only from the plugin object's coroutine.
             QuestGraph.MapCapture.PollCampaignWrite();
+
+            // Stage M3: the Maps tab's capture from game files - a run's end and capture all's next map - and an upload
+            // hosted here whose host was replaced (a menu rebuilt mid-upload). Both after the host's dead-run check above.
+            QuestGraph.MenuCaptureRunner.Poll();
+            QuestGraph.MapTransfer.CheckUploadHost();
 
             if (!ModSettings.Ready) return;
 

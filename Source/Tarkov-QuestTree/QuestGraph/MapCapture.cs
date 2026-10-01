@@ -1120,7 +1120,8 @@ namespace QuestTree.QuestGraph
         /// set of its own beside the raid set (its own captures folder), never merging into or winning over the raid
         /// pictures while its lighting is not yet the menu rig. No upload is offered for it either. The Maps tab never asks
         /// for such a key (MapCatalog looks sets up by the viewed location's id), so it is scanned and counted but not
-        /// drawn. Stage M2b/M3 decides when a menu capture writes the location's own key; "" does that now.</summary>
+        /// drawn. Stage M3: the Maps tab's "Capture from game files" (MenuCaptureRunner) writes the location's OWN key;
+        /// this suffix is the throwaway probe key's test set only (and ModSettings.ShowMenuTestSets draws it).</summary>
         internal const string MenuCaptureKeySuffix = "-menu";
 
         // --- stage M2b: a menu capture's time budgets ----------------------------------------------------------------------
@@ -1344,18 +1345,48 @@ namespace QuestTree.QuestGraph
             !key.EndsWith(MenuCaptureKeySuffix, StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
-        /// Stage M2: one main-menu capture - what stands in for the raid's GameWorld. The map key (the location's Id plus
-        /// <see cref="MenuCaptureKeySuffix"/>), the identity the mesh builder's scene cache is keyed on (a raid keys it on
+        /// Stage M2: one main-menu capture - what stands in for the raid's GameWorld. The map key (the location's Id - plus
+        /// <see cref="MenuCaptureKeySuffix"/> for the probe's test set), its write mode (stage M3), the identity the mesh builder's scene cache is keyed on (a raid keys it on
         /// its GameWorld; each menu capture is its own "world"), <see cref="MenuMode"/>, which every menu branch of this
         /// file reads, and the hook the wake's check runs from just before the first tile.
         /// </summary>
         internal sealed class MenuSession
         {
-            /// <summary>The location id as it was asked for (the throwaway setting's text).</summary>
+            /// <summary>The location id as it was asked for (the throwaway setting's text, or the Maps tab's map).</summary>
             internal readonly string LocationId;
 
-            /// <summary>The capture's key: the location's own Id plus <see cref="MenuCaptureKeySuffix"/>.</summary>
+            /// <summary>The capture's key: the location's own Id - plus <see cref="MenuCaptureKeySuffix"/> for the throwaway
+            /// probe's test set.</summary>
             internal readonly string Key;
+
+            /// <summary>Stage M3: how this capture treats the set already stored under <see cref="Key"/>.</summary>
+            internal readonly MenuWriteMode Write;
+
+            /// <summary>Stage M3: why the stored set could not take this capture and nothing was captured - the Maps tab
+            /// says "choose Replace" with it. Null otherwise.</summary>
+            internal string NeedsReplace;
+
+            /// <summary>Stage M3: the write's summary ("2 floor(s), 251,234,567 bytes"), or null when nothing was
+            /// written.</summary>
+            internal string Written;
+
+            /// <summary>Stage M3: the folder name the replaced set was moved to (captures/&lt;key&gt;.bak-&lt;time&gt;),
+            /// or null when nothing was set aside.</summary>
+            internal string SetAside;
+
+            /// <summary>Stage M3 (review): the bytes the set moved aside holds.</summary>
+            internal long SetAsideBytes;
+
+            /// <summary>Stage M3 (review): the write failed after the set was moved aside and the old set was put back in
+            /// place (true), or could not be (false while <see cref="SetAside"/> is set and the write failed) - the result
+            /// line says which.</summary>
+            internal bool SetAsideRestored;
+
+            /// <summary>Stage M3 (review): the write failed after its first commit (no meta was written).</summary>
+            internal string WriteFailed;
+
+            /// <summary>Stage M3: why the capture stopped before its write, when it said one (Prepare's refusals), or null.</summary>
+            internal string Stopped;
 
             /// <summary>What the scene cache is keyed on in place of a GameWorld.</summary>
             internal readonly object Identity = new object();
@@ -1371,13 +1402,99 @@ namespace QuestTree.QuestGraph
             /// capture header; -1 when none were looked for (the rig off).</summary>
             internal int DirectionalLightsDisabled = -1;
 
+            /// <summary>The throwaway probe's session: the "-menu" test set, merged when it can be and replaced (with
+            /// no copy kept) when it cannot - stage M2's behaviour.</summary>
             /// <param name="locationId">As asked for.</param>
             /// <param name="locationKey">The location's own Id (MenuMapHost.LocationKey).</param>
             internal MenuSession(string locationId, string locationKey)
+                : this(locationId, locationKey + MenuCaptureKeySuffix, MenuWriteMode.MergeOrFresh)
+            {
+            }
+
+            /// <summary>Stage M3: a session writing <paramref name="key"/> as <paramref name="write"/> says.</summary>
+            /// <param name="locationId">As asked for.</param>
+            /// <param name="key">The capture key - the location's own Id for the Maps tab's action.</param>
+            /// <param name="write">Merge, replace, or (the test set) merge-or-fresh.</param>
+            internal MenuSession(string locationId, string key, MenuWriteMode write)
             {
                 LocationId = locationId;
-                Key = locationKey + MenuCaptureKeySuffix;
+                Key = key;
+                Write = write;
             }
+        }
+
+        /// <summary>Stage M3: what a menu capture does with the set already stored under its key.</summary>
+        internal enum MenuWriteMode
+        {
+            /// <summary>Stage M2's rule, for the throwaway "-menu" test set: merged when LoadPrevious accepts it, else
+            /// replaced in place (no copy kept).</summary>
+            MergeOrFresh,
+
+            /// <summary>"Capture from game files": merged into a stored set LoadPrevious accepts (a menu set of the same
+            /// extent, density and recipe), started when there is none; any other stored set - a raid set, one at another
+            /// density - REFUSES the capture and is left exactly as it is (the Maps tab says to choose Replace).</summary>
+            Merge,
+
+            /// <summary>"Replace with a fresh capture": the stored set is never read; at the write it is moved aside to
+            /// captures/&lt;key&gt;.bak-&lt;time&gt;/ and the fresh set written in its place.</summary>
+            Replace,
+        }
+
+        /// <summary>Stage M3 rollback: false makes Merge and Replace both behave as M2's merge-or-fresh (the stored set is
+        /// merged when it can be and replaced in place, with no copy kept).</summary>
+        internal static readonly bool MenuReplaceMode = true;
+
+        /// <summary>Stage M3: what a replaced set's folder is renamed to, between the key and a local time stamp -
+        /// captures/bigmap.bak-20261001-142233/. MapCatalog and tools/check-capture.py skip such folders, so a backup is
+        /// never drawn or checked as the map; to restore one, delete the map's folder and rename the backup back.</summary>
+        internal const string SetAsideInfix = ".bak-";
+
+        // --- stage M3: the viewing copy ------------------------------------------------------------------------------------
+
+        /// <summary>Stage M3: the longest side of a menu floor's viewing copy, px. A menu capture's ground is up to 16384 px
+        /// long (Customs 16380x8516, a 246 MB PNG), which the Maps tab would decode and block-compress on the main thread
+        /// at every open; the copy is what it draws instead - a quarter of the pixels, inside the 8192 every GPU takes.</summary>
+        internal const int ViewPictureSide = 8192;
+
+        /// <summary>Stage M3 rollback: false writes no viewing copy, and every set is drawn from its full picture as in
+        /// stage M2c. True: any floor whose picture is longer than <see cref="ViewPictureSide"/> gets one (review: menu
+        /// and raid alike, so a raid merge into a menu set keeps its copy). A floor kept unchanged (no tile rendered)
+        /// carries its stored copy but never rebuilds a missing one: its pixels are not in memory at the write, and
+        /// decoding the full picture for it would be the very main-thread cost the copy exists to avoid - the next
+        /// capture that renders the floor writes it.</summary>
+        internal static readonly bool MenuViewCopy = true;
+
+        /// <summary>Stage M3: a floor's viewing copy's file name, beside its picture: bigmap-0.view.png.</summary>
+        /// <param name="key">The map key.</param>
+        /// <param name="level">The floor's level.</param>
+        internal static string ViewFileName(string key, int level) =>
+            $"{key}-{level.ToString(CultureInfo.InvariantCulture)}.view.png";
+
+        /// <summary>Stage M3: the viewing copy's size for a <paramref name="width"/> x <paramref name="height"/> picture: the
+        /// long side <see cref="ViewPictureSide"/>, the short side scaled and rounded to the nearest multiple of 4 (the
+        /// viewer block-compresses only a picture whose sides are multiples of 4 - DynamicMapsLibrary.CompressPictures).
+        /// Each axis keeps its own scale (the box filter's ratio per axis), so the copy covers exactly the full picture's
+        /// extent; at most 2 px of 8192 make its pixels a hair off square, which nothing reads. False when the picture is
+        /// no larger than the copy would be.</summary>
+        internal static bool ViewSize(int width, int height, out int viewWidth, out int viewHeight)
+        {
+            viewWidth = width;
+            viewHeight = height;
+
+            var longSide = Math.Max(width, height);
+            if (width < 1 || height < 1 || longSide <= ViewPictureSide) return false;
+
+            int Scaled(int side)
+            {
+                if (side == longSide) return ViewPictureSide;
+
+                var scaled = (int)Math.Round((double)side * ViewPictureSide / longSide / 4d, MidpointRounding.AwayFromZero) * 4;
+                return Math.Max(4, Math.Min(side, scaled));
+            }
+
+            viewWidth = Scaled(width);
+            viewHeight = Scaled(height);
+            return viewWidth < width || viewHeight < height;
         }
 
         /// <summary>Stage M2: adds a capture component for <paramref name="session"/> to a new root object of the ACTIVE
@@ -1462,8 +1579,11 @@ namespace QuestTree.QuestGraph
                     yield break;
                 }
 
-                Plugin.LogSource?.LogInfo($"{tag}{session.Key} (asked for as '{session.LocationId}') - waking the hosted scenes, then capturing.");
+                Plugin.LogSource?.LogInfo(
+                    $"{tag}{session.Key} (asked for as '{session.LocationId}', {MenuWriteText(session.Write)}) - waking the hosted " +
+                    "scenes, then capturing.");
 
+                MenuMapHost.SetPhase("waking the map's scenes");
                 var waking = MenuMapHost.WakeHosted(wake, MenuCaptureMask());
                 while (waking.MoveNext()) yield return waking.Current;
 
@@ -1505,6 +1625,7 @@ namespace QuestTree.QuestGraph
 
                 // The capture has cleaned up (its own finally ran as it finished); the switches go back a chunk a frame. The
                 // finally below finishes whatever this did not get to.
+                MenuMapHost.SetPhase("switching the map's scenes back");
                 yield return wake.RestoreSpread();
 
                 Plugin.LogSource?.LogInfo($"{tag}{session.Key} ended after {Ms(clock.Elapsed.TotalMilliseconds)} ms (the capture's own lines above say what it wrote).");
@@ -1543,6 +1664,50 @@ namespace QuestTree.QuestGraph
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Stage M3 (review): why a "Capture from game files" (Merge) of <paramref name="key"/> would be refused, decided
+        /// from the stored meta alone BEFORE any scene is loaded - so neither one map nor capture all loads a whole map
+        /// just to be told to choose Replace. Null when there is no stored set, or it is a menu set (whose finer checks -
+        /// extent, density, recipe - still run in LoadPrevious after the load). A set this cannot read refuses too, as
+        /// LoadPrevious would. Reads only; never creates the map's folder. Never throws.
+        /// </summary>
+        /// <param name="key">The capture key.</param>
+        internal static string MergeRefusal(string key)
+        {
+            try
+            {
+                var root = CapturesRootDir();
+                if (root == null || !IsUsableKey(key)) return null;
+
+                var path = Path.Combine(root, key, $"{key}.map.json");
+                if (!File.Exists(path)) return null;
+
+                var meta = JsonConvert.DeserializeObject<CaptureMeta>(File.ReadAllText(path));
+                if (meta == null || meta.Floors == null || meta.Floors.Count == 0) return "the stored set cannot be read";
+
+                return IsMenuSet(meta) ? null : "the stored set is a raid capture, not one from game files";
+            }
+            catch (Exception ex)
+            {
+                return $"the stored set could not be read ({ex.GetType().Name})";
+            }
+        }
+
+        /// <summary>Stage M3: a write mode in the words the log and the Maps tab use.</summary>
+        /// <param name="write">The mode.</param>
+        internal static string MenuWriteText(MenuWriteMode write) =>
+            write == MenuWriteMode.Replace ? "replacing the stored set"
+            : write == MenuWriteMode.Merge ? "merging into a stored menu set, or starting one"
+            : "the test set: merged when it can be, else replaced";
+
+        /// <summary>Stage M3: the Maps tab's progress line, for a menu capture only - a raid capture never has a session,
+        /// so this is a no-op there.</summary>
+        /// <param name="text">A few words.</param>
+        private void MenuPhase(string text)
+        {
+            if (_menu != null && _menu.MenuMode) MenuMapHost.SetPhase(text);
         }
 
         /// <summary>Stage M2: the mask a menu capture draws with - <see cref="CaptureMask"/> of every layer, exactly what
@@ -3338,6 +3503,9 @@ namespace QuestTree.QuestGraph
                 if (floor == null) continue;
                 keep.Add(floor.File);
                 keep.Add($"{key}-{floor.Level.ToString(CultureInfo.InvariantCulture)}.dist.png");
+
+                // Stage M3: a viewing copy the meta names (a carried menu floor's) is not stale either
+                if (!string.IsNullOrEmpty(floor.ViewFile)) keep.Add(floor.ViewFile);
             }
 
             if (meta.Mesh != null) keep.Add(meta.Mesh.File);
@@ -4062,6 +4230,9 @@ namespace QuestTree.QuestGraph
 
                 foreach (var floor in plan.Floors)
                 {
+                    // Stage M3: the Maps tab's progress line (menu captures only).
+                    MenuPhase($"floor {plan.Floors.IndexOf(floor) + 1}/{plan.Floors.Count} '{floor.Dto?.Name}'");
+
                     // The floor phase's budget (review F45): past it the floors not yet started are skipped - an
                     // earlier capture's picture of them is carried - so a campaign stop stays inside WorstCaseSeconds.
                     if (floorsClock.Elapsed.TotalSeconds > plan.FloorCapSeconds)
@@ -4291,6 +4462,7 @@ namespace QuestTree.QuestGraph
                 // ReleaseScene is idempotent and Cleanup calls it too, so a raid that ends in the
                 // middle of the build leaves the scene as the game had it.
                 var meshPhase = Stopwatch.StartNew();
+                MenuPhase("the 3D mesh");
                 var mesh = plan.Refused || !plan.WantsMesh || plan.MeshBaseTemporary ? null : BeginMesh(plan);
 
                 if (mesh != null)
@@ -4475,6 +4647,7 @@ namespace QuestTree.QuestGraph
 
                 plan.MeshSeconds = meshPhase.Elapsed.TotalSeconds;
                 var sidesPhase = Stopwatch.StartNew();
+                MenuPhase("the side views");
 
                 // The four side views, after the mesh because the box they frame is the mesh's y range.
                 // Behind the same "wrote a picture" test BeginMesh asks: WriteMeta writes nothing
@@ -4529,6 +4702,7 @@ namespace QuestTree.QuestGraph
                 // whose loop was abandoned after its encode started is staged here, as it would have been before).
                 plan.SidesSeconds = sidesPhase.Elapsed.TotalSeconds;
 
+                MenuPhase("finishing the pictures");
                 var lastFloors = SettleEncodes(plan, plan.Floors, null);
                 while (lastFloors.MoveNext()) yield return lastFloors.Current;
 
@@ -4544,6 +4718,7 @@ namespace QuestTree.QuestGraph
                 // writes the meta. A refused capture skips it, which is the whole of what makes the
                 // refusal cost nothing.
                 var writePhase = Stopwatch.StartNew();
+                MenuPhase("writing the set");
                 if (!plan.Refused && plan.Hold == null) WriteMeta(plan, clock);
 
                 // Stage M2b: a menu capture says where its time went, phase by phase
@@ -4716,6 +4891,7 @@ namespace QuestTree.QuestGraph
                     HeightPx = heightPx,
                     MeshFile = MapMeshFile.FileNameFor(key),
                     MenuMode = menu,
+                    MenuWrite = menu ? _menu.Write : MenuWriteMode.MergeOrFresh,
                 };
 
                 // Stage M2c: the finer ground's file cap and encode wait. Never set on a raid plan.
@@ -4825,6 +5001,15 @@ namespace QuestTree.QuestGraph
                 // Stop here, before anything is held or written, so the set stays exactly as it is.
                 if (plan.MenuSetGuarded)
                 {
+                    plan = null;
+                    return false;
+                }
+
+                // Stage M3: a menu capture without Replace found a stored set it cannot merge into (a raid set, another
+                // density) - LoadPrevious said why. The set is left exactly as it is; the Maps tab offers Replace.
+                if (plan.MenuNeedsReplace != null)
+                {
+                    if (_menu != null) _menu.NeedsReplace = plan.MenuNeedsReplace;
                     plan = null;
                     return false;
                 }
@@ -6329,6 +6514,12 @@ namespace QuestTree.QuestGraph
             floor.EncodeMs = floor.Clock?.Elapsed.TotalMilliseconds ?? 0d;
             floor.PictureEncode = StartPng(floor.Rgba, plan.WidthPx, plan.HeightPx, rgba: true);
 
+            // Stage M3: a viewing copy, from the same pixels, on its own worker - settled with the picture. Gated on the
+            // picture's size, not on menu mode (review): a raid capture merged into a menu set rewrites a 16384 px floor,
+            // and without a new copy the stale one would be swept and the Maps tab left decoding the full picture. A raid
+            // floor of a big map at 8 px/m (Customs 8944 px) gets one too - a worker's few seconds, off the main thread.
+            if (MenuViewCopy && Math.Max(plan.WidthPx, plan.HeightPx) > ViewPictureSide) StartViewEncode(plan, floor);
+
             if (floor.Dist != null)
             {
                 floor.SidecarSource = floor.Dist;
@@ -6541,6 +6732,7 @@ namespace QuestTree.QuestGraph
         {
             floor.PictureEncode = null;
             floor.SidecarEncode = null;
+            floor.ViewEncode = null;
             floor.SidecarSource = null;
             floor.Verdicts = null;
             floor.AuditVerdicts = null;
@@ -6561,7 +6753,9 @@ namespace QuestTree.QuestGraph
 
                 var clock = Stopwatch.StartNew();
 
-                while ((!floor.PictureEncode.IsCompleted || (floor.SidecarEncode != null && !floor.SidecarEncode.IsCompleted)) &&
+                // Stage M3: and the viewing copy's (a menu floor's only) - it reads the same pool the next floor reuses.
+                while ((!floor.PictureEncode.IsCompleted || (floor.SidecarEncode != null && !floor.SidecarEncode.IsCompleted) ||
+                        (floor.ViewEncode != null && !floor.ViewEncode.IsCompleted)) &&
                        clock.Elapsed.TotalSeconds < plan.EncodeWaitCapSeconds)
                     yield return null;
 
@@ -6577,6 +6771,13 @@ namespace QuestTree.QuestGraph
                 yield return null;
 
                 if (!floor.Failed && floor.Bytes > 0) SettleSidecar(plan, floor);
+
+                // Stage M3: the viewing copy, a frame later, only beside a staged picture.
+                if (floor.ViewEncode != null)
+                {
+                    yield return null;
+                    if (!floor.Failed && floor.Bytes > 0) SettleView(plan, floor);
+                }
 
                 DropEncode(floor);
             }
@@ -6624,6 +6825,180 @@ namespace QuestTree.QuestGraph
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" could not be written " +
                     $"({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        /// <summary>Stage M3: starts a menu floor's viewing copy on a worker: <see cref="ViewRows"/> box-filters the developed
+        /// pixels row by row straight into the encoder (no second full-size array), at <see cref="ViewSize"/>. No round
+        /// trip - the encoder's is proven on the full picture, and it would run the filter twice. Nothing when the picture
+        /// is already no larger than the copy.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor, developed (Rgba is the plan's pool).</param>
+        private static void StartViewEncode(Plan plan, FloorPlan floor)
+        {
+            floor.ViewFile = null;
+            floor.ViewStaged = false;
+
+            try
+            {
+                if (floor.Rgba == null || floor.Dto == null) return;
+
+                var w = plan.WidthPx;
+                var h = plan.HeightPx;
+
+                if (!ViewSize(w, h, out var vw, out var vh))
+                {
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" needs no viewing copy - {w}x{h} px is within {ViewPictureSide}.");
+                    return;
+                }
+
+                var source = floor.Rgba;
+                floor.ViewFile = ViewFileName(plan.Key, floor.Dto.Level);
+                floor.ViewWidth = vw;
+                floor.ViewHeight = vh;
+                floor.ViewEncode = System.Threading.Tasks.Task.Run(() =>
+                    PngEncoder.Encode(vw, vh, 6, PngFilter, ViewRows(source, w, h, vw, vh), false));
+            }
+            catch (Exception ex)
+            {
+                floor.ViewFile = null;
+                floor.ViewEncode = null;
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" gets no viewing copy ({ex.GetType().Name}: {ex.Message}) - the " +
+                    "Maps tab draws the full picture.");
+            }
+        }
+
+        /// <summary>Stage M3: the viewing copy's rows, PNG row 0 first (the top, as <see cref="RgbaRows"/>): each output
+        /// pixel the box average of the source pixels whose integer span maps onto it - per axis floor(i x w / vw) to
+        /// floor((i + 1) x w / vw), so every source pixel lands in exactly one output pixel and the copy covers exactly the
+        /// picture's extent. Colour is averaged weighted by alpha (a cut-out edge does not take the colour behind a
+        /// transparent pixel); alpha is the plain average, so the reach mask's edge comes out as a soft ramp. A pixel with no
+        /// alpha at all keeps the plain colour average. Deterministic, as PngEncoder asks; one worker, so the sums are
+        /// shared across calls.</summary>
+        /// <param name="px">The picture, texture order (row 0 at the bottom), w x h.</param>
+        /// <param name="w">Its width.</param>
+        /// <param name="h">Its height.</param>
+        /// <param name="vw">The copy's width, less than or equal to w.</param>
+        /// <param name="vh">The copy's height, less than or equal to h.</param>
+        private static Action<int, byte[]> ViewRows(Color32[] px, int w, int h, int vw, int vh)
+        {
+            var xs = new int[vw + 1];
+            for (var i = 0; i <= vw; i++) xs[i] = (int)((long)i * w / vw);
+
+            var ys = new int[vh + 1];
+            for (var i = 0; i <= vh; i++) ys[i] = (int)((long)i * h / vh);
+
+            var r = new long[vw];
+            var g = new long[vw];
+            var b = new long[vw];
+            var a = new long[vw];
+            var pr = new long[vw];
+            var pg = new long[vw];
+            var pb = new long[vw];
+
+            return (row, buf) =>
+            {
+                Array.Clear(r, 0, vw);
+                Array.Clear(g, 0, vw);
+                Array.Clear(b, 0, vw);
+                Array.Clear(a, 0, vw);
+                Array.Clear(pr, 0, vw);
+                Array.Clear(pg, 0, vw);
+                Array.Clear(pb, 0, vw);
+
+                // PNG row 0 is the top: the copy's texture row vh - 1 - row, which covers source rows ys[t]..ys[t + 1].
+                var t = vh - 1 - row;
+                var y0 = ys[t];
+                var y1 = Math.Max(y0 + 1, ys[t + 1]);
+
+                for (var sy = y0; sy < y1 && sy < h; sy++)
+                {
+                    var from = sy * w;
+
+                    for (var x = 0; x < vw; x++)
+                    {
+                        var x1 = Math.Max(xs[x] + 1, xs[x + 1]);
+
+                        for (var sx = xs[x]; sx < x1 && sx < w; sx++)
+                        {
+                            var c = px[from + sx];
+                            r[x] += c.r;
+                            g[x] += c.g;
+                            b[x] += c.b;
+                            a[x] += c.a;
+                            pr[x] += c.r * c.a;
+                            pg[x] += c.g * c.a;
+                            pb[x] += c.b * c.a;
+                        }
+                    }
+                }
+
+                var rows = Math.Max(1, Math.Min(y1, h) - y0);
+
+                for (int x = 0, o = 0; x < vw; x++, o += 4)
+                {
+                    var n = (long)rows * Math.Max(1, Math.Min(Math.Max(xs[x] + 1, xs[x + 1]), w) - xs[x]);
+                    var alpha = a[x];
+
+                    if (alpha > 0)
+                    {
+                        buf[o] = (byte)((pr[x] + alpha / 2) / alpha);
+                        buf[o + 1] = (byte)((pg[x] + alpha / 2) / alpha);
+                        buf[o + 2] = (byte)((pb[x] + alpha / 2) / alpha);
+                    }
+                    else
+                    {
+                        buf[o] = (byte)((r[x] + n / 2) / n);
+                        buf[o + 1] = (byte)((g[x] + n / 2) / n);
+                        buf[o + 2] = (byte)((b[x] + n / 2) / n);
+                    }
+
+                    buf[o + 3] = (byte)((alpha + n / 2) / n);
+                }
+            };
+        }
+
+        /// <summary>Stage M3: stages a menu floor's viewing copy from its settled encode, or - on an error or a timeout -
+        /// stages none, with one line: the copy is optional, and the meta then names only the full picture (an older
+        /// copy on disk is swept as stale at the write). Called only beside a staged picture.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor.</param>
+        private static void SettleView(Plan plan, FloorPlan floor)
+        {
+            try
+            {
+                if (floor.ViewFile == null) return;
+
+                var result = Settled(floor.ViewEncode, plan.EncodeWaitCapSeconds, out var why);
+
+                if (why != null)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" gets no viewing copy ({why}) - the Maps tab draws the full picture.");
+                    floor.ViewFile = null;
+                    return;
+                }
+
+                Stage(Path.Combine(plan.Dir, floor.ViewFile), result.Parts, result.LastLength);
+                floor.ViewStaged = true;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" viewing copy {floor.ViewFile} " +
+                    $"{floor.ViewWidth.ToString(CultureInfo.InvariantCulture)}x{floor.ViewHeight.ToString(CultureInfo.InvariantCulture)} px " +
+                    $"(from {plan.WidthPx.ToString(CultureInfo.InvariantCulture)}x{plan.HeightPx.ToString(CultureInfo.InvariantCulture)}), " +
+                    $"{result.Length.ToString(CultureInfo.InvariantCulture)} bytes, box-filtered and encoded off the main thread in " +
+                    $"{Ms(result.Milliseconds)} ms.");
+            }
+            catch (Exception ex)
+            {
+                floor.ViewFile = null;
+                floor.ViewStaged = false;
+                Forget(plan, ViewFileName(plan.Key, floor.Dto?.Level ?? 0));
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\"'s viewing copy could not be staged ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - the Maps tab draws the full picture.");
             }
         }
 
@@ -7013,6 +7388,9 @@ namespace QuestTree.QuestGraph
             {
                 Forget(plan, floor.File);
                 Forget(plan, floor.DistFile);
+
+                // Stage M3: the viewing copy, by its canonical name whether or not this capture started one
+                if (floor.Dto != null) Forget(plan, ViewFileName(plan.Key, floor.Dto.Level));
             }
 
             // The 3D mesh is staged the same way and has to be dropped the same way: a refused capture
@@ -7164,13 +7542,35 @@ namespace QuestTree.QuestGraph
             plan.IntoMenuSet = false;
             var intoMenuSet = false;
 
+            plan.MenuNeedsReplace = null;
+
+            // Stage M3: menu captures decide here what a stored set means for them - never a raid capture.
+            var menuWrite = plan.MenuMode && MenuReplaceMode ? plan.MenuWrite : MenuWriteMode.MergeOrFresh;
+
             try
             {
                 if (held == null && !File.Exists(path)) return null;
 
+                // Stage M3: Replace never reads the stored set - this capture starts fresh, and WriteMeta moves the stored
+                // set aside before it puts anything in place (SetStoredAside).
+                if (menuWrite == MenuWriteMode.Replace)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {plan.Key} - Replace: the stored set is not merged; this capture starts fresh, and the " +
+                        $"stored set is moved to {plan.Key}{SetAsideInfix}<time> just before the new one is written.");
+                    return null;
+                }
+
                 var meta = held ?? JsonConvert.DeserializeObject<CaptureMeta>(File.ReadAllText(path));
                 if (meta == null || meta.Extent == null || meta.Floors == null || meta.Floors.Count == 0)
                 {
+                    // Stage M3: a menu merge never replaces what it cannot read - Replace does, keeping a copy.
+                    if (menuWrite == MenuWriteMode.Merge)
+                    {
+                        NeedsReplace(plan, "the stored set cannot be read");
+                        return null;
+                    }
+
                     Fresh(plan, "the capture already there cannot be read");
                     return null;
                 }
@@ -7182,6 +7582,13 @@ namespace QuestTree.QuestGraph
 
                 void Refuse(Plan p, string why)
                 {
+                    // Stage M3: a menu capture without Replace leaves a set it cannot merge into exactly as it is.
+                    if (menuWrite == MenuWriteMode.Merge)
+                    {
+                        NeedsReplace(p, why);
+                        return;
+                    }
+
                     if (!guardMenu)
                     {
                         Fresh(p, why);
@@ -7279,11 +7686,30 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
+                // Stage M3: as above - a menu merge never starts fresh over a set it could not read.
+                if (menuWrite == MenuWriteMode.Merge && held == null && File.Exists(path))
+                {
+                    NeedsReplace(plan, $"the stored set could not be read ({ex.GetType().Name})");
+                    return null;
+                }
+
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: the capture already in {plan.Dir} could not be read ({ex.GetType().Name}: {ex.Message}) - " +
                     "this capture starts fresh.");
                 return null;
             }
+        }
+
+        /// <summary>Stage M3: a menu capture without Replace found a stored set it may not merge into - Prepare stops on
+        /// <see cref="Plan.MenuNeedsReplace"/> before anything is rendered, and the set stays as it is.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="why">What differs, as a phrase.</param>
+        private static void NeedsReplace(Plan plan, string why)
+        {
+            plan.MenuNeedsReplace = why;
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: nothing was captured on {plan.Key} - the stored set cannot take this menu capture ({why}). It is " +
+                "left as it is; choose \"Replace with a fresh capture from game files\" to replace it (a copy is kept).");
         }
 
         /// <summary>One line saying this capture replaces rather than adds to what is there, and why.
@@ -14918,6 +15344,11 @@ namespace QuestTree.QuestGraph
         /// <param name="clock">Running since the key was pressed.</param>
         private void WriteMeta(Plan plan, Stopwatch clock)
         {
+            // Stage M3 (review): Replace's backup and whether the meta has landed - a failure in between puts the old set
+            // back (the catch below), one after it leaves the new set as it is.
+            string setAside = null;
+            var metaWritten = false;
+
             try
             {
                 var written = plan.Floors.Where(f => !f.Failed && f.Bytes > 0).ToList();
@@ -14931,6 +15362,30 @@ namespace QuestTree.QuestGraph
                         $"QuestTree: no floor of {plan.Key} could be captured - nothing was written. The warnings " +
                         "above say why for each.");
                     return;
+                }
+
+                // Stage M3: Replace moves the stored set aside BEFORE anything of this capture is put in place - so the
+                // old set is restorable whatever happens next, and the commits below land in a folder holding only this
+                // capture's staged files. A set that will not move is not replaced: nothing is written, and the staged
+                // files are dropped by Cleanup.
+                if (plan.MenuMode && MenuReplaceMode && plan.MenuWrite == MenuWriteMode.Replace)
+                {
+                    if (!SetStoredAside(plan, out var aside, out var asideBytes, out var why))
+                    {
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: the menu capture of {plan.Key} was NOT written - the stored set could not be moved aside " +
+                            $"({why}); it is left as it was.");
+                        if (_menu != null) _menu.Stopped = $"the stored set could not be moved aside ({why})";
+                        return;
+                    }
+
+                    setAside = aside;
+
+                    if (_menu != null)
+                    {
+                        _menu.SetAside = aside;
+                        _menu.SetAsideBytes = asideBytes;
+                    }
                 }
 
                 // WP3: before the first file is replaced - an upload of this map reading between two of its items sees
@@ -14956,6 +15411,9 @@ namespace QuestTree.QuestGraph
                         // stored exposure).
                         entry = Described(plan, floor);
                         unchanged++;
+
+                        // Stage M3: and its pixels are the stored ones, so a stored viewing copy still shows them
+                        CarryView(plan, entry, Carried(plan, floor));
                     }
                     else if (!floor.Failed && floor.Bytes > 0)
                     {
@@ -14976,11 +15434,34 @@ namespace QuestTree.QuestGraph
                             }
                             else Commit(Path.Combine(plan.Dir, floor.DistFile));
                         }
+
+                        // Stage M3: the viewing copy after its picture. One that will not go in place costs only itself:
+                        // the meta then names no copy, and the old one is swept as stale below.
+                        if (floor.ViewStaged && !string.IsNullOrEmpty(floor.ViewFile))
+                        {
+                            try
+                            {
+                                Commit(Path.Combine(plan.Dir, floor.ViewFile));
+                                entry.ViewFile = floor.ViewFile;
+                                entry.ViewWidth = floor.ViewWidth;
+                                entry.ViewHeight = floor.ViewHeight;
+                            }
+                            catch (Exception viewEx)
+                            {
+                                Forget(plan, floor.ViewFile);
+                                Plugin.LogSource?.LogInfo(
+                                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\"'s viewing copy could not be put in place " +
+                                    $"({viewEx.GetType().Name}: {viewEx.Message}) - the Maps tab draws the full picture.");
+                            }
+                        }
                     }
                     else
                     {
                         entry = Carried(plan, floor);
                         if (entry == null) continue;
+
+                        // Stage M3: a carried entry names its own viewing copy - kept only while it is on disk
+                        CarryView(plan, entry, entry);
 
                         carried++;
 
@@ -14996,6 +15477,9 @@ namespace QuestTree.QuestGraph
                     // stale-picture sweep delete the file the meta has just promised.
                     keep.Add(entry.File);
                     if (!string.IsNullOrEmpty(floor.DistFile)) keep.Add(floor.DistFile);
+
+                    // Stage M3: a viewing copy the meta names is not stale; one it does not name is swept below
+                    if (!string.IsNullOrEmpty(entry.ViewFile)) keep.Add(entry.ViewFile);
                 }
 
                 // The mesh, before the meta that names it and after the pictures, for the same reason
@@ -15205,6 +15689,10 @@ namespace QuestTree.QuestGraph
                 File.WriteAllText(temp, json);
                 if (File.Exists(path)) File.Delete(path);
                 File.Move(temp, path);
+                metaWritten = true;
+
+                // Stage M3 (review): the replace is done - only the newest backups of this map are kept
+                if (setAside != null) PruneSetAside(plan);
 
                 // WP3: in the frame the meta lands - a commit that changed what the meta DESCRIBES (extent, scale, floors,
                 // mesh, pages, side geometry) stops an upload of the older set at its next item rather than mixing the two.
@@ -15216,6 +15704,18 @@ namespace QuestTree.QuestGraph
                 }
 
                 DropStalePictures(plan, keep);
+
+                // Stage M3: the Maps tab's result line
+                if (_menu != null)
+                {
+                    var views = floors.Count(fl => !string.IsNullOrEmpty(fl.ViewFile));
+                    _menu.Written =
+                        $"{written.Count.ToString(CultureInfo.InvariantCulture)} floor(s) at {Ppm(plan.Ppm)} px/m " +
+                        $"({plan.WidthPx.ToString(CultureInfo.InvariantCulture)}x{plan.HeightPx.ToString(CultureInfo.InvariantCulture)} px" +
+                        (views > 0 ? $", {views.ToString(CultureInfo.InvariantCulture)} viewing cop{(views == 1 ? "y" : "ies")}" : "") + ")" +
+                        (mesh != null ? ", a 3D mesh" : "") +
+                        (sides != null && sides.Count > 0 ? $", {sides.Count.ToString(CultureInfo.InvariantCulture)} side view(s)" : "");
+                }
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: capture of {plan.Key} written - {written.Count} floor(s)" +
@@ -15279,9 +15779,271 @@ namespace QuestTree.QuestGraph
                 // WP3: a half-committed capture is, conservatively, a change of shape.
                 Bump(plan.Key, shape: true);
 
+                // Stage M3 (review): Replace moved the old set aside and this write failed before its meta - the folder
+                // holds part of a set nothing describes. This capture's files go and the old set comes back.
+                if (setAside != null && !metaWritten)
+                {
+                    if (_menu != null) _menu.WriteFailed = $"{ex.GetType().Name}: {ex.Message}";
+
+                    var restored = RestoreSetAside(plan, setAside);
+                    if (_menu != null) _menu.SetAsideRestored = restored;
+
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the menu capture of {plan.Key} failed while it was written ({ex.GetType().Name}: {ex.Message}) - " +
+                        (restored
+                            ? $"its files were removed and the old set was put back from captures\\{setAside}."
+                            : $"the old set could NOT be put back; it is in captures\\{setAside} (the warnings above say what is left)."));
+                    return;
+                }
+
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the capture of {plan.Key} has its pictures but no meta file " +
                     $"({ex.GetType().Name}: {ex.Message}) - it will be ignored until it is captured again.");
+            }
+        }
+
+        /// <summary>Stage M3 (review): how many of a map's Replace backups are kept - the newest ones; older ones are deleted
+        /// after a replace has written its meta.</summary>
+        internal const int SetAsideKept = 2;
+
+        /// <summary>Stage M3 (review): the map's backup folders (captures/&lt;key&gt;.bak-*), newest first - the local time
+        /// stamp in the name sorts as the time does, and a same-second "-2" sorts after its first.</summary>
+        /// <param name="root">The captures folder.</param>
+        /// <param name="key">The map key.</param>
+        private static List<string> SetAsideFolders(string root, string key) =>
+            Directory.GetDirectories(root, key + SetAsideInfix + "*")
+                .Where(dir => (Path.GetFileName(dir) ?? "").StartsWith(key + SetAsideInfix, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(dir => Path.GetFileName(dir), StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+        /// <summary>Stage M3 (review): deletes all but the newest <see cref="SetAsideKept"/> backups of this map, one line each.
+        /// A backup that will not delete is left and said. Never throws.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private static void PruneSetAside(Plan plan)
+        {
+            try
+            {
+                var root = Path.GetDirectoryName(plan.Dir);
+                if (string.IsNullOrEmpty(root)) return;
+
+                foreach (var old in SetAsideFolders(root, plan.Key).Skip(SetAsideKept))
+                {
+                    try
+                    {
+                        Directory.Delete(old, recursive: true);
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: {plan.Key} - deleted the older backup captures\\{Path.GetFileName(old)} (the newest " +
+                            $"{SetAsideKept.ToString(CultureInfo.InvariantCulture)} are kept).");
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: {plan.Key} - the older backup captures\\{Path.GetFileName(old)} could not be deleted ({ex.Message}).");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: {plan.Key}'s older backups could not be listed ({ex.Message}).");
+            }
+        }
+
+        /// <summary>Stage M3 (review): undoes a Replace whose write failed before its meta: every file now in the map's folder
+        /// except staged temporaries (Cleanup drops those) and the campaign journal is deleted - all of it this capture's,
+        /// since <see cref="SetStoredAside"/> emptied the folder - then every file of the backup is moved back and the empty
+        /// backup folder removed. True when everything went back. Logs each step that fails. Never throws.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="aside">The backup folder's name.</param>
+        private static bool RestoreSetAside(Plan plan, string aside)
+        {
+            var ok = true;
+
+            try
+            {
+                var root = Path.GetDirectoryName(plan.Dir) ?? plan.Dir;
+                var backup = Path.Combine(root, aside);
+                var removed = 0;
+
+                foreach (var file in Directory.GetFiles(plan.Dir))
+                {
+                    var name = Path.GetFileName(file) ?? "";
+                    if (name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
+                        name.IndexOf(".tmp.", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        name.EndsWith(JournalSuffix, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    try
+                    {
+                        File.Delete(file);
+                        removed++;
+                    }
+                    catch (Exception ex)
+                    {
+                        ok = false;
+                        Plugin.LogSource?.LogWarning($"QuestTree: {plan.Key} - this capture's {name} could not be removed ({ex.Message}).");
+                    }
+                }
+
+                var back = 0;
+
+                foreach (var file in Directory.GetFiles(backup))
+                {
+                    var to = Path.Combine(plan.Dir, Path.GetFileName(file));
+
+                    try
+                    {
+                        if (File.Exists(to))
+                        {
+                            ok = false;
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: {plan.Key} - {Path.GetFileName(file)} was not moved back: a file of that name is in the way.");
+                            continue;
+                        }
+
+                        File.Move(file, to);
+                        back++;
+                    }
+                    catch (Exception ex)
+                    {
+                        ok = false;
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: {plan.Key} - {Path.GetFileName(file)} could not be moved back from captures\\{aside} ({ex.Message}).");
+                    }
+                }
+
+                if (ok)
+                {
+                    try
+                    {
+                        Directory.Delete(backup, recursive: false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: the empty backup captures\\{aside} could not be removed ({ex.Message}).");
+                    }
+                }
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {plan.Key} - Replace rolled back: {removed.ToString(CultureInfo.InvariantCulture)} file(s) of the " +
+                    $"failed capture removed, {back.ToString(CultureInfo.InvariantCulture)} file(s) of the old set moved back from " +
+                    $"captures\\{aside}{(ok ? "" : " - NOT complete, see the warnings above")}.");
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: {plan.Key} - the Replace could not be rolled back ({ex.GetType().Name}: {ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>Stage M3: gives <paramref name="entry"/> the viewing copy <paramref name="stored"/> names, when it is a plain
+        /// file name still on disk - else none, so the meta never names a copy that is not there (the reader would fall
+        /// back anyway, but a meta that says what is true is what check-capture.py checks).</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="entry">The entry the meta will carry.</param>
+        /// <param name="stored">The previous meta's entry for the floor, or null.</param>
+        private static void CarryView(Plan plan, CaptureFloor entry, CaptureFloor stored)
+        {
+            if (entry == null) return;
+
+            var file = stored?.ViewFile;
+            var ok = false;
+
+            try
+            {
+                ok = !string.IsNullOrEmpty(file) && IsPlainFileName(file) && stored.ViewWidth > 0 && stored.ViewHeight > 0 &&
+                     File.Exists(Path.Combine(plan.Dir, file));
+            }
+            catch (Exception)
+            {
+                ok = false;
+            }
+
+            entry.ViewFile = ok ? file : null;
+            entry.ViewWidth = ok ? stored.ViewWidth : null;
+            entry.ViewHeight = ok ? stored.ViewHeight : null;
+        }
+
+        /// <summary>Stage M3: Replace's backup - every file of the stored set in the map's folder (everything but this
+        /// capture's staged temporaries and the campaign journal, which is history rather than the set) is moved into a new
+        /// folder captures/&lt;key&gt;.bak-&lt;local time&gt;/ beside it. A move that fails part way moves back what it had
+        /// moved, and the capture is not written. True with no folder when nothing was stored.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="aside">The backup folder's name, or null when nothing was stored.</param>
+        /// <param name="bytes">What the moved set weighs.</param>
+        /// <param name="why">Why the set could not be moved.</param>
+        private static bool SetStoredAside(Plan plan, out string aside, out long bytes, out string why)
+        {
+            aside = null;
+            why = null;
+            bytes = 0;
+
+            var moved = new List<(string From, string To)>();
+
+            try
+            {
+                var files = Directory.GetFiles(plan.Dir)
+                    .Where(path =>
+                    {
+                        var name = Path.GetFileName(path) ?? "";
+                        return !name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) &&
+                               name.IndexOf(".tmp.", StringComparison.OrdinalIgnoreCase) < 0 &&
+                               !name.EndsWith(JournalSuffix, StringComparison.OrdinalIgnoreCase);
+                    })
+                    .ToList();
+
+                if (files.Count == 0)
+                {
+                    Plugin.LogSource?.LogInfo($"QuestTree: {plan.Key} - Replace: no stored set to move aside.");
+                    return true;
+                }
+
+                var root = Path.GetDirectoryName(plan.Dir) ?? plan.Dir;
+                var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+                var name0 = plan.Key + SetAsideInfix + stamp;
+                var target = Path.Combine(root, name0);
+
+                for (var n = 2; Directory.Exists(target) || File.Exists(target); n++)
+                    target = Path.Combine(root, $"{name0}-{n.ToString(CultureInfo.InvariantCulture)}");
+
+                Directory.CreateDirectory(target);
+
+                foreach (var file in files)
+                {
+                    var to = Path.Combine(target, Path.GetFileName(file));
+                    var length = new FileInfo(file).Length;
+                    File.Move(file, to);
+                    moved.Add((file, to));
+                    bytes += length;
+                }
+
+                aside = Path.GetFileName(target);
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {plan.Key} - Replace: the stored set ({moved.Count.ToString(CultureInfo.InvariantCulture)} file(s), " +
+                    $"{bytes.ToString(CultureInfo.InvariantCulture)} bytes) was moved aside to captures\\{aside}\\ before the new set " +
+                    "is written. To restore it: with the game closed, delete the map's folder and rename that one back to " +
+                    $"{plan.Key}.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                why = $"{ex.GetType().Name}: {ex.Message}";
+
+                // Back, newest first, so the folder is as it was.
+                for (var i = moved.Count - 1; i >= 0; i--)
+                {
+                    try
+                    {
+                        File.Move(moved[i].To, moved[i].From);
+                    }
+                    catch (Exception back)
+                    {
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: {Path.GetFileName(moved[i].From)} could not be moved back from the backup ({back.Message}) - " +
+                            $"it is in {Path.GetDirectoryName(moved[i].To)}.");
+                    }
+                }
+
+                return false;
             }
         }
 
@@ -15883,7 +16645,7 @@ namespace QuestTree.QuestGraph
         /// Windows' device names - because these files are uploaded to a host that applies it, and a
         /// capture nobody could ever transport is not worth taking.</summary>
         /// <param name="key">The map's internal name.</param>
-        private static bool IsUsableKey(string key)
+        internal static bool IsUsableKey(string key)
         {
             if (string.IsNullOrEmpty(key) || key.Length > 64) return false;
 
@@ -16350,6 +17112,13 @@ namespace QuestTree.QuestGraph
             /// into (<see cref="RaidLeavesMenuSets"/>) - Prepare stops, and nothing on disk is touched.</summary>
             public bool MenuSetGuarded;
 
+            /// <summary>Stage M3: a menu capture's write mode (MergeOrFresh on every raid plan).</summary>
+            public MenuWriteMode MenuWrite;
+
+            /// <summary>Stage M3: why a menu capture without Replace may not merge into the stored set (Prepare stops), or
+            /// null.</summary>
+            public string MenuNeedsReplace;
+
             /// <summary>Stage M2b: the time caps this capture runs under - the raid's constants unless a menu capture set the
             /// menu's (<see cref="MenuCaptureBudgets"/>), so a raid plan reads exactly the numbers it always did. The floor
             /// phase's cap (<see cref="FloorPhaseSeconds"/> / <see cref="MenuFloorPhaseSeconds"/>) ...</summary>
@@ -16610,6 +17379,15 @@ namespace QuestTree.QuestGraph
 
             /// <summary>WP4 B2: the picture's and the sidecar's encodes on workers, settled (staged) at a barrier.</summary>
             public System.Threading.Tasks.Task<PngEncoder.Result> PictureEncode;
+
+            /// <summary>Stage M3: a menu floor's viewing copy - its file name, size and encode (box filter and PNG on a
+            /// worker, settled with the picture), and whether it was staged. Null/false on every raid floor.</summary>
+            public string ViewFile;
+
+            public int ViewWidth;
+            public int ViewHeight;
+            public System.Threading.Tasks.Task<PngEncoder.Result> ViewEncode;
+            public bool ViewStaged;
 
             public System.Threading.Tasks.Task<PngEncoder.Result> SidecarEncode;
 
@@ -17599,6 +18377,14 @@ namespace QuestTree.QuestGraph
 
             [JsonProperty("width")] public int Width { get; set; }
             [JsonProperty("height")] public int Height { get; set; }
+
+            /// <summary>Stage M3: the floor's viewing copy beside it (<see cref="ViewFileName"/>) - the same picture box-
+            /// filtered to at most <see cref="ViewPictureSide"/> px, alpha included - which the Maps tab draws instead of the
+            /// full picture. Optional: raid sets and older menu sets have none, and readers fall back to <see cref="File"/>.</summary>
+            [JsonProperty("viewFile", NullValueHandling = NullValueHandling.Ignore)] public string ViewFile { get; set; }
+
+            [JsonProperty("viewWidth", NullValueHandling = NullValueHandling.Ignore)] public int? ViewWidth { get; set; }
+            [JsonProperty("viewHeight", NullValueHandling = NullValueHandling.Ignore)] public int? ViewHeight { get; set; }
 
             /// <summary>The height band this floor was rendered for, as the probe measured it.</summary>
             [JsonProperty("minY")] public float MinY { get; set; }

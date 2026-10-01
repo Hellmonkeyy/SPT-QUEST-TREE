@@ -67,6 +67,35 @@ namespace QuestTree.QuestGraph
         /// 0 of 29 on Customs without it - which the capture's labels and MapExtentProbe's fallback extent read.</summary>
         internal static readonly string[] SkippedSceneSuffixes = { "_Sound", "_Culling" };
 
+        /// <summary>Stage M3 rollback: false ignores the "Menu capture: skip scenes ending in" setting and skips exactly
+        /// <see cref="SkippedSceneSuffixes"/>, as stage M1 did.</summary>
+        internal static readonly bool SkipSuffixesFromSettings = true;
+
+        /// <summary>Stage M3: the suffixes a run skips - the setting's comma list (ModSettings.MenuCaptureSkipSuffixes),
+        /// trimmed, empty items dropped, so an empty setting skips nothing; <see cref="SkippedSceneSuffixes"/> when the
+        /// settings are not bound or <see cref="SkipSuffixesFromSettings"/> is off. Read once per resolve, so a change
+        /// takes effect at the next run. A suffix rule on scene names, never a map name.</summary>
+        internal static string[] SkipSuffixes()
+        {
+            try
+            {
+                if (!SkipSuffixesFromSettings || !ModSettings.Ready || ModSettings.MenuCaptureSkipSuffixes == null)
+                    return SkippedSceneSuffixes;
+
+                return (ModSettings.MenuCaptureSkipSuffixes.Value ?? "")
+                    .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(item => item.Trim())
+                    .Where(item => item.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+            }
+            catch (Exception)
+            {
+                // A setting that cannot be read is the M1 behaviour, never "load every audio scene" by accident.
+                return SkippedSceneSuffixes;
+            }
+        }
+
         /// <summary>Always loaded whatever <see cref="SkippedSceneSuffixes"/> says: the NavMesh lives only in the _AI scene,
         /// and the capture's extent and floors come from it.</summary>
         internal static readonly string[] KeptSceneSuffixes = { "_AI" };
@@ -97,6 +126,60 @@ namespace QuestTree.QuestGraph
         /// <summary>True while the probe or the host has scenes loading, loaded or unloading.</summary>
         internal static bool Busy => _claim != 0;
 
+        /// <summary>Stage M3: the claim of the run holding the slot, 0 when none - so a caller that started a run can match
+        /// <see cref="LastOutcome"/> to it.</summary>
+        internal static int CurrentClaim => _claim;
+
+        /// <summary>Stage M3: what the run in progress is doing, in a few words ("loading scene 3/26 'x'", "floor 1/2",
+        /// "unloading"), for the Maps tab's progress line; null while no run holds the slot. Main thread.</summary>
+        internal static string Phase { get; private set; }
+
+        /// <summary>Stage M3: sets <see cref="Phase"/> while a run holds the slot - the host's own steps and the capture's
+        /// (MapCapture's menu phase hook) both say it here. A no-op outside a run.</summary>
+        /// <param name="text">A few words.</param>
+        internal static void SetPhase(string text)
+        {
+            if (_claim != 0) Phase = text;
+        }
+
+        /// <summary>Stage M3: why the run was asked to stop (the Maps tab's cancel), or null. Read by the load loop and the
+        /// work driver, which turn it into the run's abort - the same path as a raid starting or the work's cap - so the
+        /// capture's own finally runs and every hosted scene is unloaded.</summary>
+        private static string _stopAsked;
+
+        /// <summary>Stage M3: asks the run holding the slot to stop at its next step: loading ends and the map is
+        /// unloaded, or the capture is disposed (nothing is written unless its write already ran) and then unloaded. A
+        /// no-op with no run.</summary>
+        /// <param name="why">For the FINISHED line.</param>
+        internal static void RequestStop(string why)
+        {
+            if (_claim != 0 && _stopAsked == null) _stopAsked = string.IsNullOrEmpty(why) ? "asked to stop" : why;
+        }
+
+        /// <summary>Stage M3: whether the run holding the slot has been asked to stop.</summary>
+        internal static bool StopAsked => _claim != 0 && _stopAsked != null;
+
+        /// <summary>Stage M3: one finished run's verdict, as its FINISHED line says it.</summary>
+        internal sealed class RunOutcome
+        {
+            /// <summary>The claim of the run (<see cref="CurrentClaim"/> while it ran).</summary>
+            internal int Claim;
+
+            internal string LocationId;
+
+            /// <summary>Why it was refused, stopped, or its work failed; null when it loaded, worked and unloaded.</summary>
+            internal string Problem;
+
+            /// <summary>The first thing that left the menu unproven - a restart is advised - or null when the state
+            /// matched.</summary>
+            internal string Trouble;
+
+            internal double Seconds;
+        }
+
+        /// <summary>Stage M3: the last finished run's verdict (set in its finally, or by the dead-run check), or null.</summary>
+        internal static RunOutcome LastOutcome { get; private set; }
+
         /// <summary>Takes the run slot for <paramref name="tag"/>'s owner. 0 when it is taken. <paramref name="host"/> is the
         /// behaviour running the coroutine (null when unknown: then only a stalled yield marks the run dead);
         /// <paramref name="onDead"/> is told the host's state and the frames since the last yield when the run died without
@@ -114,6 +197,8 @@ namespace QuestTree.QuestGraph
             _voice = tag ?? HostTag;
             _lastTick = Time.frameCount;
             _ddolBefore = null;
+            _stopAsked = null;
+            Phase = "starting";
             return _claim;
         }
 
@@ -127,6 +212,8 @@ namespace QuestTree.QuestGraph
 
         private static void ReleaseSlot()
         {
+            Phase = null;
+            _stopAsked = null;
             _claim = 0;
             _runHost = null;
             _hostKnown = false;
@@ -162,6 +249,15 @@ namespace QuestTree.QuestGraph
                 var state = !_hostKnown ? "unknown" : _runHost == null ? "destroyed" : _runHost.isActiveAndEnabled ? "alive" : "inactive";
                 var frames = Time.frameCount - _lastTick;
                 var onDead = _onDead;
+
+                // Stage M3: the Maps tab waits on this run's verdict - a dead run has one too.
+                LastOutcome = new RunOutcome
+                {
+                    Claim = _claim,
+                    LocationId = _current?.LocationId,
+                    Problem = $"its coroutine died (host {state}) and its scenes were unloaded in an emergency",
+                    Trouble = "the run died without its cleanup",
+                };
 
                 ReleaseSlot();
                 StopCapture();
@@ -355,6 +451,9 @@ namespace QuestTree.QuestGraph
             /// <summary>Why the location cannot be hosted, or null.</summary>
             internal string Refusal;
 
+            /// <summary>Stage M3: the suffixes this resolve skipped (<see cref="SkipSuffixes"/>, read once).</summary>
+            internal string[] Skip = SkippedSceneSuffixes;
+
             internal List<SceneEntry> Kept => All.Where(e => e.Skip == null).ToList();
         }
 
@@ -399,6 +498,7 @@ namespace QuestTree.QuestGraph
 
             plan.Bundle = key.path;
             plan.Rcid = key.rcid;
+            plan.Skip = SkipSuffixes();
 
             IOperation<object> op = null;
             if (!Try($"LoadAssetAsync('{key.path}', '{key.rcid}')", () => op = EFT.Assets.Manager.LoadAssetAsync(key)) || op == null)
@@ -457,7 +557,8 @@ namespace QuestTree.QuestGraph
             Log($"{locationId} preset '{key.rcid}' - {plan.All.Count} scene(s): " +
                 string.Join(", ", plan.All.Select((e, i) =>
                     $"{i + 1} {e.Name} ({(e.Skip == null ? "kept" : "skipped: " + e.Skip)}{(e.Key.onlyOffline ? ", onlyOffline" : "")})")) +
-                $". {kept} kept, {plan.All.Count - kept} skipped; active scene '{plan.ActiveSceneName}'; " +
+                $". {kept} kept, {plan.All.Count - kept} skipped (suffixes: {(plan.Skip.Length == 0 ? "none" : string.Join(", ", plan.Skip))}); " +
+                $"active scene '{plan.ActiveSceneName}'; " +
                 $"'{plan.LocationName}' from '{key.path}' in {clock.ElapsedMilliseconds} ms.");
 
             // Where each scene lives: a scene loaded from a bundle keeps that bundle loaded after the scene unloads (the
@@ -504,7 +605,7 @@ namespace QuestTree.QuestGraph
 
                 if (string.IsNullOrEmpty(entry.Name)) entry.Skip = "no scene name";
                 else if (!names.Add(entry.Name)) entry.Skip = "listed twice";
-                else entry.Skip = SuffixSkip(entry.Name, key.rcid);
+                else entry.Skip = SuffixSkip(entry.Name, key.rcid, plan.Skip);
 
                 plan.All.Add(entry);
             }
@@ -515,13 +616,13 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Why a scene is skipped by its suffix, or null. Tested on the scene name and on the rcid without its
         /// extension; a kept suffix wins.</summary>
-        private static string SuffixSkip(string name, string rcid)
+        private static string SuffixSkip(string name, string rcid, string[] skip)
         {
             var candidates = new[] { name, Path.GetFileNameWithoutExtension(rcid ?? "") ?? "" };
 
             if (KeptSceneSuffixes.Any(s => candidates.Any(c => c.EndsWith(s, StringComparison.OrdinalIgnoreCase)))) return null;
 
-            var hit = SkippedSceneSuffixes.FirstOrDefault(s => candidates.Any(c => c.EndsWith(s, StringComparison.OrdinalIgnoreCase)));
+            var hit = (skip ?? SkippedSceneSuffixes).FirstOrDefault(s => candidates.Any(c => c.EndsWith(s, StringComparison.OrdinalIgnoreCase)));
             return hit == null ? null : $"ends in {hit}";
         }
 
@@ -688,9 +789,17 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Takes the slot and starts <see cref="Run"/> on <paramref name="host"/>. False, with the reason, when a run
         /// is going, the menu gate refuses, an earlier run advised a restart, or the coroutine cannot start.</summary>
-        internal static bool Start(MonoBehaviour host, string locationId, Func<IEnumerator> whileLoaded, out string refusal)
+        internal static bool Start(MonoBehaviour host, string locationId, Func<IEnumerator> whileLoaded, out string refusal) =>
+            Start(host, locationId, whileLoaded, out refusal, out _);
+
+        /// <summary>Stage M3 (review): <see cref="Start(MonoBehaviour, string, Func{IEnumerator}, out string)"/>, also handing
+        /// back the run's claim - taken here, so a caller never reads <see cref="CurrentClaim"/> after a start whose run may
+        /// already have changed it. 0 when it did not start.</summary>
+        internal static bool Start(MonoBehaviour host, string locationId, Func<IEnumerator> whileLoaded, out string refusal,
+            out int startedClaim)
         {
             refusal = null;
+            startedClaim = 0;
 
             if (host == null) refusal = "no behaviour to run on";
             else if (Busy) refusal = "a run is still going";
@@ -709,11 +818,13 @@ namespace QuestTree.QuestGraph
 
             try
             {
+                startedClaim = claim;
                 host.StartCoroutine(Body(claim, locationId, whileLoaded));
                 return true;
             }
             catch (Exception ex)
             {
+                startedClaim = 0;
                 Release(claim);
                 StopCapture();
                 refusal = $"its coroutine could not start on {host.GetType().Name} ({ex.GetType().Name}: {ex.Message})";
@@ -754,7 +865,7 @@ namespace QuestTree.QuestGraph
         /// <see cref="WhileLoadedCapSeconds"/>) while they are loaded, then unloads every scene that appeared during the run
         /// in reverse, sweeps unused assets, collects, restores the global state and compares it with the baseline. A location
         /// whose preset or any scene fails to load is refused - what did load is unloaded - with the reason on the FINISHED
-        /// line. Takes the run slot itself when not started through <see cref="Start"/> (then a dead run is only seen by its
+        /// line. Takes the run slot itself when not started through Start (then a dead run is only seen by its
         /// stalled yields).</summary>
         internal static IEnumerator Run(string locationId, Func<IEnumerator> whileLoaded) => Body(0, locationId, whileLoaded);
 
@@ -803,6 +914,7 @@ namespace QuestTree.QuestGraph
                         Log($"baseline memory: {Memory()}");
                     });
 
+                    SetPhase("reading the map's scene list");
                     var resolve = ResolveScenes(locationId, plan);
                     while (resolve.MoveNext()) yield return resolve.Current;
 
@@ -817,6 +929,7 @@ namespace QuestTree.QuestGraph
 
                 if (ctx.Refusal == null && ctx.Abort == null && whileLoaded != null)
                 {
+                    SetPhase("capturing");
                     var work = Drive(whileLoaded, ctx);
                     while (work.MoveNext()) yield return work.Current;
                 }
@@ -825,6 +938,7 @@ namespace QuestTree.QuestGraph
                 // the reason would otherwise read as "a raid started during the run").
                 if (ctx.Before != null || ctx.Operations.Count > 0)
                 {
+                    SetPhase("unloading the map's scenes");
                     var unload = UnloadAll(ctx);
                     while (unload.MoveNext()) yield return unload.Current;
                 }
@@ -864,6 +978,18 @@ namespace QuestTree.QuestGraph
                         $"{plan.Kept.Count} scene(s) of '{plan.Rcid}' loaded and unloaded" +
                         (ctx.WorkFailure != null ? $", but the work while loaded failed: {ctx.WorkFailure}" : "");
 
+                    // Stage M3: the Maps tab's result line reads this.
+                    LastOutcome = new RunOutcome
+                    {
+                        Claim = claim,
+                        LocationId = locationId,
+                        Problem = ctx.Refusal != null ? $"refused: {ctx.Refusal}" :
+                                  ctx.Abort != null ? $"stopped: {ctx.Abort}" :
+                                  ctx.WorkFailure != null ? $"the capture failed: {ctx.WorkFailure}" : null,
+                        Trouble = ctx.Trouble.Count > 0 ? ctx.Trouble[0] : null,
+                        Seconds = total.Elapsed.TotalSeconds,
+                    };
+
                     if (ctx.Trouble.Count == 0)
                     {
                         Log(head + outcome + "; every hosted scene is unloaded and the compared state matches (scenes, " +
@@ -900,6 +1026,15 @@ namespace QuestTree.QuestGraph
                 var entry = scenes[i];
                 var label = $"scene {i + 1}/{scenes.Count}";
 
+                // Stage M3: the Maps tab's cancel, before the next scene starts loading.
+                if (_stopAsked != null)
+                {
+                    ctx.Abort = $"{_stopAsked} before {label} '{entry.Name}'";
+                    break;
+                }
+
+                SetPhase($"loading {label} '{entry.Name}'");
+
                 if (!InMenu(out var why))
                 {
                     ctx.Abort = $"no longer in the menu before {label} '{entry.Name}' ({why})";
@@ -934,6 +1069,7 @@ namespace QuestTree.QuestGraph
                 {
                     if ((expired = watch.Expired(op)) != null) break;
                     if (RaidStarting()) { ctx.Abort = $"a GameWorld appeared while {label} '{entry.Name}' was loading"; break; }
+                    if (_stopAsked != null) { ctx.Abort = $"{_stopAsked} while {label} '{entry.Name}' was loading"; break; }
                     yield return Tick();
                 }
 
@@ -1013,6 +1149,14 @@ namespace QuestTree.QuestGraph
                     if (RaidStarting())
                     {
                         ctx.Abort = "a GameWorld appeared while the map was hosted";
+                        yield break;
+                    }
+
+                    // Stage M3: the Maps tab's cancel - disposed like the cap, so the capture's finally runs.
+                    if (_stopAsked != null)
+                    {
+                        ctx.Abort = _stopAsked;
+                        Log($"{ctx.LocationId}: {ctx.Abort} - the work is stopped, unloading.");
                         yield break;
                     }
 
@@ -1135,6 +1279,7 @@ namespace QuestTree.QuestGraph
 
                     var clock = Stopwatch.StartNew();
                     AsyncOperation op = null;
+                    SetPhase($"unloading '{hosted.Name}' ({ctx.Appeared.Count} left)");
 
                     if (!Try($"UnloadSceneAsync('{hosted.Name}')", () => op = SceneManager.UnloadSceneAsync(scene)) || op == null)
                     {
@@ -1172,6 +1317,7 @@ namespace QuestTree.QuestGraph
             {
                 var clock = Stopwatch.StartNew();
                 AsyncOperation sweep = null;
+                SetPhase("freeing the map's assets");
                 Try("Resources.UnloadUnusedAssets", () => sweep = Resources.UnloadUnusedAssets());
 
                 if (sweep != null)
@@ -1186,6 +1332,7 @@ namespace QuestTree.QuestGraph
 
             if (ctx.Before != null && !RaidStarting())
             {
+                SetPhase("restoring the menu");
                 Try("the DontDestroyOnLoad leak check", () => SweepDdol(ctx.Trouble));
                 Try("restoring the global state", () => ctx.Before.Restore(ctx.Trouble));
                 yield return Tick();
@@ -1281,6 +1428,40 @@ namespace QuestTree.QuestGraph
             {
                 why = $"finding the location threw {ex.GetType().Name}: {ex.Message}";
                 return null;
+            }
+        }
+
+        /// <summary>Stage M3: the Maps tab's cheap "can this map be hosted" test - the location is in the session, is not the
+        /// hideout, and its Scene key names a bundle and an rcid. Loads nothing: whether the preset itself loads is only
+        /// known when <see cref="ResolveScenes"/> tries, and its refusal reaches the result line. False with the reason.
+        /// Never throws.</summary>
+        /// <param name="locationId">The location id as the Maps tab knows it.</param>
+        /// <param name="why">Why it cannot be hosted.</param>
+        internal static bool HasScenes(string locationId, out string why)
+        {
+            why = null;
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(locationId))
+                {
+                    why = "no map is selected";
+                    return false;
+                }
+
+                var location = FindLocation(locationId.Trim(), out why);
+                if (location == null) return false;
+
+                if (location.IsHideout) why = "it is the hideout";
+                else if (!HasSceneKey(location.Scene)) why = "the game lists no scenes for it";
+                else if (string.IsNullOrEmpty(location.Scene.rcid)) why = "its scene list has no name to load it by";
+
+                return why == null;
+            }
+            catch (Exception ex)
+            {
+                why = $"its scenes could not be looked up ({ex.GetType().Name})";
+                return false;
             }
         }
 

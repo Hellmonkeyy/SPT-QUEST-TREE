@@ -118,6 +118,11 @@ namespace QuestTree.UI
             var path = entry?.MeshPath;
             if (string.IsNullOrEmpty(path)) return null;
 
+            // Stage M3: no 3D view while a map is hosted in the menu - its geometry would be scene objects a capture's
+            // wake and readbacks could meet (the capture hides only what was drawing when it woke). The key carries
+            // MeshFor, so the view comes back in 3D on the repaint the run's end makes.
+            if (MenuHostBusy) return null;
+
             return _refusedMeshes.ContainsKey(path) ? null : path;
         }
 
@@ -129,7 +134,164 @@ namespace QuestTree.UI
             var path = entry?.MeshPath;
             if (string.IsNullOrEmpty(path)) return null;
 
+            if (MenuHostBusy) return "a capture from game files is running";
+
             return _refusedMeshes.TryGetValue(path, out var reason) ? reason : null;
+        }
+
+        /// <summary>Stage M3: whether a map is hosted in the main menu right now (a capture from game files, or the probe
+        /// key's run).</summary>
+        private static bool MenuHostBusy => QuestGraph.MenuMapHost.Busy || QuestGraph.MenuCaptureRunner.Running;
+
+        /// <summary>Stage M3: the progress line on screen, updated in place by <see cref="PollMenuCapture"/>, or null.</summary>
+        private static TMPro.TMP_Text _menuCaptureLine;
+
+        /// <summary>Stage M3: the runner's Version the last build drew.</summary>
+        private static int _menuCaptureDrawn = -1;
+
+        /// <summary>
+        /// Stage M3: asked once a frame by the panel while the Maps tab is up. True - repaint - when a capture from game
+        /// files started or ended since the last build (its buttons and lines changed); otherwise the progress line, if
+        /// one is on screen, is brought up to date in place, so a run's every phase is shown without rebuilding the map.
+        /// </summary>
+        public static bool PollMenuCapture()
+        {
+            try
+            {
+                // Consumed here, not only by the section's build: a build that draws no section (in a raid, or a tab
+                // with no map) must not leave this asking for a repaint every frame.
+                if (QuestGraph.MenuCaptureRunner.Version != _menuCaptureDrawn)
+                {
+                    _menuCaptureDrawn = QuestGraph.MenuCaptureRunner.Version;
+                    return true;
+                }
+
+                if (_menuCaptureLine != null)
+                {
+                    var text = QuestGraph.MenuCaptureRunner.Progress;
+                    if (text != null)
+                    {
+                        text = $"<color=#FFFFFFB0>{text}</color>";
+                        if (!string.Equals(_menuCaptureLine.text, text, StringComparison.Ordinal)) _menuCaptureLine.text = text;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // A destroyed label between two builds: the next build makes a new one.
+                _menuCaptureLine = null;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Stage M3: the "Capture from game files" section of the sidebar, for the selected map. In the main menu only:
+        /// the two actions for this map and capture all, each greyed with the reason when it cannot start
+        /// (MenuCaptureRunner.CanStart); while a run goes, its progress line (kept up to date by
+        /// <see cref="PollMenuCapture"/>) and a cancel; after one, its result line and, when the menu was left unproven,
+        /// "Restart the game before your next raid".
+        /// </summary>
+        private static void AddMenuCaptureSection(
+            RectTransform content, string locationKey, string mapName, float x, ref float y, float width)
+        {
+            _menuCaptureDrawn = QuestGraph.MenuCaptureRunner.Version;
+            _menuCaptureLine = null;
+
+            y += 10f;
+            AuxLayout.AddSectionHeader(content, ref y, "Capture from game files", x, width);
+
+            var dim = "<color=#FFFFFF60>";
+
+            if (QuestGraph.MenuCaptureRunner.Running)
+            {
+                _menuCaptureLine = AuxLayout.AddLabelAt(content,
+                    $"<color=#FFFFFFB0>{QuestGraph.MenuCaptureRunner.Progress}</color>", x, ref y, 18f, 11, width);
+
+                AuxLayout.AddWrapped(content,
+                    $"{dim}The map is loaded in the menu. Do not start a raid or open the hideout until it ends.</color>", x, ref y, width, 11);
+
+                AuxLayout.AddClickableRow(content,
+                    QuestGraph.MenuCaptureRunner.RunningAll ? "Cancel (this map and the rest)" : "Cancel",
+                    x, ref y, width, false, () => QuestGraph.MenuCaptureRunner.Cancel());
+            }
+            else
+            {
+                var canThis = QuestGraph.MenuCaptureRunner.CanStart(locationKey, out var whyNot);
+                var canAll = QuestGraph.MenuCaptureRunner.CanStart(null, out var whyNotAll);
+
+                AddCaptureAction(content, "Capture from game files", canThis, () => StartMenuCapture(locationKey, mapName, replace: false), x, ref y, width);
+                AddCaptureAction(content, "Replace with a fresh capture from game files", canThis,
+                    () => StartMenuCapture(locationKey, mapName, replace: true), x, ref y, width);
+
+                if (!canThis)
+                    AuxLayout.AddWrapped(content, $"{dim}Unavailable: {whyNot}.</color>", x, ref y, width, 11);
+                else
+                    AuxLayout.AddWrapped(content,
+                        $"{dim}Loads {mapName}'s scenes in the menu and photographs the whole map - several minutes. Capture adds " +
+                        "to a set taken this way; Replace starts over and keeps the old set as a backup.</color>", x, ref y, width, 11);
+
+                AddCaptureAction(content, "Capture all maps from game files", canAll, () =>
+                {
+                    if (QuestGraph.MenuCaptureRunner.StartAll(out var refusal)) return;
+
+                    _notice = $"Capture all did not start: {refusal}.";
+                    ModSettings.RequestRepaint();
+                }, x, ref y, width);
+
+                if (!canAll && canThis != canAll)
+                    AuxLayout.AddWrapped(content, $"{dim}Capture all is unavailable: {whyNotAll}.</color>", x, ref y, width, 11);
+            }
+
+            var last = QuestGraph.MenuCaptureRunner.LastResult;
+            if (!string.IsNullOrEmpty(last))
+            {
+                AuxLayout.AddWrapped(content, $"<color=#FFFFFFB0>Last: {last}</color>", x, ref y, width, 11);
+            }
+
+            if (QuestGraph.MenuCaptureRunner.RestartAdvised)
+            {
+                AuxLayout.AddWrapped(content,
+                    $"<color=#{GameStyle.WarningHex}>Restart the game before your next raid - a capture from game files could not " +
+                    "prove the menu was left as it was found.</color>", x, ref y, width, 11);
+            }
+        }
+
+        /// <summary>Stage M3: whether the sidebar shows the capture-from-game-files section: in the main menu (no raid
+        /// GameWorld - a hideout one outliving a visit still shows it, greyed with its reason), or while a run of it is
+        /// going or has a result to say. Never throws.</summary>
+        private static bool ShowMenuCaptureSection()
+        {
+            try
+            {
+                if (QuestGraph.MenuCaptureRunner.Running || QuestGraph.MenuMapHost.Busy) return true;
+
+                // RaidStarting: a raid GameWorld or a raid watcher - the hideout's world does not count
+                return !QuestGraph.MenuMapHost.RaidStarting();
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>Stage M3: one action row - clickable when it can start, else the same words dimmed with no button (the
+        /// reason is the line under the rows).</summary>
+        private static void AddCaptureAction(
+            RectTransform content, string label, bool enabled, Action start, float x, ref float y, float width)
+        {
+            if (enabled) AuxLayout.AddClickableRow(content, label, x, ref y, width, false, start);
+            else AddAt(content, $"<color=#FFFFFF60>{label}</color>", x, ref y, AuxLayout.RowHeight, 12, width);
+        }
+
+        /// <summary>Stage M3: one map's capture from game files, from its button. A refusal is shown on the notice line.</summary>
+        private static void StartMenuCapture(string locationKey, string mapName, bool replace)
+        {
+            // A start repaints by itself (MenuCaptureRunner bumps its Version and asks for one); a refusal is said here.
+            if (QuestGraph.MenuCaptureRunner.Start(locationKey, mapName, replace, out var refusal)) return;
+
+            _notice = $"The capture from game files did not start: {refusal}.";
+            ModSettings.RequestRepaint();
         }
 
         /// <summary>Gives up on a mesh file for the rest of the run. No repaint: for the caller that
@@ -1627,6 +1789,13 @@ namespace QuestTree.UI
                         () => GameStyle.InspectItem(template));
                 }
             }
+
+            // ---- capture from game files (stage M3): the main menu only - in a raid or the hideout the panel is a different
+            // screen and the section would only ever say "unavailable".
+            if (ShowMenuCaptureSection())
+                AddMenuCaptureSection(content, _selectedLocationKey, mapName, listX, ref y, inner);
+            else
+                _menuCaptureLine = null;
 
             // ---- credits
             if (!ModSettings.Ready || ModSettings.ShowCredits.Value)

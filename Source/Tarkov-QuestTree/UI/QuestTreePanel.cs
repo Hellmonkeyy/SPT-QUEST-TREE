@@ -586,8 +586,9 @@ namespace QuestTree.UI
             // hiding the panel is how the player gets out of it.
             if (_loadingPanel != null && _loadingPanel.gameObject.activeSelf) return;
 
-            // The map's picture arrives from a worker thread; the repaint that shows it is this.
-            if (_selectedTraderId == MapsTabId && MapView.PollPendingSprite())
+            // The map's picture arrives from a worker thread; the repaint that shows it is this. Stage M3: and a capture
+            // from game files starting or ending (its progress line is updated in place, without a repaint).
+            if (_selectedTraderId == MapsTabId && (MapView.PollPendingSprite() | MapView.PollMenuCapture()))
                 RenderSelectedTab(frame: false);
 
             // Shortcuts. Deliberately only while the panel has focus and the search box does not -

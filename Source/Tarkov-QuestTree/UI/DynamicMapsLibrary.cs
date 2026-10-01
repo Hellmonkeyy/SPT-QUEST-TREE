@@ -1471,7 +1471,9 @@ namespace QuestTree.UI
                 // else is a Unity version doing something unexpected. Read after Compress, so it says DXT5
                 // for a capture, DXT1 for a host's JPEG, and the uncompressed format when compression was
                 // skipped or switched off; the mip count says whether the chain survived.
-                Plugin.LogSource?.LogDebug(
+                // Stage M3: at Info for a large picture - a menu capture's floor or its viewing copy - so the decode time
+                // the viewing copy exists to cut is on the record without the debug log; Debug for the rest, as before.
+                var line =
                     $"QuestTree: map picture '{name}' {texture.width}x{texture.height} {texture.format} " +
                     (texture.mipmapCount > 1
                         ? $"with {texture.mipmapCount.ToString(CultureInfo.InvariantCulture)} mips "
@@ -1479,7 +1481,10 @@ namespace QuestTree.UI
                     $"decoded in {clock.ElapsedMilliseconds} ms " +
                     $"({layer.RasterBytes / (1024f * 1024f):F1} MB); " +
                     $"{(ResidentRasterBytes + layer.RasterBytes) / (1024f * 1024f):F1} MB of pictures " +
-                    $"resident, ceiling {Ceiling} pictures.");
+                    $"resident, ceiling {Ceiling} pictures.";
+
+                if ((long)texture.width * texture.height >= LargePicturePixels) Plugin.LogSource?.LogInfo(line);
+                else Plugin.LogSource?.LogDebug(line);
 
                 LogArtworkGeometry(layer, sprite);
                 return sprite;
@@ -1493,6 +1498,10 @@ namespace QuestTree.UI
                 return null;
             }
         }
+
+        /// <summary>Stage M3: the pixel count from which a picture's decode line is said at Info - 4096 x 4096, past every raid
+        /// floor of a small map and short of none of a menu capture's.</summary>
+        private const long LargePicturePixels = 4096L * 4096L;
 
         /// <summary>
         /// Rollback for the viewer's block compression. True: a floor or side picture whose sides are multiples

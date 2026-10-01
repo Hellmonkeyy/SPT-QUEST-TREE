@@ -77,6 +77,14 @@ namespace QuestTree.UI
         {
             if (string.IsNullOrEmpty(locationKey)) return null;
 
+            // THROWAWAY (stage M3): the maintainer asked to see the probe key's "-menu" test sets - one wins over everything
+            // else for its map, and only while the setting is on.
+            if (ModSettings.Ready && ModSettings.ShowMenuTestSets != null && ModSettings.ShowMenuTestSets.Value)
+            {
+                var test = TestSet(locationKey, displayName);
+                if (test != null) return test;
+            }
+
             var preference = SourcePreference();
 
             // ---- (a) DynamicMaps first, when that is what the player asked for. Kept as one branch
@@ -357,6 +365,29 @@ namespace QuestTree.UI
             return EntryFor(captures, locationKey, displayName);
         }
 
+        /// <summary>THROWAWAY (stage M3): the "&lt;id&gt;-menu" test set for this map (or its alias's), or null. The location
+        /// key is added to the entry's names, as <see cref="EntryFor"/> does for an alias, so the marker payload - keyed by
+        /// the real id - still finds the map's pins.</summary>
+        /// <param name="locationKey">The map's internal id, as the view spells it.</param>
+        /// <param name="displayName">What the view calls this map, or null.</param>
+        private static DynamicMapsLibrary.MapEntry TestSet(string locationKey, string displayName)
+        {
+            var captures = _captures ??= ScanFolder(null, CapturesRoot(), "captured map");
+            var suffix = QuestGraph.MapCapture.MenuCaptureKeySuffix;
+
+            if (!captures.TryGetValue(locationKey + suffix, out var capture))
+            {
+                var aliased = AliasOf(locationKey);
+                if (aliased == null || !captures.TryGetValue(aliased + suffix, out capture)) return null;
+            }
+
+            if (!capture.Entry.InternalNames.Any(n => string.Equals(n, locationKey, StringComparison.OrdinalIgnoreCase)))
+                capture.Entry.InternalNames.Add(locationKey);
+
+            if (!string.IsNullOrEmpty(displayName)) capture.Entry.DisplayName = displayName;
+            return capture.Entry;
+        }
+
         /// <summary>
         /// The HOST's picture set for this map, or null when it has none.
         ///
@@ -468,6 +499,11 @@ namespace QuestTree.UI
                     var name = Path.GetFileName(folder);
                     if (!string.IsNullOrEmpty(name) && name[0] == '.') continue;
 
+                    // Stage M3: a set a capture from game files replaced, moved aside (captures/<key>.bak-<time>/) - its
+                    // meta still names the map, and drawing it would undo the replace.
+                    if (!string.IsNullOrEmpty(name) &&
+                        name.IndexOf(QuestGraph.MapCapture.SetAsideInfix, StringComparison.OrdinalIgnoreCase) >= 0) continue;
+
                     foreach (var meta in Directory.GetFiles(folder, "*" + MetaSuffix))
                     {
                         var parsed = ReadMeta(meta, folder);
@@ -577,7 +613,9 @@ namespace QuestTree.UI
 
             /// <summary>Lighting stage 2: the raid's light, or null. See <see cref="ReadLighting"/>.</summary>
             public DynamicMapsLibrary.CaptureLighting Lighting;
-            public readonly List<(int Level, string Name, string File, float MinY, float MaxY)> Floors = new();
+            /// <summary>Each floor's picture - the viewing copy when there is one (stage M3) - and that picture's own
+            /// density, px/m (0 when unknown).</summary>
+            public readonly List<(int Level, string Name, string File, float MinY, float MaxY, float Ppm)> Floors = new();
             public readonly List<(string Text, float X, float Z, DynamicMapsLibrary.MapLabelKind Kind)> Labels = new();
         }
 
@@ -695,13 +733,15 @@ namespace QuestTree.UI
                 // and a hand edit that keeps the timestamp.
                 parsed.Stamp = string.Format(
                     CultureInfo.InvariantCulture,
-                    "{0}|{1}|{2}|{3:0.##},{4:0.##},{5:0.##},{6:0.##}|{7}|{8}|{9}:{10}|{11}",
+                    "{0}|{1}|{2}|{3:0.##},{4:0.##},{5:0.##},{6:0.##}|{7}|{8}|{9}:{10}|{11}|{12}",
                     metaPath, capturedAt, File.GetLastWriteTimeUtc(metaPath).Ticks,
                     parsed.MinX, parsed.MinZ, parsed.MaxX, parsed.MaxZ,
                     parsed.Rotation, parsed.Floors.Count,
                     parsed.MeshPath ?? "", parsed.MeshBytes,
                     string.Join("", parsed.Sides.Select(side => side.Dir)) + "|atlas" +
-                    string.Join(",", parsed.AtlasPages.Select(page => page.Page.ToString(CultureInfo.InvariantCulture))));
+                    string.Join(",", parsed.AtlasPages.Select(page => page.Page.ToString(CultureInfo.InvariantCulture))),
+                    // Stage M3: which picture each floor draws (a viewing copy appearing or going is a new entry)
+                    string.Join(",", parsed.Floors.Select(floor => Path.GetFileName(floor.File))));
 
                 return parsed;
             }
@@ -784,10 +824,83 @@ namespace QuestTree.UI
 
                 CheckPictureSize(node, metaName, declared, pxPerMetre, parsed);
 
-                parsed.Floors.Add((level, floorName, file, Mathf.Min(minY, maxY), Mathf.Max(minY, maxY)));
+                // Stage M3: a menu floor's viewing copy, when it checks out, is what is drawn - the 2D map and the 3D
+                // ground alike - and the full picture only without one. Its density is its own: the full picture's
+                // scaled by the copy's width (the picture is stretched onto the extent either way).
+                var drawn = file;
+                var ppm = IsFinite(pxPerMetre) && pxPerMetre > 0f ? pxPerMetre : 0f;
+
+                var view = ViewCopy(node, folder, metaName, declared);
+                if (view.File != null)
+                {
+                    drawn = view.File;
+                    var fullWidth = (int?)Field(node, "width") ?? 0;
+                    ppm = ppm > 0f && fullWidth > 0 ? ppm * view.Width / fullWidth : 0f;
+                }
+
+                parsed.Floors.Add((level, floorName, drawn, Mathf.Min(minY, maxY), Mathf.Max(minY, maxY), ppm));
             }
 
             parsed.Floors.Sort((a, b) => a.Level.CompareTo(b.Level));
+        }
+
+        /// <summary>Stage M3 rollback: false never draws a viewing copy - every floor from its full picture, as before.</summary>
+        internal static readonly bool DrawViewCopies = true;
+
+        /// <summary>
+        /// Stage M3: a floor's viewing copy (the meta's optional <c>viewFile</c>, <c>viewWidth</c>, <c>viewHeight</c>), or
+        /// no file. It is used only when it is a plain file name in the capture's folder, is on disk, is smaller than the
+        /// full picture and has the full picture's shape - its long side exact, its short side within the 4 px the writer
+        /// rounds it to (MapCapture.ViewSize). Anything else is one warning and the full picture.
+        /// </summary>
+        /// <param name="floor">The floor's node.</param>
+        /// <param name="folder">The capture's folder.</param>
+        /// <param name="metaName">For the line.</param>
+        /// <param name="declared">The full picture's name, for the line.</param>
+        private static (string File, int Width, int Height) ViewCopy(JObject floor, string folder, string metaName, string declared)
+        {
+            var none = ((string)null, 0, 0);
+
+            try
+            {
+                if (!DrawViewCopies) return none;
+
+                var name = ((string)Field(floor, "viewFile") ?? "").Trim();
+                if (name.Length == 0) return none;
+
+                string why = null;
+                var width = (int?)Field(floor, "width") ?? 0;
+                var height = (int?)Field(floor, "height") ?? 0;
+                var vw = (int?)Field(floor, "viewWidth") ?? 0;
+                var vh = (int?)Field(floor, "viewHeight") ?? 0;
+
+                if (!string.Equals(name, Path.GetFileName(name), StringComparison.Ordinal)) why = "is not a plain file name in the capture's own folder";
+                else if (vw <= 0 || vh <= 0) why = "has no size";
+                else if (width <= 0 || height <= 0) why = "belongs to a picture with no size";
+                else if (vw > width || vh > height) why = $"is {vw}x{vh}, larger than the {width}x{height} picture";
+                else if (Math.Abs((double)height * vw / width - vh) > 4d && Math.Abs((double)width * vh / height - vw) > 4d)
+                    why = $"is {vw}x{vh}, not the shape of the {width}x{height} picture";
+
+                var path = why == null ? Path.Combine(folder, name) : null;
+                if (why == null && !File.Exists(path)) why = "is not on disk";
+
+                if (why != null)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: capture '{metaName}' names the viewing copy '{name}' of '{declared}', which {why} - the full " +
+                        "picture is drawn instead.");
+                    return none;
+                }
+
+                return (path, vw, vh);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: capture '{metaName}''s viewing copy of '{declared}' could not be read ({ex.GetType().Name}) - the " +
+                    "full picture is drawn instead.");
+                return none;
+            }
         }
 
         /// <summary>
@@ -1432,8 +1545,9 @@ namespace QuestTree.UI
                     // DynamicMapsLibrary.MapLayer.Mipmapped.
                     Mipmapped = true,
 
-                    // The picture's density, for the 3D view (0 when the meta did not say).
-                    PxPerMetre = parsed.PxPerMetre,
+                    // The density of the picture actually drawn, for the 3D view (0 when the meta did not say) - a
+                    // viewing copy's own (stage M3), which is what decides the roofs' source there.
+                    PxPerMetre = floor.Ppm,
 
                     BoundsMin = boundsMin,
                     BoundsMax = boundsMax
