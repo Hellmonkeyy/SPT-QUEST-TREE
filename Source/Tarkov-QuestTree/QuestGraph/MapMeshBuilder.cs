@@ -737,7 +737,12 @@ namespace QuestTree.QuestGraph
         private const double PropTrianglesPerSquareMetre = 8d;
 
         private const int PropMaxTriangles = 400;
-        private const double PropShareOfCap = 0.20;
+        /// <summary>The props' share of the buildings' cap. 0.40 since 2026-10-01 (was 0.20, the maintainer's 2026-09-28
+        /// decision): the buildings' demand is bounded by their sources (Customs: 5.8 M at 60/m2), so the props - 17,073 of
+        /// Customs' prop candidates left out at 20 % - are what fills the 180 MiB room. NOT in the recipe: MeshRecipe carries
+        /// the historic 0.20 as a frozen literal, so no stored mesh is rebuilt for it; a larger share only admits more props
+        /// at the next capture. Rollback: 0.20.</summary>
+        private const double PropShareOfCap = 0.40;
 
         /// <summary>PART-11 (3.4): a material only props use is tiled at <see cref="PropTexelsPerMetre"/> texels a metre up
         /// to <see cref="PropTileMax"/> px (a building's at TexelsPerMetre up to AtlasTileMax); one a building also uses
@@ -948,7 +953,8 @@ namespace QuestTree.QuestGraph
             RecipePart(CubemapMinFacePixels), RecipePart(CubemapReadMax),
             // PART-11 (3.6): the prop class
             RecipePart(PropsAsClass), RecipePart(PropMinLongSide), RecipePart(PropTrianglesPerSquareMetre), RecipePart(PropMaxTriangles),
-            RecipePart(PropShareOfCap), RecipePart(PropTileMax), RecipePart(PropTexelsPerMetre), RecipePart(PropOverLimitFactor),
+            // HISTORIC, frozen: PropShareOfCap as it was when r9 was cut (0.20); raised to 0.40 on 2026-10-01 without a bump
+            RecipePart(0.20), RecipePart(PropTileMax), RecipePart(PropTexelsPerMetre), RecipePart(PropOverLimitFactor),
             string.Join(",", MapMeshIndex.TextShaderMarks),
             // HQ S3.13: the high-quality constants
             RecipePart(TexelsPerMetre), RecipePart(CutoutAlphaTiles),
@@ -957,7 +963,10 @@ namespace QuestTree.QuestGraph
             // without a recipe bump, so no stored mesh is rebuilt for it - change it only with a recipe bump.
             RecipePart(90L << 20),
             RecipePart(RequestFullMips), RecipePart(DefaultDeflatedBytesPerTriangle),
-            RecipePart(AreaBudget.TrianglesPerSquareMetre), RecipePart(AreaBudget.MinTriangles),
+            // HISTORIC, frozen: AreaBudget.TrianglesPerSquareMetre as it was when r9 was cut (30). The density moved to 60 on
+            // 2026-10-01 without a recipe bump - a raised target only grows what a building may hold, which accumulation
+            // takes up through the shortfall re-read - so no stored mesh is rebuilt for it; change it only with a recipe bump.
+            RecipePart(30.0), RecipePart(AreaBudget.MinTriangles),
             RecipePart(AreaBudget.MaxTrianglesPerBuilding), RecipePart(AreaBudget.TrianglesPerStorey),
             RecipePart(AreaBudget.StoreyMetres), AreaBudget.BudgetBasis.ToString(), RecipePart(AreaBudget.SurfacePerFootprint),
             RecipePart(AreaBudget.LegacyTrianglesPerSquareMetre), RecipePart(AreaBudget.LegacyMaxTrianglesPerBuilding),
@@ -2531,6 +2540,14 @@ namespace QuestTree.QuestGraph
             internal long FoliageTriangles;
             internal long FoliageFacesDropped;
             internal int FoliageRemoved;
+
+            /// <summary>2026-10-01: ground-skirt faces left out of the merged file (<see cref="DropGroundSkirts"/>) - of
+            /// stored buildings and of this build's - and the buildings that lost any. Any at all makes the mesh not
+            /// Unchanged: the file differs from the stored one.</summary>
+            internal long SkirtsDroppedStored;
+
+            internal long SkirtsDroppedNew;
+            internal int SkirtBuildings;
 
             /// <summary>HQ S3.12: tree groups started at their coarsest level, by that level, and trees left out as too dense
             /// at their coarsest level.</summary>
@@ -5567,10 +5584,11 @@ namespace QuestTree.QuestGraph
             var cap = CapOver(out var demand);
 
             // PART-11 (3.3): the props admitted to their share of that cap join the plan, and the cap is derived again
-            if (PropsAsClass) job.PropShare = PropShareOf(cap);
+            // review 2026-10-01: the demand here is the buildings' alone, so the props get only the room the ceiling leaves them
+            if (PropsAsClass) job.PropShare = PropShareFor(job, cap, demand);
             if (props.Count > 0)
             {
-                var admitted = AdmitProps(job, props, cap, 0L);
+                var admitted = AdmitProps(job, props, job.PropShare, 0L);
 
                 if (admitted.Count > 0)
                 {
@@ -6083,15 +6101,17 @@ namespace QuestTree.QuestGraph
             // first into what is left; the admitted join the plan, which is then made again below, and the retry headroom
             // judged meanwhile is net of what they want
             var propsWant = 0L;
-            if (PropsAsClass) job.PropShare = PropShareOf(cap);
+            var storedHeld = 0L;
+            foreach (var e in job.Stored.All)
+                if (!e.Drop && e.Meta.Prop) storedHeld += Math.Max(0, e.Meta.StoredTriangles);
+
+            // review 2026-10-01: the union's demand counts the stored props at what they hold; less that, it is the buildings'
+            // (and the props being re-read, which are in the union already), which keep their whole demand before the share
+            if (PropsAsClass) job.PropShare = PropShareFor(job, cap, Math.Max(0L, demand - storedHeld));
             if (heldProps.Count > 0)
             {
-                var storedHeld = 0L;
-                foreach (var e in job.Stored.All)
-                    if (!e.Drop && e.Meta.Prop) storedHeld += Math.Max(0, e.Meta.StoredTriangles);
-
                 var wantedBefore = job.PropsAdmittedTriangles;
-                var admitted = AdmitProps(job, heldProps, cap, storedHeld);
+                var admitted = AdmitProps(job, heldProps, job.PropShare, storedHeld);
                 propsWant = job.PropsAdmittedTriangles - wantedBefore;
 
                 if (admitted.Count > 0)
@@ -6342,6 +6362,29 @@ namespace QuestTree.QuestGraph
         internal static long PropShareOf(long cap) => (long)(Math.Max(0L, cap) * PropShareOfCap);
 
         /// <summary>
+        /// Review 2026-10-01: the props' share as this build admits them - min(<see cref="PropShareOf"/>(cap), the room the
+        /// CEILING leaves over the buildings' demand). The ceiling is what the cap can never pass whatever the demand:
+        /// max(<see cref="MemoryFloorTriangles"/>, min(the memory ceiling, <see cref="BuilderAbsoluteTriangles"/>, the
+        /// shipped-size bound)), as CapFor bounds it. Buildings keep their whole demand first: at 40 % a share taken from a
+        /// binding cap would pay for barrels out of the buildings' targets (the plan's one scale falls). Where the ceiling
+        /// does not bind (Customs: ~19 M against ~7.4 M of buildings) this is PropShareOf(cap) exactly.
+        /// </summary>
+        /// <param name="job">The build, its memory ceiling and size bound set (CapFor's caller ran SizeBoundFor).</param>
+        /// <param name="cap">The cap derived without the new props.</param>
+        /// <param name="buildingDemand">The demand without the props the share pays for.</param>
+        private static long PropShareFor(Job job, long cap, long buildingDemand)
+        {
+            var ceiling = Math.Min(job.MemoryCeiling, BuilderAbsoluteTriangles);
+            if (job.SizeBound > 0) ceiling = Math.Min(ceiling, job.SizeBound);
+            ceiling = Math.Max(MemoryFloorTriangles, ceiling);
+
+            // the plan spends only BudgetShare of the cap, so the room left for props is under BudgetShare x the ceiling -
+            // otherwise props fill the last 10 % and the plan's one scale still trims the buildings (review of the floor)
+            var room = (long)(ceiling * BudgetShare) - Math.Max(0L, buildingDemand);
+            return Math.Min(PropShareOf(cap), Math.Max(0L, room));
+        }
+
+        /// <summary>
         /// Admits new prop candidates to the props' share of the cap, LARGEST BOX VOLUME FIRST: each takes min(its source,
         /// its own target) of the share while that fits beside what is taken (what stored props already hold first); one that
         /// does not fit is left this build (PropLeft, counted) and the next smaller is tried - a bound on the sum, not a cut
@@ -6352,11 +6395,10 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="job">The build.</param>
         /// <param name="props">The new prop candidates (sorted here).</param>
-        /// <param name="cap">The cap derived from the buildings alone (or the union without the new props).</param>
+        /// <param name="share">The props' share (<see cref="PropShareFor"/>), triangles.</param>
         /// <param name="storedHeld">What stored props already hold, triangles.</param>
-        private static List<Candidate> AdmitProps(Job job, List<Candidate> props, long cap, long storedHeld)
+        private static List<Candidate> AdmitProps(Job job, List<Candidate> props, long share, long storedHeld)
         {
-            var share = PropShareOf(cap);
             var used = Math.Max(0L, storedHeld);
             var admitted = new List<Candidate>();
 
@@ -13016,6 +13058,11 @@ namespace QuestTree.QuestGraph
             // relief under the buildings - on the merged relief, so a stored set heals too (ReliefGround)
             ReliefGround(job, file, rows);
 
+            // 2026-10-01: the faces the viewer would leave to the relief, left out here instead - on the FINAL relief (after
+            // ReliefGround), so the test is the viewer's on the viewer's inputs; stored buildings too, so a stored set sheds
+            // its skirts at its next capture. Its own step: a throw keeps the faces (the viewer still drops them).
+            Step(job, "the ground skirts", () => DropGroundSkirts(job, file, rows, storedKept));
+
             result.Accumulated = stored != null;
             result.BasePages = stored != null ? basis.AtlasPages : 0;
             result.StoredKept = storedKept;
@@ -13025,10 +13072,24 @@ namespace QuestTree.QuestGraph
             if (job.AtlasApplied)
                 foreach (var edit in job.RangeEdits)
                     if (edit.Building >= 0 && edit.Building < mergedOf.Length && mergedOf[edit.Building] >= 0)
+                    {
+                        // 2026-10-01: the old tile, at the range's indices AS MERGED - DropGroundSkirts may have moved its First
+                        // and Count since the edit was noted, and FailAtlasPage writes Old back whole; the stale span would
+                        // point past the building's shortened indices. A range is never removed there, so edit.Range holds.
+                        var old = edit.Old;
+                        var merged = file.Buildings[mergedOf[edit.Building]].Ranges;
+
+                        if (merged != null && edit.Range >= 0 && edit.Range < merged.Count)
+                        {
+                            old.First = merged[edit.Range].First;
+                            old.Count = merged[edit.Range].Count;
+                        }
+
                         result.RangeEdits.Add(new RangeEdit
                         {
-                            Building = mergedOf[edit.Building], Range = edit.Range, Page = edit.Page, Old = edit.Old,
+                            Building = mergedOf[edit.Building], Range = edit.Range, Page = edit.Page, Old = old,
                         });
+                    }
 
             result.Kept = storedKept;
             result.Added = buildings.Count - storedKept;
@@ -13043,7 +13104,8 @@ namespace QuestTree.QuestGraph
 
             result.Unchanged = stored != null && result.Added == 0 && dropped == 0 && job.Retargeted.Count == 0 &&
                                job.GroupsToDetail == 0 && job.LevelsDropped == 0 && !touched && result.RangeEdits.Count == 0 &&
-                               job.RangeKept && job.BandsSame && pages == basis.AtlasPages && SameRelief(file, basis);
+                               job.RangeKept && job.BandsSame && pages == basis.AtlasPages && SameRelief(file, basis) &&
+                               job.SkirtsDroppedStored == 0;
 
             // WP2 (fixes 2): the mesh is the stored one, but a recorded attempt changed the sidecar - it is written beside
             // the carried mesh, bound to that mesh's own sha
@@ -13124,6 +13186,359 @@ namespace QuestTree.QuestGraph
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// 2026-10-01: rollback for <see cref="DropGroundSkirts"/> - false stores the ground-skirt faces again and leaves
+        /// them to the viewer, which drops them at load (Map3DView's Prep.GroundSkirt) either way. Static readonly so the
+        /// choice is not a constant the compiler folds. Not in the recipe: the merge re-applies the test to every stored
+        /// building, so neither value makes a stored mesh differ from what this build would make of it.
+        /// </summary>
+        internal static readonly bool DropSkirtsAtCapture = true;
+
+        /// <summary>The viewer's RoofNormalY: |n.y| of a unit face normal at or over this (cos 60 degrees) is near-horizontal.
+        /// MUST equal Map3DView.RoofNormalY - a builder looser than the viewer would drop a face the viewer draws.</summary>
+        private const float SkirtNormalY = 0.5f;
+
+        /// <summary>The viewer's GroundSkirtRise: a skirt's centroid is within this of its building's lowest vertex. MUST
+        /// equal Map3DView.GroundSkirtRise.</summary>
+        private const float SkirtRiseMetres = 1f;
+
+        /// <summary>The viewer's GroundSkirtTolerance: a skirt's centroid is within this of the band's relief under it.
+        /// MUST equal Map3DView.GroundSkirtTolerance.</summary>
+        private const float SkirtToleranceMetres = 0.3f;
+
+        /// <summary>
+        /// 2026-10-01: the merged file's GROUND-SKIRT faces left out before it is stored - the faces the viewer discards at
+        /// load (Map3DView's Prep.GroundSkirt: 552,196 of Customs' menu set, ~6 % of its triangle cap held by faces never
+        /// drawn). The viewer's test on the viewer's inputs: the building's band as the viewer picks it
+        /// (<see cref="SkirtBandLevel"/>), its lowest finite vertex over ALL its vertices, the dequantised positions, and the
+        /// relief as the viewer SEES it - the file's final relief (this runs after ReliefGround) with the top band passed
+        /// through <see cref="DespikeStored"/> on a copy, as Map3DView's DespikeRead does on load (review 2026-10-01: that
+        /// despike has no terrain bits, so it can lower cells ReliefGround protected as terrain). The file keeps the relief
+        /// as built; only the test reads the despiked copy.
+        ///
+        /// The viewer's despike takes its cover from the file it LOADS, which no longer has the skirts. So the copy is
+        /// despiked again over the shortened buildings; when that relief differs from the first, the faces are tested again
+        /// on it from the original indices (one more round, the residual cells logged). The viewer's own test stays as the
+        /// net for what a residual difference leaves, and for any stored mesh written before this.
+        ///
+        /// Only indices are removed, never vertices: the viewer's base height is the lowest of EVERY vertex, so compacting a
+        /// skirt's vertices away would raise it and make the next pass (and the viewer) judge different faces - kept, the
+        /// test is idempotent and a stored set sheds its skirts once. A range keeps its place (First and Count moved, never
+        /// removed, so range numbers and the sidecar's range keys hold); a range or a building that would be emptied keeps
+        /// its first skirt face (an empty range is invalid, an empty building a row of nothing) - the viewer drops that one.
+        /// New arrays replace the old ones rather than being written into them (a stored building's may still be the base
+        /// mesh's), and a throw puts every building's original arrays back, so no building disagrees with its row.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="file">The merged file, its relief final.</param>
+        /// <param name="rows">The sidecar rows, one per building in order.</param>
+        /// <param name="storedKept">How many of the file's first buildings are stored ones (for the log line's split).</param>
+        private static void DropGroundSkirts(Job job, MapMeshFile file, List<MapMeshIndex.Entry> rows, int storedKept)
+        {
+            if (!DropSkirtsAtCapture || file?.Buildings == null || file.Bands == null || file.Bands.Count == 0) return;
+
+            var clock = Stopwatch.StartNew();
+
+            // VertexAt and TryHeightAt read the file's ranges through their back-pointers; the merged list is new
+            file.Bind();
+
+            var count = file.Buildings.Count;
+            var originalIndices = new uint[count][];
+            var originalRanges = new List<MapMeshFile.AtlasRange>[count];
+
+            for (var i = 0; i < count; i++)
+            {
+                originalIndices[i] = file.Buildings[i]?.Indices;
+                originalRanges[i] = file.Buildings[i]?.Ranges;
+            }
+
+            var top = TopBandOf(file);
+            var asBuilt = top?.Heights;
+            var despikeMs = 0d;
+            var rounds = 1;
+            var residual = 0;
+            int[] found = null;
+
+            try
+            {
+                // round 1: the copy despiked over the buildings as merged (the skirts still in the cover)
+                var seen = DespikedCopy(file, top, asBuilt, ref despikeMs);
+                found = SkirtRound(file, originalIndices, originalRanges);
+
+                // the viewer's cover has no skirts: despiked again over the shortened buildings, from the relief as built
+                if (seen != null)
+                {
+                    var again = DespikedCopy(file, top, asBuilt, ref despikeMs);
+                    residual = CellsDiffering(seen, again);
+
+                    if (residual > 0)
+                    {
+                        rounds = 2;
+                        found = SkirtRound(file, originalIndices, originalRanges);
+
+                        var last = DespikedCopy(file, top, asBuilt, ref despikeMs);
+                        residual = CellsDiffering(again, last);
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // nothing half applied: every building back to what the merge gave it, then the step's own note
+                for (var i = 0; i < count; i++)
+                {
+                    if (file.Buildings[i] == null) continue;
+                    file.Buildings[i].Indices = originalIndices[i];
+                    file.Buildings[i].Ranges = originalRanges[i];
+                }
+
+                throw;
+            }
+            finally
+            {
+                // the file keeps the relief as built - the viewer despikes it on load itself
+                if (top != null) top.Heights = asBuilt;
+            }
+
+            for (var bi = 0; bi < count; bi++)
+            {
+                if (found[bi] <= 0) continue;
+
+                if (rows != null && bi < rows.Count && rows[bi] != null) rows[bi].StoredTriangles = file.Buildings[bi].TriangleCount;
+
+                if (bi < storedKept) job.SkirtsDroppedStored += found[bi];
+                else job.SkirtsDroppedNew += found[bi];
+                job.SkirtBuildings++;
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: {N(job.SkirtsDroppedStored + job.SkirtsDroppedNew)} ground-skirt faces dropped before storing " +
+                $"{job.Request.Map} ({N(job.SkirtsDroppedNew)} of this build's buildings, {N(job.SkirtsDroppedStored)} of stored " +
+                $"ones, over {N(job.SkirtBuildings)} building(s)) - near-horizontal faces at a building's foot within " +
+                $"{SkirtToleranceMetres.ToString("0.0", CultureInfo.InvariantCulture)} m of the relief as the viewer despikes it on " +
+                $"load; {N(rounds)} round(s), {N(residual)} cell(s) still differing from the viewer's despike; in " +
+                $"{clock.Elapsed.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture)} ms on the main thread " +
+                $"({despikeMs.ToString("0", CultureInfo.InvariantCulture)} ms of it the despiked copies).");
+        }
+
+        /// <summary>The top band's heights replaced by a copy of <paramref name="asBuilt"/> despiked by
+        /// <see cref="DespikeStored"/> over the file's buildings as they are now - the viewer's load-time relief - and that
+        /// copy returned; null when there is no top band. The caller puts <paramref name="asBuilt"/> back.</summary>
+        /// <param name="file">The merged file.</param>
+        /// <param name="top">Its top band, or null.</param>
+        /// <param name="asBuilt">The top band's heights as built.</param>
+        /// <param name="ms">Accumulates the milliseconds spent.</param>
+        private static ushort[] DespikedCopy(MapMeshFile file, MapMeshFile.ReliefBand top, ushort[] asBuilt, ref double ms)
+        {
+            if (top == null || asBuilt == null) return null;
+
+            var clock = Stopwatch.StartNew();
+            top.Heights = (ushort[])asBuilt.Clone();
+            DespikeStored(file);
+            ms += clock.Elapsed.TotalMilliseconds;
+
+            return top.Heights;
+        }
+
+        /// <summary>Cells whose heights differ between two copies of one band (any length mismatch counts every cell).</summary>
+        /// <param name="a">One copy.</param>
+        /// <param name="b">The other.</param>
+        private static int CellsDiffering(ushort[] a, ushort[] b)
+        {
+            if (a == null || b == null) return a == b ? 0 : Math.Max(a?.Length ?? 0, b?.Length ?? 0);
+            if (a.Length != b.Length) return Math.Max(a.Length, b.Length);
+
+            var n = 0;
+            for (var i = 0; i < a.Length; i++)
+                if (a[i] != b[i])
+                    n++;
+
+            return n;
+        }
+
+        /// <summary>One round of <see cref="DropGroundSkirts"/>: every building's ORIGINAL faces tested against the bands as
+        /// they are now, and its Indices and Ranges set from them (the originals where none drops). The skirt faces each
+        /// building dropped, by building.</summary>
+        /// <param name="file">The merged file, bound.</param>
+        /// <param name="originalIndices">Each building's indices as merged.</param>
+        /// <param name="originalRanges">Each building's ranges as merged.</param>
+        private static int[] SkirtRound(MapMeshFile file, uint[][] originalIndices, List<MapMeshFile.AtlasRange>[] originalRanges)
+        {
+            var found = new int[file.Buildings.Count];
+            var positions = new Vector3[0];
+            var finite = new bool[0];
+            var skirt = new bool[0];
+
+            for (var bi = 0; bi < file.Buildings.Count; bi++)
+            {
+                var building = file.Buildings[bi];
+                if (building == null) continue;
+
+                var indices = originalIndices[bi];
+                var ranges = originalRanges[bi];
+                building.Indices = indices;
+                building.Ranges = ranges;
+
+                if (indices == null || building.VertexCount == 0 || indices.Length < 3) continue;
+
+                var band = file.Band(SkirtBandLevel(file, building.Level));
+                if (band == null) continue;
+
+                var n = building.VertexCount;
+                if (positions.Length < n)
+                {
+                    positions = new Vector3[n];
+                    finite = new bool[n];
+                }
+
+                var minY = float.PositiveInfinity;
+
+                for (var v = 0; v < n; v++)
+                {
+                    var p = building.VertexAt(v);
+                    positions[v] = p;
+                    finite[v] = IsFinite(p.x) && IsFinite(p.y) && IsFinite(p.z);
+                    if (finite[v] && p.y < minY) minY = p.y;
+                }
+
+                var triangles = indices.Length / 3;
+                if (skirt.Length < triangles) skirt = new bool[triangles];
+
+                var dropped = 0;
+
+                for (var t = 0; t < triangles; t++)
+                {
+                    skirt[t] = false;
+
+                    var ia = indices[t * 3];
+                    var ib = indices[t * 3 + 1];
+                    var ic = indices[t * 3 + 2];
+
+                    // what the viewer drops for another reason (an index out of range, a non-finite corner) is left as it is
+                    if (ia >= (uint)n || ib >= (uint)n || ic >= (uint)n) continue;
+                    if (!finite[ia] || !finite[ib] || !finite[ic]) continue;
+
+                    if (!IsGroundSkirt(positions[ia], positions[ib], positions[ic], minY, band)) continue;
+
+                    skirt[t] = true;
+                    dropped++;
+                }
+
+                if (dropped == 0) continue;
+
+                // a range whose every face is a skirt keeps its first: a range is a positive number of triangles
+                if (ranges != null)
+                    foreach (var range in ranges)
+                    {
+                        var first = Math.Min(triangles, Math.Max(0, range.First / 3));
+                        var end = Math.Min(triangles, first + Math.Max(0, range.Count / 3));
+                        var all = end > first;
+
+                        for (var t = first; t < end && all; t++) all = skirt[t];
+
+                        if (!all) continue;
+
+                        skirt[first] = false;
+                        dropped--;
+                    }
+
+                // and so does a building whose every face is one
+                if (dropped >= triangles)
+                {
+                    skirt[0] = false;
+                    dropped--;
+                }
+
+                if (dropped <= 0) continue;
+
+                // the kept triangles in order, and how many were kept before each old triangle (a range's span follows it)
+                var kept = new uint[(triangles - dropped) * 3];
+                var keptBefore = new int[triangles + 1];
+                var w = 0;
+
+                for (var t = 0; t < triangles; t++)
+                {
+                    keptBefore[t] = w / 3;
+                    if (skirt[t]) continue;
+
+                    kept[w++] = indices[t * 3];
+                    kept[w++] = indices[t * 3 + 1];
+                    kept[w++] = indices[t * 3 + 2];
+                }
+
+                keptBefore[triangles] = w / 3;
+
+                List<MapMeshFile.AtlasRange> keptRanges = null;
+                if (ranges != null)
+                {
+                    keptRanges = new List<MapMeshFile.AtlasRange>(ranges.Count);
+
+                    foreach (var range in ranges)
+                    {
+                        var first = Math.Min(triangles, Math.Max(0, range.First / 3));
+                        var end = Math.Min(triangles, first + Math.Max(0, range.Count / 3));
+                        var moved = range;
+                        moved.First = keptBefore[first] * 3;
+                        moved.Count = (keptBefore[end] - keptBefore[first]) * 3;
+                        keptRanges.Add(moved);
+                    }
+                }
+
+                building.Indices = kept;
+                building.Ranges = keptRanges;
+                found[bi] = dropped;
+            }
+
+            return found;
+        }
+
+        /// <summary>The band the viewer files a building's faces under (Map3DView's Prep.BandLevelFor): its own level when
+        /// the file has that band, else the nearest - the FIRST at the least distance, in the file's band order.</summary>
+        /// <param name="file">The file.</param>
+        /// <param name="level">The building's declared level.</param>
+        private static int SkirtBandLevel(MapMeshFile file, int level)
+        {
+            var best = int.MinValue;
+            var distance = int.MaxValue;
+
+            foreach (var band in file.Bands)
+            {
+                if (band == null) continue;
+                if (band.Level == level) return level;
+
+                var gap = Math.Abs(band.Level - level);
+                if (gap >= distance) continue;
+
+                distance = gap;
+                best = band.Level;
+            }
+
+            return best;
+        }
+
+        /// <summary>Map3DView's Prep.GroundSkirt, the same float arithmetic in the same order: near-horizontal, its centroid
+        /// within <see cref="SkirtRiseMetres"/> of the building's lowest vertex and within <see cref="SkirtToleranceMetres"/>
+        /// of the band's relief under it; no relief there keeps the face.</summary>
+        /// <param name="a">A corner, world metres.</param>
+        /// <param name="b">A corner.</param>
+        /// <param name="c">A corner.</param>
+        /// <param name="minY">The building's lowest finite vertex height.</param>
+        /// <param name="band">The building's band.</param>
+        private static bool IsGroundSkirt(Vector3 a, Vector3 b, Vector3 c, float minY, MapMeshFile.ReliefBand band)
+        {
+            if (band == null) return false;
+
+            var n = Vector3.Cross(b - a, c - a);
+            var length = n.magnitude;
+            if (!(length > 1e-6f) || Mathf.Abs(n.y) / length < SkirtNormalY) return false;
+
+            var y = (a.y + b.y + c.y) / 3f;
+            if (!(y <= minY + SkirtRiseMetres)) return false;
+
+            if (!band.TryHeightAt((a.x + b.x + c.x) / 3f, (a.z + b.z + c.z) / 3f, out var ground)) return false;
+
+            return Mathf.Abs(y - ground) <= SkirtToleranceMetres;
         }
 
         /// <summary>The file's top band - the highest level with heights - or null. Pure (no Unity call): the viewer's worker
@@ -16551,8 +16966,18 @@ namespace QuestTree.QuestGraph
         /// <summary>The basis in use. Static readonly so the choice is not a constant the compiler folds.</summary>
         internal static readonly BasisArea BudgetBasis = BasisArea.Surface;
 
-        /// <summary>Triangles per m2 of box SURFACE (was 6.0 of footprint). Rollback: 6.0.</summary>
-        internal const double TrianglesPerSquareMetre = 30.0;   // HQ S3.13: was 20
+        /// <summary>
+        /// Triangles per m2 of box SURFACE (was 6.0 of footprint) - the building density target. 60 since 2026-10-01 (was 30,
+        /// HQ S3.13; 20 before it): at 30 Customs' demand was ~8.1 M and the cap derived from it ~9 M, so the 180 MiB room
+        /// (MapMeshBuilder.ShippedMeshBytes) went unused. The gain is bounded by the SOURCES, not by this number: only a
+        /// building whose source holds more than its target stores more (316 of Customs' 1,685 stored buildings at 30; the
+        /// menu set's sidecar puts their demand at 4.72 M at 30, 5.78 M at 60, 7.53 M with no target at all). A higher target
+        /// also asks less of the decimator, so fewer stop at the error limit or fall back to clustering. NOT in the recipe:
+        /// MapMeshBuilder.MeshRecipe carries the historic 30 as a frozen literal, so no stored mesh is rebuilt from scratch
+        /// for this - a stored building's target now exceeds the one it was tried at, so accumulation re-reads the ones
+        /// short of it (MapMeshBuilder.UpgradeShortfall). Rollback: 30.0 (and 6.0 with the footprint basis).
+        /// </summary>
+        internal const double TrianglesPerSquareMetre = 60.0;
 
         internal const int MinTriangles = 24;
 

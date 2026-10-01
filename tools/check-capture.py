@@ -1089,7 +1089,11 @@ QUALITY_WARN_SIDE = 25.0          # % of the area
 # the under-served rows - stored under this share of min(source, target), target = INDEX_TARGET_PER_M2 x box surface
 # clamped INDEX_TARGET_MIN..INDEX_TARGET_MAX: the SURFACE term of the recipe's AreaBudget at scale 1 (the storey floor
 # and the legacy floor are left out, so it undercounts)
-INDEX_TARGET_PER_M2 = 20.0
+# The meta and the sidecar do not record the density (the sidecar's recipe carries a FROZEN 30, not the live value), so
+# this mirrors MapMeshBuilder's AreaBudget.TrianglesPerSquareMetre by hand - change both together. 60 since 2026-10-01
+# (was 30 in the builder, 20 here, stale). A mesh stored at 30 flags its rows short of the 60 target until accumulation
+# upgrades them.
+INDEX_TARGET_PER_M2 = 60.0
 INDEX_TARGET_MIN = 24
 INDEX_TARGET_MAX = 250_000
 INDEX_UNDER_SERVED_SHARE = 0.5
