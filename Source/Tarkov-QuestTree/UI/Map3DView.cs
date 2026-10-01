@@ -990,6 +990,72 @@ namespace QuestTree.UI
         private const int MaxVerticesPerMesh = 250_000;
 
         /// <summary>
+        /// Spatial chunking, in metres: every building triangle is bucketed by the cell of its CENTROID on a square XZ grid
+        /// of this size from the extent's min corner, on top of the per-tile / roof / side / tint split - so each chunk is
+        /// one (cell, material) and its bounds are a cell plus whatever its triangles overhang. The relief is cut into
+        /// square blocks of about this size instead of full-width row strips. Why: a chunk in file order covers the whole
+        /// map, so Unity's per-DrawMesh frustum culling never culls anything and a 30 m view draws all of Customs. Draw
+        /// calls rise to a few thousand, of which only the cells in view reach the GPU. Rollback: 0 (one cell - the old
+        /// file-order chunks and the full-width relief strips). Static readonly so the branch is not folded away.
+        /// </summary>
+        internal static readonly float SpatialChunkMetres = 128f;
+
+        /// <summary>
+        /// Compact vertices: position UNorm16x4 relative to the chunk's lattice-snapped origin (the origin and the uniform
+        /// scale go through the DrawMesh matrix, <see cref="MeshFrame"/>), normal SNorm8x4, UV UNorm16x2 - 16 bytes a vertex
+        /// against 32 - packed on the worker and uploaded with SetVertexBufferData. A chunk whose UVs do not fit [0, 1]
+        /// after a whole-repeat shift (atlas faces many repeats long) keeps Float32x2 UVs (20 bytes); a flat-colour
+        /// build adds a UNorm8x4 colour. Rollback: false (Vector3/Vector3/Vector2 arrays, identity matrix).
+        /// </summary>
+        internal static readonly bool CompactVertices = true;
+
+        /// <summary>
+        /// Sixteen-bit indices: every chunk is capped at <see cref="SixteenBitVertexLimit"/> vertices and drawn with
+        /// <see cref="IndexFormat.UInt16"/> - half the index memory. The cap is hard: a building group's crease split is made
+        /// before its triangles are cut into chunks (PrepareBuildings), and a chunk over the limit all the same would go up
+        /// UInt32 on its own (MeshData.Pack, MakeFloatMesh), never with a wrapped index. Rollback: false (250,000-vertex
+        /// UInt32 chunks).
+        /// </summary>
+        internal static readonly bool SixteenBitIndices = true;
+
+        /// <summary>The most vertices a UInt16-indexed mesh can address.</summary>
+        private const int SixteenBitVertexLimit = 65_535;
+
+        /// <summary>The vertex count at which a building sink flushes its chunk: the normals (and the crease split) are made
+        /// before the cut, so a chunk never grows after it.</summary>
+        private static int ChunkVertexCap => SixteenBitIndices ? SixteenBitVertexLimit : MaxVerticesPerMesh;
+
+        /// <summary>
+        /// The merge rule for draw calls: a tile's (or a wall tint's) chunks on a floor are kept split by cell only when
+        /// they come to more than this many vertices together; under it they are merged back into one chunk. Hundreds of
+        /// tiles are a few small props each, and a draw call apiece per cell would be thousands of calls culling saves
+        /// nothing on. 0 keeps every split.
+        /// </summary>
+        private const int CellSplitMinVertices = 5000;
+
+        /// <summary>
+        /// A chunk under this many vertices keeps float positions, normals and UVs (MeshData.Pack): Unity batches meshes
+        /// under 300 vertices dynamically, on the CPU, from float data - a compact one would not batch. Its positions are
+        /// still snapped to the <see cref="PositionQuantum"/> lattice, so it meets compact neighbours on the same points.
+        /// </summary>
+        private const int DynamicBatchVertices = 300;
+
+        /// <summary>The relief's vertex cap per chunk: no crease split there, so the full sixteen-bit range.</summary>
+        private static int ReliefVertexCap => SixteenBitIndices ? SixteenBitVertexLimit : MaxVerticesPerMesh;
+
+        /// <summary>
+        /// The ONE step every position is snapped to, in metres, for every chunk of every floor: 1/256 m (under 2 mm of
+        /// error), a power of two so every origin is an exact float multiple of it and every lattice point an exact float
+        /// (to 65 km). One lattice for all, so a vertex two chunks share (a relief block edge, a roof meeting its wall in
+        /// the next cell) is the same lattice point in both - no crack. 65,535 steps span 256 m, more than a 128 m cell
+        /// plus its overhang; a chunk wider than that (a merged small tile, a huge face) keeps float positions snapped to
+        /// the same lattice rather than a coarser step - a coarsest-step-per-floor would be set by the merged tiles that
+        /// span the whole map (3 cm on Customs). The file's own XZ quantum is the extent over 65,535 (1.7 cm on Customs),
+        /// so this adds nothing visible to the data.
+        /// </summary>
+        private const double PositionQuantum = 1d / 256d;
+
+        /// <summary>
         /// How far the mesh file's extent may differ from the picture's before the mesh is refused, in
         /// metres.
         ///
@@ -1185,6 +1251,17 @@ namespace QuestTree.UI
             /// <summary>How many ground-skirt faces were left out as ground, for the log line. See
             /// Prep.GroundSkirt.</summary>
             public long GroundSkirtTriangles;
+
+            /// <summary>Chunks of this entry's ground and buildings before and after the merge rule
+            /// (<see cref="CellSplitMinVertices"/>), for the first-frame line.</summary>
+            public int ChunksSplit;
+
+            /// <summary>The same for the walls, set when they are built (a rebuild of the walls replaces them).</summary>
+            public int WallChunksSplit;
+
+            public int WallChunksMerged;
+
+            public int ChunksMerged;
 
             /// <summary>A wall build for this entry is in flight - a worker, or its meshes being uploaded - by
             /// the view that started it. Abandoned with that view, which puts the entry back to waiting.</summary>
@@ -2463,6 +2540,10 @@ namespace QuestTree.UI
             _buildClock.Reset();
             _buildClock.Start();
 
+            // the chunks line reports this build's uploads: MakeMesh's counters from here on
+            _uploadTicksAtStart = _uploadTicks;
+            _uploadMeshesAtStart = _uploadMeshes;
+
             // From the worker the first time; from the kept result on a rebuild (a side dropped).
             var loaded = _loading != null ? _loading.Result : _loaded;
             _loading = null;
@@ -2691,6 +2772,8 @@ namespace QuestTree.UI
                 into.TintArea = data.TintArea;
                 into.WallsOutside = data.WallsOutside;
                 into.WallsPending = data.WallTriangles > 0;
+                into.ChunksSplit = data.ChunksSplit;
+                into.ChunksMerged = data.ChunksMerged;
             }
 
             // The check that can fail, and the one an empty or garbage file gets caught by: a view with
@@ -2915,6 +2998,66 @@ namespace QuestTree.UI
         /// walls): one frame's worth, so the view stays interactive while it finishes. Still one unit at least.</summary>
         private const long BackgroundBudgetMs = 16;
 
+        /// <summary>MakeMesh's counters when this view's build began; see <see cref="LogChunks"/>.</summary>
+        private long _uploadTicksAtStart;
+
+        private int _uploadMeshesAtStart;
+
+        /// <summary>
+        /// The chunks line, once per build: how the geometry was cut and stored - meshes (relief and buildings), the
+        /// vertex strides they came out at (16 compact, 20 with float UVs, 24 with a colour too, 32 float), how many are
+        /// sixteen-bit indexed, and the main-thread upload time MakeMesh measured over this build (walls that arrive after
+        /// Finish are not in it). The resident estimate is on the build line (<see cref="MeshBytes"/>).
+        /// </summary>
+        private void LogChunks()
+        {
+            var seen = new HashSet<Built>();
+            var ground = 0;
+            var buildings = 0;
+            var sixteen = 0;
+            var vertices = 0L;
+            var strides = new SortedDictionary<int, long>();
+
+            void Count(Mesh mesh, bool isGround)
+            {
+                if (mesh == null) return;
+
+                if (isGround) ground++;
+                else buildings++;
+
+                if (mesh.indexFormat == IndexFormat.UInt16) sixteen++;
+
+                var stride = mesh.vertexBufferCount > 0 ? mesh.GetVertexBufferStride(0) : 0;
+                strides.TryGetValue(stride, out var had);
+                strides[stride] = had + mesh.vertexCount;
+                vertices += mesh.vertexCount;
+            }
+
+            foreach (var floor in _floors)
+            {
+                var built = floor?.Meshes;
+                if (built == null || !seen.Add(built)) continue;
+
+                foreach (var mesh in built.Ground) Count(mesh, true);
+                foreach (var mesh in BuildingMeshesOf(built)) Count(mesh, false);
+            }
+
+            var mix = new List<string>();
+            foreach (var pair in strides)
+                mix.Add(string.Format(CultureInfo.InvariantCulture, "{0} B x {1:#,##0}", pair.Key, pair.Value));
+
+            Plugin.LogSource?.LogInfo(string.Format(
+                CultureInfo.InvariantCulture,
+                "QuestTree: 3D map for {0} - chunks: {1:#,##0} mesh(es) ({2:#,##0} relief, {3:#,##0} building) on a {4} m grid, " +
+                "{5:#,##0} vertices by stride [{6}], {7:#,##0} sixteen-bit indexed; uploaded {8:#,##0} mesh(es) in {9:#,##0} ms " +
+                "main thread (compact {10}, 16-bit {11}).",
+                _mapKey, ground + buildings, ground, buildings, SpatialChunkMetres,
+                vertices, string.Join(", ", mix.ToArray()), sixteen,
+                _uploadMeshes - _uploadMeshesAtStart,
+                (_uploadTicks - _uploadTicksAtStart) * 1000d / Stopwatch.Frequency,
+                CompactVertices && CompactSupported() ? "on" : "off", SixteenBitIndices ? "on" : "off"));
+        }
+
         /// <summary>The first build is done: log what it came to, announce the view, and draw from the next
         /// frame on.</summary>
         private void Finish()
@@ -3059,6 +3202,8 @@ namespace QuestTree.UI
                 // waiting their paced cut are not in it yet; the TileStore logs its own total when it finishes.
                 (DynamicMapsLibrary.ResidentRasterBytes + TileStore.ResidentBytesAll) / (1024d * 1024d),
                 RenderingPathOf(_camera)));
+
+            LogChunks();
 
             // A floor switch whose entries were all cached: nothing was uploaded, and the cut is one matrix.
             if (_reusedFloors)
@@ -3291,8 +3436,8 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// Roughly what a mesh of ours costs in memory, in bytes: position, normal and UV per vertex (and a
-        /// colour under the flat shader), four bytes per index, times the copies held. Every mesh is held ONCE,
+        /// Roughly what a mesh of ours costs in memory, in bytes: its vertex stride per vertex (32 bytes as floats, 16-24
+        /// compact) and two or four bytes per index by its index format, times the copies held. Every mesh is held ONCE,
         /// on the GPU: each is uploaded non-readable and nothing keeps its worker arrays, since the cut is the
         /// camera's near plane and clips nothing on the CPU. An estimate for the log line, not an accounting.
         /// </summary>
@@ -3300,12 +3445,17 @@ namespace QuestTree.UI
         {
             if (mesh == null) return 0L;
 
-            var stride = 12 + 12 + 8 + (mesh.HasVertexAttribute(VertexAttribute.Color) ? 4 : 0);
+            // The mesh's OWN layout and index format (compact vertices are 16-24 bytes, sixteen-bit indices 2), read from
+            // the mesh rather than assumed, so the estimate follows the rollback switches.
+            var stride = mesh.vertexBufferCount > 0 ? mesh.GetVertexBufferStride(0) : 0;
+            for (var stream = 1; stream < mesh.vertexBufferCount; stream++) stride += mesh.GetVertexBufferStride(stream);
+
+            var indexBytes = mesh.indexFormat == IndexFormat.UInt16 ? 2L : 4L;
             var indices = 0L;
 
             for (var sub = 0; sub < mesh.subMeshCount; sub++) indices += (long)mesh.GetIndexCount(sub);
 
-            return ((long)mesh.vertexCount * stride + indices * 4L) * copies;
+            return ((long)mesh.vertexCount * stride + indices * indexBytes) * copies;
         }
 
         /// <summary>What this view's geometry holds resident: every mesh of every entry it draws, GPU only - no
@@ -4874,7 +5024,8 @@ namespace QuestTree.UI
             var width = _rt.width;
             var height = _rt.height;
 
-            var at = _camera.WorldToViewportPoint(mesh.bounds.center);
+            // world bounds: a compact mesh's own are in lattice units, and its centre there is nowhere near the map
+            var at = _camera.WorldToViewportPoint(WorldBoundsOf(mesh).center);
             if (at.z <= 0f || at.x < 0f || at.x > 1f || at.y < 0f || at.y > 1f) return -1;
 
             // the window around the projected centre, clipped to the view
@@ -6308,6 +6459,231 @@ namespace QuestTree.UI
             public int[] Indices;
             public Color32[] Colours;
 
+            /// <summary>Its UVs are in repeats of a tile drawn with wrapMode Repeat (an atlas chunk), so a whole-repeat shift
+            /// of all of them samples the same texels - which is what lets <see cref="Pack"/> bring them into [0, 1].</summary>
+            public bool RepeatUvs;
+
+            // --- the compact form (CompactVertices), made by Pack on the worker; null Packed = the float arrays above
+
+            /// <summary>The interleaved vertex buffer, <see cref="Stride"/> bytes a vertex as 32-bit words.</summary>
+            public uint[] Packed;
+
+            public int VertexCount;
+            public int Stride;
+            public bool UvFloat;
+            public bool HasColour;
+
+            /// <summary>The indices as sixteen-bit, when <see cref="SixteenBitIndices"/> and the chunk has at most
+            /// <see cref="SixteenBitVertexLimit"/> vertices; else null and <see cref="Indices"/> goes up as UInt32.</summary>
+            public ushort[] Indices16;
+
+            /// <summary>The lattice origin and uniform scale (<see cref="MeshFrame"/>), and the bounds in lattice units.</summary>
+            public Vector3 Origin;
+
+            public float Scale;
+            public Bounds LocalBounds;
+
+            /// <summary>One float's bits as a word, without an allocation (BitConverter.GetBytes would make one per UV).</summary>
+            [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+            private struct FloatBits
+            {
+                [System.Runtime.InteropServices.FieldOffset(0)] public float Float;
+                [System.Runtime.InteropServices.FieldOffset(0)] public uint Word;
+            }
+
+            /// <summary>
+            /// WORKER. The compact form of this chunk (<see cref="CompactVertices"/>), and the float arrays dropped:
+            /// <list type="bullet">
+            /// <item>POSITION UNorm16x4: x, y, z as steps of the one lattice step (<see cref="PositionQuantum"/>) from an origin
+            /// snapped to that lattice; w = 65535, i.e. 1.0, because
+            /// Standard's forward pass multiplies the whole float4 by unity_ObjectToWorld and a w of 0 would drop the
+            /// translation. The world position comes back through the DrawMesh matrix (<see cref="MeshFrame"/>).</item>
+            /// <item>NORMAL SNorm8x4: the world normal (the frame's scale is uniform, so the object-space normal IS it).</item>
+            /// <item>COLOR UNorm8x4, flat-colour builds only.</item>
+            /// <item>TEXCOORD0 UNorm16x2 when every UV is in [0, 1] (after a whole-repeat shift for <see cref="RepeatUvs"/>):
+            /// 1/65,535 is a sixteenth of a texel at 4,096 px and a quarter at the 16,384 px ground picture. Float32x2
+            /// otherwise: an atlas face 17.25 repeats long cannot be UNorm16, and at Float16 it would be off by 0.016
+            /// repeats - pixels, not sub-texel.</item>
+            /// </list>
+            /// Attributes in Unity's required order (position, normal, colour, texcoord), each a whole number of words.
+            /// A chunk under <see cref="DynamicBatchVertices"/> vertices, or wider than 65,534 steps, stays float, its positions
+            /// snapped to the same lattice (and its atlas UVs shifted by whole repeats all the same).
+            /// </summary>
+            public void Pack()
+            {
+                var n = Vertices?.Length ?? 0;
+                if (n == 0 || Indices == null || Normals == null || Normals.Length < n) return;
+
+                // --- the frame: the bounds, then the smallest power-of-two quantum the extent fits in
+                var min = Vertices[0];
+                var max = Vertices[0];
+
+                for (var i = 1; i < n; i++)
+                {
+                    min = Vector3.Min(min, Vertices[i]);
+                    max = Vector3.Max(max, Vertices[i]);
+                }
+
+                // ONE step for every chunk, never a coarser one for a wide chunk (see PositionQuantum)
+                const double q = PositionQuantum;
+
+                var ox = Math.Floor(min.x / q) * q;
+                var oy = Math.Floor(min.y / q) * q;
+                var oz = Math.Floor(min.z / q) * q;
+
+                // one step of headroom: the rounding of the largest coordinate must not need code 65536
+                var fits = Math.Max(max.x - ox, Math.Max(max.y - oy, max.z - oz)) / q <= 65534d;
+
+                // --- the UVs: a whole-repeat shift for a Repeat tile, in place - for the float form too, where a smaller
+                // magnitude is more float precision
+                var shiftU = 0f;
+                var shiftV = 0f;
+
+                if (RepeatUvs && Uvs != null && Uvs.Length >= n)
+                {
+                    var minU = float.PositiveInfinity;
+                    var minV = float.PositiveInfinity;
+
+                    for (var i = 0; i < n; i++)
+                    {
+                        minU = Mathf.Min(minU, Uvs[i].x);
+                        minV = Mathf.Min(minV, Uvs[i].y);
+                    }
+
+                    if (!float.IsInfinity(minU) && !float.IsNaN(minU)) shiftU = Mathf.Floor(minU);
+                    if (!float.IsInfinity(minV) && !float.IsNaN(minV)) shiftV = Mathf.Floor(minV);
+
+                    if (shiftU != 0f || shiftV != 0f)
+                    {
+                        var shift = new Vector2(shiftU, shiftV);
+                        for (var i = 0; i < n; i++) Uvs[i] -= shift;
+                    }
+
+                    shiftU = shiftV = 0f;
+                }
+
+                // --- too small to leave dynamic batching, or too wide for one lattice frame: float, on the lattice
+                if (n < DynamicBatchVertices || !fits)
+                {
+                    for (var i = 0; i < n; i++)
+                    {
+                        var v = Vertices[i];
+                        Vertices[i] = new Vector3(Snap(v.x, q), Snap(v.y, q), Snap(v.z, q));
+                    }
+
+                    return;
+                }
+
+                var uvFloat = false;
+
+                if (Uvs != null && Uvs.Length >= n)
+                {
+                    for (var i = 0; i < n && !uvFloat; i++)
+                    {
+                        var u = Uvs[i].x - shiftU;
+                        var v = Uvs[i].y - shiftV;
+
+                        // !(in range) rather than (out of range), so a NaN goes to the float form too
+                        if (!(u >= 0f && u <= 1f && v >= 0f && v <= 1f)) uvFloat = true;
+                    }
+                }
+
+                var hasColour = Colours != null && Colours.Length >= n;
+                var words = 2 + 1 + (hasColour ? 1 : 0) + (uvFloat ? 2 : 1);
+                var packed = new uint[n * words];
+
+                var localMin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                var localMax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+                var bits = new FloatBits();
+
+                for (var i = 0; i < n; i++)
+                {
+                    var at = i * words;
+                    var p = Vertices[i];
+
+                    var cx = Code(p.x, ox, q);
+                    var cy = Code(p.y, oy, q);
+                    var cz = Code(p.z, oz, q);
+
+                    packed[at] = cx | (cy << 16);
+                    packed[at + 1] = cz | (65535u << 16);
+
+                    var local = new Vector3(cx / 65535f, cy / 65535f, cz / 65535f);
+                    localMin = Vector3.Min(localMin, local);
+                    localMax = Vector3.Max(localMax, local);
+
+                    var normal = Normals[i];
+                    packed[at + 2] = Snorm8(normal.x) | (Snorm8(normal.y) << 8) | (Snorm8(normal.z) << 16);
+
+                    var next = at + 3;
+
+                    if (hasColour)
+                    {
+                        var c = Colours[i];
+                        packed[next++] = (uint)c.r | ((uint)c.g << 8) | ((uint)c.b << 16) | ((uint)c.a << 24);
+                    }
+
+                    var uv = Uvs != null && i < Uvs.Length ? Uvs[i] : Vector2.zero;
+
+                    if (uvFloat)
+                    {
+                        bits.Float = uv.x;
+                        packed[next] = bits.Word;
+                        bits.Float = uv.y;
+                        packed[next + 1] = bits.Word;
+                    }
+                    else
+                    {
+                        packed[next] = Unorm16(uv.x - shiftU) | (Unorm16(uv.y - shiftV) << 16);
+                    }
+                }
+
+                Packed = packed;
+                VertexCount = n;
+                Stride = words * 4;
+                UvFloat = uvFloat;
+                HasColour = hasColour;
+                Origin = new Vector3((float)ox, (float)oy, (float)oz);
+                Scale = (float)(65535d * q);
+                LocalBounds = new Bounds((localMin + localMax) * 0.5f, localMax - localMin);
+
+                if (SixteenBitIndices && n <= SixteenBitVertexLimit)
+                {
+                    var small = new ushort[Indices.Length];
+                    for (var i = 0; i < small.Length; i++) small[i] = (ushort)Indices[i];
+
+                    Indices16 = small;
+                    Indices = null;
+                }
+
+                // the float arrays are garbage now: MakeMesh uploads the packed form only
+                Vertices = null;
+                Normals = null;
+                Uvs = null;
+                Colours = null;
+            }
+
+            /// <summary>A coordinate on the lattice, as a float: floor(t + 0.5) like <see cref="Code"/>, so a float chunk's vertex
+            /// is the point a compact neighbour's code decodes to. Exact in float: a whole number of power-of-two steps.</summary>
+            private static float Snap(float value, double quantum) => (float)(Math.Floor(value / quantum + 0.5d) * quantum);
+
+            /// <summary>A coordinate as lattice steps from the origin, clamped to the code range.</summary>
+            private static uint Code(float value, double origin, double quantum)
+            {
+                // floor(t + 0.5), not Math.Round: the banker's rounding is not shift-invariant, and a vertex two chunks share
+                // must get codes exactly an integer apart (origins are whole quanta apart) - the same lattice point in both
+                var steps = Math.Floor((value - origin) / quantum + 0.5d);
+                if (!(steps > 0d)) return 0u;
+                return steps >= 65535d ? 65535u : (uint)steps;
+            }
+
+            /// <summary>A unit-range value as a UNorm16 code.</summary>
+            private static uint Unorm16(float value) => (uint)Mathf.Clamp(Mathf.RoundToInt(value * 65535f), 0, 65535);
+
+            /// <summary>A [-1, 1] value as an SNorm8 byte (two's complement, low byte).</summary>
+            private static uint Snorm8(float value) =>
+                (uint)(byte)(sbyte)Mathf.Clamp(Mathf.RoundToInt(value * 127f), -127, 127);
+
             /// <summary>WORKER. The arrays, copied, with their normals. <paramref name="creases"/> (WP8 D5, building
             /// geometry): corners whose faces meet at a crease sharper than <see cref="CreaseCosine"/> get vertices of
             /// their own (<see cref="SplitCreases"/>); the relief passes false and keeps the smooth average.</summary>
@@ -6567,6 +6943,11 @@ namespace QuestTree.UI
             public int BuildingCount;
             public int Dropped;
 
+            /// <summary>Chunks before and after the merge rule (<see cref="CellSplitMinVertices"/>), for the first-frame line.</summary>
+            public int ChunksSplit;
+
+            public int ChunksMerged;
+
             public readonly List<MeshData> Ground = new List<MeshData>();
             public readonly List<MeshData> Roofs = new List<MeshData>();
             public readonly List<(int Level, MeshData Data)> RoofsElsewhere = new List<(int Level, MeshData Data)>();
@@ -6603,6 +6984,11 @@ namespace QuestTree.UI
             public bool HasAverage;
             public int TintCount;
             public long Triangles;
+
+            /// <summary>Chunks before and after the merge rule, for the first-frame line.</summary>
+            public int ChunksSplit;
+
+            public int ChunksMerged;
         }
 
         /// <summary>
@@ -6629,6 +7015,33 @@ namespace QuestTree.UI
             public (int Level, float Low, float High)[] FloorRanges = new (int, float, float)[0];
             public float SpanX;
             public float SpanZ;
+
+            /// <summary><see cref="CompactVertices"/> as this snapshot decided it - false too on a GPU without the formats
+            /// (<see cref="CompactSupported"/>, asked on the main thread).</summary>
+            public bool Compact;
+
+            /// <summary>The spatial grid's columns and rows (<see cref="SpatialChunkMetres"/>); 1 x 1 under the rollback.</summary>
+            public int CellsX = 1;
+
+            public int CellsZ = 1;
+
+            /// <summary>
+            /// The spatial cell of a triangle: the one its CENTROID is in, so a triangle is in exactly one chunk and a
+            /// building across a cell line is split along its triangles, never duplicated. Clamped to the grid - a building
+            /// is kept up to a metre outside the extent. 0 under the rollback (one cell).
+            /// </summary>
+            public int CellOf(Vector3 a, Vector3 b, Vector3 c)
+            {
+                if (CellsX <= 1 && CellsZ <= 1) return 0;
+
+                var x = (a.x + b.x + c.x) / 3f - (float)File.MinX;
+                var z = (a.z + b.z + c.z) / 3f - (float)File.MinZ;
+
+                var cx = Mathf.Clamp(Mathf.FloorToInt(x / SpatialChunkMetres), 0, CellsX - 1);
+                var cz = Mathf.Clamp(Mathf.FloorToInt(z / SpatialChunkMetres), 0, CellsZ - 1);
+
+                return cz * CellsX + cx;
+            }
 
             /// <summary>Which atlas pages this view can draw (usable, textured shader). A face on a page that is
             /// not here keeps the stage U/V rule, so a page lost in transport costs its faces' texture, never
@@ -6713,7 +7126,6 @@ namespace QuestTree.UI
             // Scratch, per worker. Grown, never shrunk.
             private bool[] _finite = new bool[0];
             private Vector3[] _positions = new Vector3[0];
-            private int[] _remap = new int[0];
             private int _count;
 
             public bool Finite(int i) => _finite[i];
@@ -6758,7 +7170,6 @@ namespace QuestTree.UI
 
                 if (_finite.Length < n) _finite = new bool[n];
                 if (_positions.Length < n) _positions = new Vector3[n];
-                if (_remap.Length < n) _remap = new int[n];
 
                 _count = n;
                 _building = building;
@@ -6828,28 +7239,6 @@ namespace QuestTree.UI
                 if (!_skirtBand.TryHeightAt((a.x + b.x + c.x) / 3f, (a.z + b.z + c.z) / 3f, out var ground)) return false;
 
                 return Mathf.Abs(y - ground) <= GroundSkirtTolerance;
-            }
-
-            /// <summary>Forgets every roof vertex placed from the building last loaded - at the start of each
-            /// building, and after a chunk is flushed mid-building (its indices restart at zero).</summary>
-            public void ResetRemap()
-            {
-                for (var i = 0; i < _count; i++) _remap[i] = -1;
-            }
-
-            /// <summary>The roof chunk's vertex for building vertex <paramref name="i"/>, added on first use.</summary>
-            public int RoofVertex(int i, List<Vector3> vertices, List<Vector2> uvs, List<Color32> colours)
-            {
-                if (_remap[i] >= 0) return _remap[i];
-
-                var p = _positions[i];
-
-                _remap[i] = vertices.Count;
-                vertices.Add(p);
-                uvs.Add(PlanarUv(p.x, p.z));
-                colours?.Add(FlatBuildingColour);
-
-                return _remap[i];
             }
 
             /// <summary>
@@ -7099,6 +7488,15 @@ namespace QuestTree.UI
 
             for (var slot = 0; slot < _sides.Length; slot++) prep.Sides[slot] = _sides[slot];
 
+            // compact vertices only where the GPU takes the formats (asked here, on the main thread)
+            prep.Compact = CompactVertices && CompactSupported();
+
+            if (SpatialChunkMetres > 0f)
+            {
+                prep.CellsX = Mathf.Max(1, Mathf.CeilToInt(prep.SpanX / SpatialChunkMetres));
+                prep.CellsZ = Mathf.Max(1, Mathf.CeilToInt(prep.SpanZ / SpatialChunkMetres));
+            }
+
             if (AtlasActive && _heldTiles != null)
             {
                 prep.Tiles = _heldTiles;
@@ -7128,22 +7526,127 @@ namespace QuestTree.UI
                 PrepareBuildings(p, level, data, cancel);
             }
 
+            // the merge rule: a tile with little on this floor is one chunk, not one per cell
+            var total = data.Ground.Count + data.Roofs.Count + data.RoofsElsewhere.Count;
+            foreach (var side in data.Sides) total += side?.Count ?? 0;
+
+            data.ChunksSplit = total;
+            data.ChunksMerged = total;
+
+            foreach (var pair in data.Atlas)
+            {
+                data.ChunksSplit += pair.Value.Count;
+                MergeSmall(pair.Value);
+                data.ChunksMerged += pair.Value.Count;
+            }
+
+            if (p.Compact) PackAll(data, cancel);
+
             return data;
+        }
+
+        /// <summary>
+        /// WORKER. The merge rule (<see cref="CellSplitMinVertices"/>): one tile's (or one wall tint's) chunks on a floor,
+        /// put back into ONE chunk when they come to no more than that many vertices together - a draw call per cell is
+        /// not worth it for a few small props. Concatenated as they are (normals made, UVs unshifted, before Pack), so
+        /// nothing about a face changes; only its draw call does. Under the rollback, or with one chunk, nothing to do.
+        /// </summary>
+        private static void MergeSmall(List<MeshData> chunks)
+        {
+            if (SpatialChunkMetres <= 0f || CellSplitMinVertices <= 0 || chunks == null || chunks.Count <= 1) return;
+
+            var vertices = 0;
+            var indices = 0;
+            var colours = true;
+
+            foreach (var chunk in chunks)
+            {
+                if (chunk?.Vertices == null || chunk.Normals == null || chunk.Uvs == null || chunk.Indices == null) return;
+
+                vertices += chunk.Vertices.Length;
+                indices += chunk.Indices.Length;
+                colours &= chunk.Colours != null;
+            }
+
+            if (vertices > CellSplitMinVertices) return;
+
+            var merged = new MeshData
+            {
+                Name = chunks[0].Name + "-merged",
+                Vertices = new Vector3[vertices],
+                Normals = new Vector3[vertices],
+                Uvs = new Vector2[vertices],
+                Indices = new int[indices],
+                Colours = colours ? new Color32[vertices] : null,
+                RepeatUvs = chunks[0].RepeatUvs
+            };
+
+            var v = 0;
+            var k = 0;
+
+            foreach (var chunk in chunks)
+            {
+                var n = chunk.Vertices.Length;
+
+                Array.Copy(chunk.Vertices, 0, merged.Vertices, v, n);
+                Array.Copy(chunk.Normals, 0, merged.Normals, v, n);
+                Array.Copy(chunk.Uvs, 0, merged.Uvs, v, Math.Min(n, chunk.Uvs.Length));
+                if (colours) Array.Copy(chunk.Colours, 0, merged.Colours, v, Math.Min(n, chunk.Colours.Length));
+
+                for (var i = 0; i < chunk.Indices.Length; i++) merged.Indices[k++] = chunk.Indices[i] + v;
+
+                v += n;
+            }
+
+            chunks.Clear();
+            chunks.Add(merged);
+        }
+
+        /// <summary>WORKER. Every chunk of a floor in its compact form (<see cref="MeshData.Pack"/>): here, off the main
+        /// thread, so an upload is a buffer copy.</summary>
+        private static void PackAll(FloorData data, CancellationToken cancel)
+        {
+            foreach (var mesh in data.Ground) PackOne(mesh, cancel);
+            foreach (var mesh in data.Roofs) PackOne(mesh, cancel);
+            foreach (var roof in data.RoofsElsewhere) PackOne(roof.Data, cancel);
+
+            foreach (var side in data.Sides)
+            {
+                if (side == null) continue;
+                foreach (var mesh in side) PackOne(mesh, cancel);
+            }
+
+            foreach (var pair in data.Atlas)
+                foreach (var mesh in pair.Value)
+                    PackOne(mesh, cancel);
+        }
+
+        /// <summary>WORKER. One chunk packed, cancellable between chunks.</summary>
+        private static void PackOne(MeshData mesh, CancellationToken cancel)
+        {
+            cancel.ThrowIfCancellationRequested();
+            mesh?.Pack();
         }
 
         /// <summary>
         /// WORKER. One band's ground: a quad per cell whose four CORNERS - the four neighbouring cell centres -
         /// were all measured; a cell with no hit is a hole and stays one. Vertices are the cell centres in world
         /// metres, row 0 at MinZ (world order, not the picture's), so the planar UV lands the picture the right
-        /// way up. Chunked in rows sharing one row with the next chunk, each chunk under
-        /// <see cref="MaxVerticesPerMesh"/> vertices. Wound (a, c, b) / (b, c, d) so faces point up - the phase
-        /// 3-0 winding that rendered lit.
+        /// way up. Chunked in square blocks (<see cref="PrepareGroundBlocks"/>) under <see cref="SpatialChunkMetres"/>, else
+        /// in rows sharing one row with the next chunk, each chunk under <see cref="ReliefVertexCap"/> vertices. Wound
+        /// (a, c, b) / (b, c, d) so faces point up - the phase 3-0 winding that rendered lit.
         /// </summary>
         private static void PrepareGround(Prep p, MapMeshFile.ReliefBand band, FloorData data, CancellationToken cancel)
         {
             if (band.Width < 2 || band.Height < 2) return;
 
-            var rowsPerChunk = Mathf.Clamp(MaxVerticesPerMesh / Mathf.Max(1, band.Width), 2, band.Height);
+            if (SpatialChunkMetres > 0f)
+            {
+                PrepareGroundBlocks(p, band, data, cancel);
+                return;
+            }
+
+            var rowsPerChunk = Mathf.Clamp(ReliefVertexCap / Mathf.Max(1, band.Width), 2, band.Height);
 
             var map = new int[band.Width * rowsPerChunk];
 
@@ -7175,10 +7678,10 @@ namespace QuestTree.UI
                         if (band.CodeAt(col, row + 1) == MapMeshFile.NoHit) continue;
                         if (band.CodeAt(col + 1, row + 1) == MapMeshFile.NoHit) continue;
 
-                        var a = Corner(p, band, col, row, first, map, vertices, uvs, colours);
-                        var b = Corner(p, band, col + 1, row, first, map, vertices, uvs, colours);
-                        var c = Corner(p, band, col, row + 1, first, map, vertices, uvs, colours);
-                        var d = Corner(p, band, col + 1, row + 1, first, map, vertices, uvs, colours);
+                        var a = Corner(p, band, col, row, 0, first, band.Width, map, vertices, uvs, colours);
+                        var b = Corner(p, band, col + 1, row, 0, first, band.Width, map, vertices, uvs, colours);
+                        var c = Corner(p, band, col, row + 1, 0, first, band.Width, map, vertices, uvs, colours);
+                        var d = Corner(p, band, col + 1, row + 1, 0, first, band.Width, map, vertices, uvs, colours);
 
                         indices.Add(a);
                         indices.Add(c);
@@ -7201,12 +7704,145 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>One cell centre as a vertex, added on first use; the map is per CHUNK.</summary>
+        /// <summary>
+        /// WORKER. <see cref="PrepareGround"/> in square blocks of about <see cref="SpatialChunkMetres"/> a side (256 cells at
+        /// 0.5 m, held to (side + 2)^2 &lt;= <see cref="ReliefVertexCap"/>: 253 quads under sixteen-bit indices), so each
+        /// block's bounds are a block and the frustum culls the ground the view does not show. Blocks step by
+        /// <c>side</c> but each also draws ONE more quad row and column, overlapping the next block: the shared cell
+        /// centres have the same height code and land on the same lattice point (<see cref="PositionQuantum"/>), and the
+        /// overlap covers whatever sub-ulp gap two different matrices' rounding could still leave. The overlap draws the
+        /// same picture at the same depth, so it cannot show; it is not counted in the triangle total.
+        /// </summary>
+        private static void PrepareGroundBlocks(Prep p, MapMeshFile.ReliefBand band, FloorData data, CancellationToken cancel)
+        {
+            var cell = band.CellMetres > 1e-4f ? band.CellMetres : 1f;
+            var side = Mathf.Max(1, Mathf.RoundToInt(SpatialChunkMetres / cell));
+            side = Mathf.Clamp(side, 1, (int)Math.Sqrt(ReliefVertexCap) - 2);
+
+            // one quad of overlap each way: side + 1 quads, side + 2 vertices a row
+            var stride = side + 2;
+            var map = new int[stride * stride];
+
+            var vertices = new List<Vector3>();
+            var uvs = new List<Vector2>();
+            var indices = new List<int>();
+            var colours = p.Flat ? new List<Color32>() : null;
+
+            for (var firstRow = 0; firstRow < band.Height - 1; firstRow += side)
+            {
+                var lastRow = Mathf.Min(band.Height - 1, firstRow + side + 1);
+                var ownRows = firstRow + side;
+
+                for (var firstCol = 0; firstCol < band.Width - 1; firstCol += side)
+                {
+                    var lastCol = Mathf.Min(band.Width - 1, firstCol + side + 1);
+                    var ownCols = firstCol + side;
+                    var owned = 0;
+
+                    cancel.ThrowIfCancellationRequested();
+
+                    for (var i = 0; i < map.Length; i++) map[i] = -1;
+
+                    vertices.Clear();
+                    uvs.Clear();
+                    indices.Clear();
+                    colours?.Clear();
+
+                    for (var row = firstRow; row < lastRow; row++)
+                    {
+                        for (var col = firstCol; col < lastCol; col++)
+                        {
+                            // All four or none, as in the strips.
+                            if (band.CodeAt(col, row) == MapMeshFile.NoHit) continue;
+                            if (band.CodeAt(col + 1, row) == MapMeshFile.NoHit) continue;
+                            if (band.CodeAt(col, row + 1) == MapMeshFile.NoHit) continue;
+                            if (band.CodeAt(col + 1, row + 1) == MapMeshFile.NoHit) continue;
+
+                            // the overlap quad belongs to the next block: drawn here, counted there
+                            if (row < ownRows && col < ownCols) owned++;
+
+                            var a = Corner(p, band, col, row, firstCol, firstRow, stride, map, vertices, uvs, colours);
+                            var b = Corner(p, band, col + 1, row, firstCol, firstRow, stride, map, vertices, uvs, colours);
+                            var c = Corner(p, band, col, row + 1, firstCol, firstRow, stride, map, vertices, uvs, colours);
+                            var d = Corner(p, band, col + 1, row + 1, firstCol, firstRow, stride, map, vertices, uvs, colours);
+
+                            indices.Add(a);
+                            indices.Add(c);
+                            indices.Add(b);
+
+                            indices.Add(b);
+                            indices.Add(c);
+                            indices.Add(d);
+                        }
+                    }
+
+                    if (indices.Count == 0) continue;
+
+                    var block = MeshData.From(
+                        string.Format(CultureInfo.InvariantCulture, "{0}-relief-{1}-r{2}c{3}", p.MapKey, band.Level, firstRow, firstCol),
+                        vertices, uvs, indices, colours, creases: false);
+
+                    // The normals from the WHOLE band, not the block: a block's own sum stops at its edge, so the two copies
+                    // of an edge vertex would light differently and every block line would show under the lit fallback.
+                    for (var slot = 0; slot < map.Length; slot++)
+                    {
+                        var vertex = map[slot];
+                        if (vertex < 0) continue;
+
+                        block.Normals[vertex] = ReliefNormal(p, band, firstCol + slot % stride, firstRow + slot / stride);
+                    }
+
+                    data.Ground.Add(block);
+                    data.GroundTriangles += owned * 2;
+                }
+            }
+        }
+
+        /// <summary>
+        /// WORKER. A relief vertex's normal from the band itself: the area-weighted sum of both triangles of each of the (up
+        /// to four) whole quads around cell centre (<paramref name="col"/>, <paramref name="row"/>), wound as the relief is -
+        /// so it is the same number in every block that holds a copy of the vertex. Straight up when no quad is whole.
+        /// </summary>
+        private static Vector3 ReliefNormal(Prep p, MapMeshFile.ReliefBand band, int col, int row)
+        {
+            var sum = Vector3.zero;
+
+            for (var qr = row - 1; qr <= row; qr++)
+            {
+                for (var qc = col - 1; qc <= col; qc++)
+                {
+                    if (qc < 0 || qr < 0 || qc >= band.Width - 1 || qr >= band.Height - 1) continue;
+
+                    var ca = band.CodeAt(qc, qr);
+                    var cb = band.CodeAt(qc + 1, qr);
+                    var cc = band.CodeAt(qc, qr + 1);
+                    var cd = band.CodeAt(qc + 1, qr + 1);
+
+                    if (ca == MapMeshFile.NoHit || cb == MapMeshFile.NoHit || cc == MapMeshFile.NoHit || cd == MapMeshFile.NoHit)
+                        continue;
+
+                    var a = new Vector3(band.CellCentreX(qc), p.File.HeightOf(ca), band.CellCentreZ(qr));
+                    var b = new Vector3(band.CellCentreX(qc + 1), p.File.HeightOf(cb), band.CellCentreZ(qr));
+                    var c = new Vector3(band.CellCentreX(qc), p.File.HeightOf(cc), band.CellCentreZ(qr + 1));
+                    var d = new Vector3(band.CellCentreX(qc + 1), p.File.HeightOf(cd), band.CellCentreZ(qr + 1));
+
+                    // triangles (a, c, b) and (b, c, d), as MeshData.NormalsOf sums them: cross(v1 - v0, v2 - v0)
+                    sum += Vector3.Cross(c - a, b - a);
+                    sum += Vector3.Cross(c - b, d - b);
+                }
+            }
+
+            var length = sum.magnitude;
+            return length > 1e-12f ? sum / length : Vector3.up;
+        }
+
+        /// <summary>One cell centre as a vertex, added on first use; the map is per CHUNK, <paramref name="stride"/>
+        /// columns a row from (<paramref name="firstCol"/>, <paramref name="firstRow"/>).</summary>
         private static int Corner(
-            Prep p, MapMeshFile.ReliefBand band, int col, int row, int firstRow, int[] map,
+            Prep p, MapMeshFile.ReliefBand band, int col, int row, int firstCol, int firstRow, int stride, int[] map,
             List<Vector3> vertices, List<Vector2> uvs, List<Color32> colours)
         {
-            var slot = (row - firstRow) * band.Width + col;
+            var slot = (row - firstRow) * stride + (col - firstCol);
             var known = map[slot];
             if (known >= 0) return known;
 
@@ -7228,37 +7864,34 @@ namespace QuestTree.UI
         /// side picture, or a tint (only COUNTED here; the walls are built by <see cref="PrepareWalls"/>). Roof
         /// faces on another floor's height go to that floor's picture (<see cref="Prep.FloorForFace"/>).
         ///
-        /// Roof vertices are placed LAZILY through a per-building remap, and the chunk is flushed whenever the
-        /// next triangle would take it past <see cref="MaxVerticesPerMesh"/> - so a single building of two
-        /// million vertices still lands in meshes under the cap, where appending a whole building at once
-        /// could not. Side faces use unshared vertices (per-face light), like the tints.
+        /// Two steps per building. First every triangle is classified and the SHARED-vertex ones are gathered per
+        /// destination - one group per atlas tile, one per floor its roofs stand on (<see cref="BuildingGroups"/>) -
+        /// with its spatial cell (<see cref="Prep.CellOf"/>). Then each group's normals are made ONCE, over the whole group
+        /// with the crease rule (MeshData.From), and only then are its triangles dealt into the per-(group, cell) sinks
+        /// with those normals. Made per chunk instead, the two copies of a vertex on a cell line would sum different faces
+        /// and light differently - a seam along the grid on every smooth roof. The group is exactly what the file-order
+        /// chunk used to see, so the normals are the ones before spatial chunking. Side faces use unshared vertices
+        /// (per-face light), like the tints. Every chunk holds at most <see cref="ChunkVertexCap"/> vertices - a hard
+        /// bound now, the crease split having happened before the cut.
         /// </summary>
         private static void PrepareBuildings(Prep p, int level, FloorData data, CancellationToken cancel)
         {
             if (p.File.Buildings == null || p.File.Buildings.Count == 0) return;
 
-            var vertices = new List<Vector3>();
-            var uvs = new List<Vector2>();
-            var indices = new List<int>();
-            var colours = p.Flat ? new List<Color32>() : null;
+            var cap = ChunkVertexCap;
+            var remap = new ChunkRemap();
+            var groups = new BuildingGroups();
 
-            // Top faces standing on ANOTHER floor, by that floor's level: indices into the same chunk.
-            var elsewhere = new Dictionary<int, List<int>>();
+            // One per (tile, cell) and per (floor the roof stands on, cell), made on first use.
+            var tileSinks = new Dictionary<(int Tile, int Cell), GroupSink>();
+            var roofSinks = new Dictionary<(int Floor, int Cell), GroupSink>();
 
-            // One per side slot, made on the first face that side takes.
-            var sideSinks = new MeshSink[SideOrder.Length];
-
-            // One per TILE (game material), made on the first face that uses it. Shared vertices per building, as
-            // the file indexes them: the game mesh's own topology, so its hard edges (split vertices) stay hard.
-            var tileSinks = new Dictionary<int, PageSink>();
-            var serial = 0;
-
-            var part = 0;
+            // One per (side slot, cell), made on the first face that side takes there.
+            var sideSinks = new Dictionary<(int Slot, int Cell), MeshSink>();
 
             foreach (var building in p.File.Buildings)
             {
                 cancel.ThrowIfCancellationRequested();
-                serial++;
 
                 if (building == null || building.VertexCount == 0 || building.Indices == null) continue;
                 if (p.BandLevelFor(building.Level) != level) continue;
@@ -7266,7 +7899,7 @@ namespace QuestTree.UI
                 data.BuildingCount++;
 
                 p.LoadBuilding(building);
-                p.ResetRemap();
+                groups.Begin(building.VertexCount);
 
                 // Three at a time; a triangle with an index past the building's own vertices is dropped - a
                 // caller that trusts a file it did not write is a caller that throws inside a mesh build.
@@ -7300,6 +7933,8 @@ namespace QuestTree.UI
                         continue;
                     }
 
+                    var cell = p.CellOf(p.Position(a), p.Position(b), p.Position(c));
+
                     // An atlas face first: the game's own material, the file's own raw UVs - unless it is a roof and this
                     // build takes the roofs from the top picture (stage C): then it falls through to ViewFor, which sends
                     // it to the top picture like any roof without a tile. WallTriangle asks the same two questions.
@@ -7320,20 +7955,7 @@ namespace QuestTree.UI
 
                     if (range >= 0)
                     {
-                        var tile = p.TileOfRange(range);
-
-                        if (!tileSinks.TryGetValue(tile, out var sink))
-                        {
-                            sink = new PageSink();
-                            tileSinks[tile] = sink;
-                        }
-
-                        // +6, not +3 (WP8 D5): MeshData.From may split a crease corner into a vertex of its own -
-                        // a SOFT chunk size, not a bound (PART-04 review): the split can add a vertex per crease
-                        // corner, so a chunk can pass MaxVerticesPerMesh, and every mesh is UInt32-indexed.
-                        if (sink.Count + 6 > MaxVerticesPerMesh) sink.Flush($"{p.MapKey}-tile{tile}-{level}", AtlasList(data, tile));
-
-                        sink.Triangle(p, serial, building.VertexCount, range, a, b, c);
+                        groups.Add(p, false, p.TileOfRange(range), range, a, b, c, cell);
                         data.AtlasTriangles++;
                         data.AtlasArea += TriangleArea(p.Position(a), p.Position(b), p.Position(c));
                         continue;
@@ -7364,11 +7986,21 @@ namespace QuestTree.UI
                     if (view != TopView)
                     {
                         var slot = view - 1;
-                        var sink = sideSinks[slot] ??= new MeshSink { Flat = false };
+
+                        if (!sideSinks.TryGetValue((slot, cell), out var sink))
+                        {
+                            sink = new MeshSink
+                            {
+                                Flat = false,
+                                Name = CellName(p, "side" + SideOrder[slot], level, cell),
+                                Target = data.Sides[slot] ??= new List<MeshData>()
+                            };
+                            sideSinks[(slot, cell)] = sink;
+                        }
+
                         var side = p.Sides[slot];
 
-                        if (sink.Count + 3 > MaxVerticesPerMesh)
-                            sink.Flush($"{p.MapKey}-side{SideOrder[slot]}-{level}", data.Sides[slot] ??= new List<MeshData>());
+                        if (sink.Count + 3 > cap) sink.Flush();
 
                         sink.Add(pa, SideUv(side, pa));
                         sink.Add(pb, SideUv(side, pb));
@@ -7382,52 +8014,259 @@ namespace QuestTree.UI
                     data.TopTriangles++;
                     data.TopArea += area;
 
-                    // Room for up to three new vertices (six: MeshData may split a crease corner, WP8 D5), or the chunk
-                    // goes now and this building's vertices are placed afresh in the next one.
-                    if (vertices.Count + 6 > MaxVerticesPerMesh)
-                    {
-                        FlushRoofs(p, data, level, part++, vertices, uvs, indices, colours, elsewhere);
-
-                        vertices.Clear();
-                        uvs.Clear();
-                        indices.Clear();
-                        colours?.Clear();
-                        p.ResetRemap();
-                    }
-
                     var floorLevel = p.FloorForFace((pa.y + pb.y + pc.y) / 3f, level);
-                    var roofIndices = indices;
+                    if (floorLevel != level) data.MovedRoofTriangles++;
 
-                    if (floorLevel != level)
+                    groups.Add(p, true, floorLevel, -1, a, b, c, cell);
+                }
+
+                // --- the shared-vertex groups: normals over the whole group, then dealt into their cells
+                for (var g = 0; g < groups.Count; g++)
+                {
+                    cancel.ThrowIfCancellationRequested();
+
+                    var group = groups[g];
+                    var shaded = group.Shade();
+                    var triangles = group.Cells.Count;
+
+                    // a new vertex numbering (the group's, after the crease split): every chunk places it afresh
+                    remap.Begin(shaded.Vertices.Length);
+
+                    for (var t = 0; t < triangles; t++)
                     {
-                        if (!elsewhere.TryGetValue(floorLevel, out roofIndices))
+                        var cell = group.Cells[t];
+                        GroupSink sink;
+
+                        if (group.Roof)
                         {
-                            roofIndices = new List<int>();
-                            elsewhere[floorLevel] = roofIndices;
+                            if (!roofSinks.TryGetValue((group.Key, cell), out sink))
+                            {
+                                var floor = group.Key;
+                                var name = floor == level
+                                    ? CellName(p, "buildings", level, cell)
+                                    : CellName(p, "buildings", level, cell) + "-on" + floor.ToString(CultureInfo.InvariantCulture);
+
+                                sink = new GroupSink(remap, name, p.Flat, false, floor == level
+                                    ? (Action<MeshData>)(mesh => data.Roofs.Add(mesh))
+                                    : mesh => data.RoofsElsewhere.Add((floor, mesh)));
+                                roofSinks[(group.Key, cell)] = sink;
+                            }
+                        }
+                        else if (!tileSinks.TryGetValue((group.Key, cell), out sink))
+                        {
+                            var list = AtlasList(data, group.Key);
+                            sink = new GroupSink(remap, CellName(p, "tile" + group.Key.ToString(CultureInfo.InvariantCulture), level, cell),
+                                false, true, list.Add);
+                            tileSinks[(group.Key, cell)] = sink;
                         }
 
-                        data.MovedRoofTriangles++;
-                    }
+                        if (sink.Count + 3 > cap)
+                        {
+                            // the roofs are counted as they are flushed, as FlushRoofs counted them
+                            var flushed = sink.Flush();
+                            if (group.Roof) data.BuildingTriangles += flushed;
+                        }
 
-                    roofIndices.Add(p.RoofVertex(a, vertices, uvs, colours));
-                    roofIndices.Add(p.RoofVertex(b, vertices, uvs, colours));
-                    roofIndices.Add(p.RoofVertex(c, vertices, uvs, colours));
+                        sink.Triangle(shaded, t);
+                    }
                 }
             }
 
-            for (var slot = 0; slot < sideSinks.Length; slot++)
-            {
-                if (sideSinks[slot] == null) continue;
-                sideSinks[slot].Flush($"{p.MapKey}-side{SideOrder[slot]}-{level}", data.Sides[slot] ??= new List<MeshData>());
-            }
-
-            foreach (var pair in tileSinks) pair.Value.Flush($"{p.MapKey}-tile{pair.Key}-{level}", AtlasList(data, pair.Key));
+            foreach (var pair in sideSinks) pair.Value.Flush();
+            foreach (var pair in tileSinks) pair.Value.Flush();
 
             // Counted into the building total whether or not they are built yet, so the log line's totals are
-            // the file's and do not move when a floor's walls arrive a frame later.
+            // the file's and do not move when a floor's walls arrive a frame later. The roofs are counted as flushed.
             data.BuildingTriangles += data.WallTriangles + data.SideTriangles + data.AtlasTriangles;
 
-            FlushRoofs(p, data, level, part, vertices, uvs, indices, colours, elsewhere);
+            foreach (var pair in roofSinks) data.BuildingTriangles += pair.Value.Flush();
+        }
+
+        /// <summary>A chunk's mesh name: map, what it draws, the floor, and - when there is a grid - the spatial cell.</summary>
+        private static string CellName(Prep p, string what, int level, int cell) =>
+            p.CellsX * p.CellsZ > 1
+                ? string.Format(CultureInfo.InvariantCulture, "{0}-{1}-{2}-c{3}", p.MapKey, what, level, cell)
+                : string.Format(CultureInfo.InvariantCulture, "{0}-{1}-{2}", p.MapKey, what, level);
+
+        /// <summary>
+        /// WORKER. One building's shared-vertex triangles, gathered per destination before they are cut into cells: a
+        /// group per atlas tile and per floor its roofs stand on, each with the building vertices it uses renumbered
+        /// densely (one <see cref="ChunkRemap"/>, a group being an owner), their UVs (the tile's raw UV, or the planar
+        /// one), and each triangle's cell. Groups and their lists are pooled across buildings.
+        /// </summary>
+        private sealed class BuildingGroups
+        {
+            private readonly ChunkRemap _local = new ChunkRemap();
+            private readonly List<Group> _pool = new List<Group>();
+            private readonly Dictionary<(bool Roof, int Key), Group> _byKey = new Dictionary<(bool Roof, int Key), Group>();
+
+            public int Count { get; private set; }
+
+            public Group this[int i] => _pool[i];
+
+            /// <summary>A new building of <paramref name="vertexCount"/> vertices: no group, no vertex placed.</summary>
+            public void Begin(int vertexCount)
+            {
+                _local.Begin(vertexCount);
+                _byKey.Clear();
+
+                for (var i = 0; i < Count; i++) _pool[i].Clear();
+                Count = 0;
+            }
+
+            /// <summary>Triangle (a, b, c) of the building last loaded into the group of (<paramref name="roof"/>,
+            /// <paramref name="key"/>): a tile index, or the floor level a roof stands on. <paramref name="range"/> is the
+            /// atlas range whose UVs the vertices take (a vertex is in at most one range, so the first use's is every use's).</summary>
+            public void Add(Prep p, bool roof, int key, int range, int a, int b, int c, int cell)
+            {
+                if (!_byKey.TryGetValue((roof, key), out var group))
+                {
+                    if (Count == _pool.Count) _pool.Add(new Group());
+
+                    group = _pool[Count++];
+                    group.Roof = roof;
+                    group.Key = key;
+                    group.Owner = _local.NewOwner();
+                    _byKey[(roof, key)] = group;
+                }
+
+                group.Indices.Add(Vertex(p, group, range, a));
+                group.Indices.Add(Vertex(p, group, range, b));
+                group.Indices.Add(Vertex(p, group, range, c));
+                group.Cells.Add(cell);
+            }
+
+            private int Vertex(Prep p, Group group, int range, int i)
+            {
+                if (_local.TryGet(i, group.Owner, out var index)) return index;
+
+                var position = p.Position(i);
+
+                index = group.Positions.Count;
+                _local.Set(i, group.Owner, index);
+
+                group.Positions.Add(position);
+                group.Uvs.Add(range >= 0 ? p.AtlasUv(i, range) : p.PlanarUv(position.x, position.z));
+
+                return index;
+            }
+        }
+
+        /// <summary>One destination's triangles of one building (<see cref="BuildingGroups"/>).</summary>
+        private sealed class Group
+        {
+            public bool Roof;
+            public int Key;
+            public int Owner;
+            public readonly List<Vector3> Positions = new List<Vector3>();
+            public readonly List<Vector2> Uvs = new List<Vector2>();
+            public readonly List<int> Indices = new List<int>();
+
+            /// <summary>Per triangle, its spatial cell.</summary>
+            public readonly List<int> Cells = new List<int>();
+
+            /// <summary>The group's normals made once, over all of it, with the crease rule: MeshData.From splits a vertex
+            /// whose faces meet at a crease, and the returned mesh's triangle t is the group's triangle t.</summary>
+            public MeshData Shade() => MeshData.From("", Positions, Uvs, Indices, null);
+
+            public void Clear()
+            {
+                Positions.Clear();
+                Uvs.Clear();
+                Indices.Clear();
+                Cells.Clear();
+            }
+        }
+
+        /// <summary>
+        /// One (group, cell) chunk while it is prepared: vertices taken from a shaded group (<see cref="Group.Shade"/>) with
+        /// their normals, placed once per chunk through the shared <see cref="ChunkRemap"/> (a flush takes a new owner, so
+        /// the building in hand is placed afresh), flushed into mesh data under the vertex cap.
+        /// </summary>
+        private sealed class GroupSink
+        {
+            private readonly ChunkRemap _remap;
+            private readonly string _name;
+            private readonly bool _flat;
+            private readonly bool _repeat;
+            private readonly Action<MeshData> _target;
+            private readonly List<Vector3> _vertices = new List<Vector3>();
+            private readonly List<Vector3> _normals = new List<Vector3>();
+            private readonly List<Vector2> _uvs = new List<Vector2>();
+            private readonly List<Color32> _colours = new List<Color32>();
+            private readonly List<int> _indices = new List<int>();
+            private int _owner;
+            private int _part;
+
+            /// <param name="remap">The pass's remap.</param>
+            /// <param name="name">The chunk name's stem.</param>
+            /// <param name="flat">A flat-colour build: each vertex gets the flat building colour.</param>
+            /// <param name="repeat">Atlas UVs, in repeats of a Repeat-wrapped tile (MeshData.RepeatUvs).</param>
+            /// <param name="target">Where each flushed chunk goes.</param>
+            public GroupSink(ChunkRemap remap, string name, bool flat, bool repeat, Action<MeshData> target)
+            {
+                _remap = remap;
+                _name = name;
+                _flat = flat;
+                _repeat = repeat;
+                _target = target;
+                _owner = remap.NewOwner();
+            }
+
+            public int Count => _vertices.Count;
+
+            /// <summary>Triangle <paramref name="t"/> of <paramref name="shaded"/>.</summary>
+            public void Triangle(MeshData shaded, int t)
+            {
+                for (var k = 0; k < 3; k++)
+                {
+                    var id = shaded.Indices[t * 3 + k];
+
+                    if (!_remap.TryGet(id, _owner, out var index))
+                    {
+                        index = _vertices.Count;
+                        _remap.Set(id, _owner, index);
+
+                        _vertices.Add(shaded.Vertices[id]);
+                        _normals.Add(shaded.Normals[id]);
+                        _uvs.Add(shaded.Uvs[id]);
+                        if (_flat) _colours.Add(FlatBuildingColour);
+                    }
+
+                    _indices.Add(index);
+                }
+            }
+
+            /// <summary>The chunk into mesh data, emptied for the next. Returns the triangles flushed.</summary>
+            public int Flush()
+            {
+                var triangles = _indices.Count / 3;
+
+                if (_indices.Count > 0)
+                {
+                    _target(new MeshData
+                    {
+                        Name = _name + "-" + (_part++).ToString(CultureInfo.InvariantCulture),
+                        Vertices = _vertices.ToArray(),
+                        Normals = _normals.ToArray(),
+                        Uvs = _uvs.ToArray(),
+                        Indices = _indices.ToArray(),
+                        Colours = _flat ? _colours.ToArray() : null,
+
+                        // drawn on the tile's own texture with wrapMode Repeat: Pack may shift these UVs by whole repeats
+                        RepeatUvs = _repeat
+                    });
+                }
+
+                _vertices.Clear();
+                _normals.Clear();
+                _uvs.Clear();
+                _colours.Clear();
+                _indices.Clear();
+
+                _owner = _remap.NewOwner();
+                return triangles;
+            }
         }
 
         /// <summary>A triangle's area, m2.</summary>
@@ -7445,27 +8284,77 @@ namespace QuestTree.UI
             return list;
         }
 
-        /// <summary>One chunk of roofs into mesh data: the building band's own, and one per other floor its
-        /// faces stand on, all sharing the chunk's vertices. The index lists are emptied for the next chunk.</summary>
-        private static void FlushRoofs(
-            Prep p, FloorData data, int level, int part, List<Vector3> vertices, List<Vector2> uvs, List<int> indices,
-            List<Color32> colours, Dictionary<int, List<int>> elsewhere)
+        /// <summary>
+        /// WORKER. Where each vertex of the building in hand has been placed, per chunk - for every sink that shares a
+        /// building's vertices (roofs, atlas tiles). One per prep pass rather than one array per sink: with a sink per
+        /// (tile, cell) there are thousands of sinks, and an index array the size of the largest building in each was
+        /// gigabytes. A vertex's placements are a short chain (one per chunk the building's faces around it fell in),
+        /// stamped per building, so <see cref="Begin"/> forgets everything without clearing. A chunk is an OWNER number;
+        /// a flush takes a new one, so the flushed chunk's entries simply stop matching.
+        /// </summary>
+        private sealed class ChunkRemap
         {
-            if (indices.Count > 0)
+            private int[] _stamp = new int[0];
+            private int[] _head = new int[0];
+            private int _building;
+
+            private int[] _next = new int[1024];
+            private int[] _ownerOf = new int[1024];
+            private int[] _value = new int[1024];
+            private int _used;
+
+            private int _owners;
+
+            /// <summary>A fresh owner number, for a new chunk.</summary>
+            public int NewOwner() => ++_owners;
+
+            /// <summary>A new building of <paramref name="vertexCount"/> vertices: no vertex is placed anywhere.</summary>
+            public void Begin(int vertexCount)
             {
-                data.Roofs.Add(MeshData.Compacted($"{p.MapKey}-buildings-{level}-{part}", vertices, uvs, indices, colours));
-                data.BuildingTriangles += indices.Count / 3;
+                if (_stamp.Length < vertexCount)
+                {
+                    _stamp = new int[vertexCount];
+                    _head = new int[vertexCount];
+                    _building = 0;
+                }
+
+                _building++;
+                _used = 0;
             }
 
-            foreach (var pair in elsewhere)
+            public bool TryGet(int vertex, int owner, out int value)
             {
-                if (pair.Value.Count == 0) continue;
+                if (_stamp[vertex] == _building)
+                {
+                    for (var e = _head[vertex]; e >= 0; e = _next[e])
+                    {
+                        if (_ownerOf[e] != owner) continue;
 
-                data.RoofsElsewhere.Add((pair.Key, MeshData.Compacted(
-                    $"{p.MapKey}-buildings-{level}-on{pair.Key}-{part}", vertices, uvs, pair.Value, colours)));
-                data.BuildingTriangles += pair.Value.Count / 3;
+                        value = _value[e];
+                        return true;
+                    }
+                }
 
-                pair.Value.Clear();
+                value = -1;
+                return false;
+            }
+
+            public void Set(int vertex, int owner, int value)
+            {
+                if (_used == _next.Length)
+                {
+                    Array.Resize(ref _next, _used * 2);
+                    Array.Resize(ref _ownerOf, _used * 2);
+                    Array.Resize(ref _value, _used * 2);
+                }
+
+                var head = _stamp[vertex] == _building ? _head[vertex] : -1;
+
+                _stamp[vertex] = _building;
+                _next[_used] = head;
+                _ownerOf[_used] = owner;
+                _value[_used] = value;
+                _head[vertex] = _used++;
             }
         }
 
@@ -7529,13 +8418,12 @@ namespace QuestTree.UI
             var centres = new List<Color>();
             var bucketOf = BucketColours(colours, p.Flat ? 1 : MaxWallTints, centres);
 
-            var sinks = new MeshSink[centres.Count];
+            // One sink per (bucket, spatial cell), made on the bucket's first wall in that cell (Prep.CellOf).
+            var cells = p.CellsX * p.CellsZ;
+            var cap = ChunkVertexCap;
+            var sinks = new Dictionary<long, MeshSink>();
 
-            for (var k = 0; k < centres.Count; k++)
-            {
-                sinks[k] = new MeshSink { Flat = p.Flat };
-                data.Tints.Add((centres[k], new List<MeshData>()));
-            }
+            for (var k = 0; k < centres.Count; k++) data.Tints.Add((centres[k], new List<MeshData>()));
 
             data.TintCount = p.Flat ? 0 : centres.Count;
 
@@ -7548,15 +8436,27 @@ namespace QuestTree.UI
                 if (!p.LoadBuilding(building)) continue;
 
                 var k = bucketOf[w];
-                var sink = sinks[k];
-                var target = data.Tints[k].Meshes;
                 var count = building.Indices.Length - building.Indices.Length % 3;
 
                 for (var i = 0; i < count; i += 3)
                 {
                     if (!p.WallTriangle(building, i, out var a, out var b, out var c)) continue;
 
-                    if (sink.Count + 3 > MaxVerticesPerMesh) sink.Flush($"{p.MapKey}-walls-{level}-{k}", target);
+                    var cell = p.CellOf(a, b, c);
+                    var key = (long)k * cells + cell;
+
+                    if (!sinks.TryGetValue(key, out var sink))
+                    {
+                        sink = new MeshSink
+                        {
+                            Flat = p.Flat,
+                            Name = CellName(p, "walls", level, cell) + "-" + k.ToString(CultureInfo.InvariantCulture),
+                            Target = data.Tints[k].Meshes
+                        };
+                        sinks[key] = sink;
+                    }
+
+                    if (sink.Count + 3 > cap) sink.Flush();
 
                     sink.Add(a, p.PlanarUv(a.x, a.z));
                     sink.Add(b, p.PlanarUv(b.x, b.z));
@@ -7566,83 +8466,38 @@ namespace QuestTree.UI
                 }
             }
 
-            for (var k = 0; k < sinks.Length; k++) sinks[k].Flush($"{p.MapKey}-walls-{level}-{k}", data.Tints[k].Meshes);
+            foreach (var pair in sinks) pair.Value.Flush();
+
+            // the merge rule, per tint, as per tile in PrepareFloor
+            foreach (var tint in data.Tints)
+            {
+                data.ChunksSplit += tint.Meshes.Count;
+                MergeSmall(tint.Meshes);
+                data.ChunksMerged += tint.Meshes.Count;
+            }
+
+            // compact here, on the worker, as PrepareFloor's chunks are
+            if (p.Compact)
+            {
+                foreach (var tint in data.Tints)
+                    foreach (var mesh in tint.Meshes)
+                        PackOne(mesh, cancel);
+            }
 
             return data;
         }
 
-        /// <summary>
-        /// Atlas-textured geometry while it is prepared: SHARED vertices per building, as the file indexes them,
-        /// with the file's UVs, flushed into mesh data under the vertex cap. The remap is stamped rather than
-        /// cleared - a new building, or a flush in the middle of one, bumps the stamp, and every older entry reads
-        /// as unset - so eight page sinks cost nothing per building they are not touched by.
-        /// </summary>
-        private sealed class PageSink
-        {
-            private readonly List<Vector3> _vertices = new List<Vector3>();
-            private readonly List<Vector2> _uvs = new List<Vector2>();
-            private readonly List<int> _indices = new List<int>();
-            private int[] _index = new int[0];
-            private int[] _stamp = new int[0];
-            private int _current = 1;
-            private int _building = -1;
-            private int _part;
-
-            public int Count => _vertices.Count;
-
-            public void Triangle(Prep p, int building, int vertexCount, int range, int a, int b, int c)
-            {
-                if (building != _building)
-                {
-                    _building = building;
-                    _current++;
-
-                    if (_index.Length < vertexCount)
-                    {
-                        _index = new int[vertexCount];
-                        _stamp = new int[vertexCount];
-                    }
-                }
-
-                _indices.Add(Vertex(p, range, a));
-                _indices.Add(Vertex(p, range, b));
-                _indices.Add(Vertex(p, range, c));
-            }
-
-            /// <summary>A building vertex placed once per chunk. Its UV is dequantised over ITS range, and a vertex is
-            /// in at most one range (MapMeshFile.Read checks it), so the first use's UV is every use's.</summary>
-            private int Vertex(Prep p, int range, int i)
-            {
-                if (_stamp[i] == _current) return _index[i];
-
-                _stamp[i] = _current;
-                _index[i] = _vertices.Count;
-
-                _vertices.Add(p.Position(i));
-                _uvs.Add(p.AtlasUv(i, range));
-
-                return _index[i];
-            }
-
-            public void Flush(string name, List<MeshData> target)
-            {
-                if (_indices.Count > 0)
-                    target.Add(MeshData.From($"{name}-{_part++}", _vertices, _uvs, _indices, null));
-
-                _vertices.Clear();
-                _uvs.Clear();
-                _indices.Clear();
-
-                // The next chunk starts empty, so this building's vertices are placed afresh in it.
-                _current++;
-            }
-        }
-
         /// <summary>Unshared-vertex geometry while it is prepared, flushed into mesh data under the vertex cap:
-        /// a tint's walls, or a side's faces.</summary>
+        /// a tint's walls, or a side's faces, in one spatial cell, into <see cref="Target"/>.</summary>
         private sealed class MeshSink
         {
             public bool Flat;
+
+            /// <summary>The chunk name's stem; each flush appends its part number.</summary>
+            public string Name = "";
+
+            /// <summary>The list each flushed chunk goes to.</summary>
+            public List<MeshData> Target;
 
             private readonly List<Vector3> _vertices = new List<Vector3>();
             private readonly List<Vector2> _uvs = new List<Vector2>();
@@ -7660,11 +8515,12 @@ namespace QuestTree.UI
                 if (Flat) _colours.Add(FlatWallColour);
             }
 
-            public void Flush(string name, List<MeshData> target)
+            public void Flush()
             {
-                if (_indices.Count == 0) return;
+                if (_indices.Count == 0 || Target == null) return;
 
-                target.Add(MeshData.From($"{name}-{_part++}", _vertices, _uvs, _indices, Flat ? _colours : null));
+                Target.Add(MeshData.From(Name + "-" + (_part++).ToString(CultureInfo.InvariantCulture), _vertices, _uvs, _indices,
+                    Flat ? _colours : null));
 
                 _vertices.Clear();
                 _uvs.Clear();
@@ -7705,8 +8561,10 @@ namespace QuestTree.UI
         internal static readonly bool RoofsFromPicture = true;
 
         /// <summary>Pictures stage C: the least capture density, px/m, at which a roof takes the top picture rather than its
-        /// atlas tile. Under it (a 4 px/m capture: 0.25 m a pixel) a roof would be blurrier than the atlas's own texture.</summary>
-        private const float RoofPictureMinPpm = 8f;
+        /// atlas tile. Under it (a 4 px/m capture: 0.25 m a pixel) a roof would be blurrier than the atlas's own texture.
+        /// 6, not 8: menu sets now load an 8,192 px viewing copy, which puts Customs' ground at 7.16 px/m - under 8 its roofs
+        /// fell back to the atlas. Rollback: 8.</summary>
+        private const float RoofPictureMinPpm = 6f;
 
         /// <summary>WP8 (V.3) debug switch, OFF in every build: draws the building faces by SOURCE - atlas textured as
         /// usual, an atlas FLAT tile magenta, top-picture faces blue, side-picture faces orange, tints grey - and logs
@@ -7754,13 +8612,143 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// MAIN THREAD. One mesh from prepared arrays. <see cref="IndexFormat.UInt32"/> is set BEFORE the
-        /// vertices: a mesh left on sixteen-bit indices wraps them past 65,535 vertices. Normals recalculated
-        /// here - the one Unity call that costs, and the reason a mesh is one unit of paced work.
+        /// MAIN THREAD. One mesh from prepared data: the packed form when the worker made one (<see cref="MakeCompactMesh"/>),
+        /// else the float arrays (<see cref="MakeFloatMesh"/>). One mesh is one unit of paced work; with spatial chunks a unit
+        /// is small (at most 65,535 vertices, most far fewer), so <see cref="Pump"/>'s budget check after each unit holds the
+        /// frame to <see cref="FrameBudgetMs"/> plus one small unit - batching several meshes into a unit would only coarsen
+        /// that, as each mesh's Unity cost is its own. The time is measured for the chunks line.
         /// </summary>
         private static Mesh MakeMesh(MeshData data)
         {
-            var mesh = new Mesh { name = data.Name, indexFormat = IndexFormat.UInt32 };
+            var clock = Stopwatch.StartNew();
+
+            try
+            {
+                return data.Packed != null ? MakeCompactMesh(data) : MakeFloatMesh(data);
+            }
+            finally
+            {
+                // main thread only, like every caller: the chunks line's measured upload time
+                _uploadTicks += clock.ElapsedTicks;
+                _uploadMeshes++;
+            }
+        }
+
+        /// <summary>Main-thread time spent in <see cref="MakeMesh"/> since the session began, in Stopwatch ticks, and the
+        /// meshes it made. Static, because MakeMesh is; a build reads the difference over itself (Finish).</summary>
+        private static long _uploadTicks;
+
+        private static int _uploadMeshes;
+
+        /// <summary>The vertex layouts of a compact mesh, by (colour, float UV): attributes in Unity's required order.</summary>
+        private static readonly VertexAttributeDescriptor[][] CompactLayouts =
+        {
+            CompactLayout(false, false), CompactLayout(false, true), CompactLayout(true, false), CompactLayout(true, true)
+        };
+
+        private static VertexAttributeDescriptor[] CompactLayout(bool colour, bool uvFloat)
+        {
+            var layout = new List<VertexAttributeDescriptor>
+            {
+                new VertexAttributeDescriptor(VertexAttribute.Position, VertexAttributeFormat.UNorm16, 4),
+                new VertexAttributeDescriptor(VertexAttribute.Normal, VertexAttributeFormat.SNorm8, 4)
+            };
+
+            if (colour) layout.Add(new VertexAttributeDescriptor(VertexAttribute.Color, VertexAttributeFormat.UNorm8, 4));
+
+            layout.Add(uvFloat
+                ? new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2)
+                : new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.UNorm16, 2));
+
+            return layout.ToArray();
+        }
+
+        /// <summary>
+        /// MAIN THREAD, once per session: whether this GPU takes every format a compact mesh uses. Asked before a prep
+        /// snapshot (<see cref="SnapshotPrep"/>), so a machine without them gets float meshes rather than invisible ones.
+        /// </summary>
+        private static bool CompactSupported()
+        {
+            if (_compactSupported.HasValue) return _compactSupported.Value;
+
+            bool supported;
+
+            try
+            {
+                supported = SystemInfo.SupportsVertexAttributeFormat(VertexAttributeFormat.UNorm16, 4) &&
+                            SystemInfo.SupportsVertexAttributeFormat(VertexAttributeFormat.SNorm8, 4) &&
+                            SystemInfo.SupportsVertexAttributeFormat(VertexAttributeFormat.UNorm8, 4) &&
+                            SystemInfo.SupportsVertexAttributeFormat(VertexAttributeFormat.UNorm16, 2) &&
+                            SystemInfo.SupportsVertexAttributeFormat(VertexAttributeFormat.Float32, 2);
+            }
+            catch (Exception)
+            {
+                supported = false;
+            }
+
+            _compactSupported = supported;
+
+            if (!supported)
+                Plugin.LogSource?.LogWarning(
+                    "QuestTree: this GPU does not take the compact vertex formats (UNorm16/SNorm8) - the 3D map uses float vertices.");
+
+            return supported;
+        }
+
+        private static bool? _compactSupported;
+
+        /// <summary>
+        /// MAIN THREAD. A compact mesh (<see cref="MeshData.Pack"/>): the packed buffer as it is, the indices in the format
+        /// Pack chose, one submesh with the bounds Pack measured (in lattice units - DontRecalculateBounds, since the
+        /// positions are codes Unity would have to decode), and its frame registered for <see cref="Submit"/>. Non-readable:
+        /// nothing reads a mesh back.
+        /// </summary>
+        private static Mesh MakeCompactMesh(MeshData data)
+        {
+            const MeshUpdateFlags flags = MeshUpdateFlags.DontRecalculateBounds;
+
+            var mesh = new Mesh { name = data.Name };
+            var layout = CompactLayouts[(data.HasColour ? 2 : 0) + (data.UvFloat ? 1 : 0)];
+
+            mesh.SetVertexBufferParams(data.VertexCount, layout);
+            mesh.SetVertexBufferData(data.Packed, 0, 0, data.Packed.Length, 0, flags);
+
+            int count;
+
+            if (data.Indices16 != null)
+            {
+                count = data.Indices16.Length;
+                mesh.SetIndexBufferParams(count, IndexFormat.UInt16);
+                mesh.SetIndexBufferData(data.Indices16, 0, 0, count, flags);
+            }
+            else
+            {
+                count = data.Indices.Length;
+                mesh.SetIndexBufferParams(count, IndexFormat.UInt32);
+                mesh.SetIndexBufferData(data.Indices, 0, 0, count, flags);
+            }
+
+            mesh.subMeshCount = 1;
+            mesh.SetSubMesh(0, new SubMeshDescriptor(0, count)
+            {
+                bounds = data.LocalBounds,
+                firstVertex = 0,
+                vertexCount = data.VertexCount
+            }, flags);
+            mesh.bounds = data.LocalBounds;
+
+            mesh.UploadMeshData(true);
+
+            Frames.Add(mesh, new MeshFrame(data.Origin, data.Scale));
+            return mesh;
+        }
+
+        /// <summary>MAIN THREAD. A float mesh, as every mesh was before <see cref="CompactVertices"/>; sixteen-bit indices
+        /// when <see cref="SixteenBitIndices"/> and the chunk is small enough, set BEFORE the triangles.</summary>
+        private static Mesh MakeFloatMesh(MeshData data)
+        {
+            var sixteen = SixteenBitIndices && data.Vertices.Length <= SixteenBitVertexLimit;
+            var mesh = new Mesh { name = data.Name, indexFormat = sixteen ? IndexFormat.UInt16 : IndexFormat.UInt32 };
 
             mesh.SetVertices(data.Vertices);
             mesh.SetNormals(data.Normals);
@@ -7908,6 +8896,8 @@ namespace QuestTree.UI
                 }
 
                 built.Tints = data.TintCount;
+                built.WallChunksSplit = data.ChunksSplit;
+                built.WallChunksMerged = data.ChunksMerged;
             }));
 
             for (var k = 0; k < data.Tints.Count; k++)
@@ -8206,7 +9196,24 @@ namespace QuestTree.UI
                 // S1 review: no dome on a cut floor - the oblique near plane would clip its upper half to a hard edge
                 if (SkyDome && float.IsNaN(_cutY)) DrawSky();
 
-                for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
+                // The first frame counts what frustum culling keeps of what it submits (CountInView), so the chunks line
+                // proves the spatial chunking rather than asserting it.
+                if (first)
+                {
+                    GeometryUtility.CalculateFrustumPlanes(_camera, _viewPlanes);
+                    _viewTriangles = _viewTrianglesIn = 0L;
+                    _viewDrawsIn = 0;
+                    _countView = true;
+                }
+
+                try
+                {
+                    for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
+                }
+                finally
+                {
+                    _countView = false;
+                }
 
                 RenderNow();
                 Present();
@@ -8252,6 +9259,31 @@ namespace QuestTree.UI
                         !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor",
                         LightSource(), Map3DPostProcess.Describe(), Map3DLightProbe.Describe(), _spotNearFarRatio,
                         TonemapText()));   // stage D: {32}
+
+                    // Spatial chunking's proof: of the triangles submitted, those in meshes whose world bounds the frustum
+                    // keeps (TestPlanesAABB, as Unity culls each DrawMesh), and the draw calls that reach the GPU; and the
+                    // chunk count before and after the merge rule (walls only where they are built by now).
+                    var split = 0;
+                    var merged = 0;
+                    var counted = new HashSet<Built>();
+
+                    foreach (var floor in _floors)
+                    {
+                        var built = floor?.Meshes;
+                        if (built == null || !counted.Add(built)) continue;
+
+                        split += built.ChunksSplit + built.WallChunksSplit;
+                        merged += built.ChunksMerged + built.WallChunksMerged;
+                    }
+
+                    Plugin.LogSource?.LogInfo(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "QuestTree: 3D map for {0} - first frame: {1:#,##0} of {2:#,##0} submitted triangles in the view frustum " +
+                        "({3:0.0} %), {4:#,##0} of {5:#,##0} draw call(s) in view (Unity culls the rest); chunks on a {6} m grid " +
+                        "{7:#,##0} split, {8:#,##0} after merging tiles/tints under {9:#,##0} vertices.",
+                        _mapKey, _viewTrianglesIn, _viewTriangles,
+                        _viewTriangles > 0 ? 100d * _viewTrianglesIn / _viewTriangles : 0d,
+                        _viewDrawsIn, _drawCalls, SpatialChunkMetres, split, merged, CellSplitMinVertices));
                 }
 
                 // Spot-sun stage B's proof, after the real frame is in the view's texture (the check renders into a
@@ -8313,10 +9345,81 @@ namespace QuestTree.UI
         /// albedo is black, so the spot's pass adds nothing to shadow); only the lit fallback's ground is shadowed.</param>
         private void Submit(Mesh mesh, Material material, bool castShadows = true)
         {
-            if (castShadows) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
+            // A compact mesh's positions are lattice steps from its origin: its frame turns them back into world metres. Every
+            // other mesh (the calibration quads, a float chunk under the rollback) has none and draws with identity, as before.
+            var matrix = Frames.TryGetValue(mesh, out var frame) ? frame.Matrix : Matrix4x4.identity;
+
+            if (castShadows) Graphics.DrawMesh(mesh, matrix, material, _drawLayer, _camera);
             else
-                Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera, 0, null, ShadowCastingMode.Off, true);
+                Graphics.DrawMesh(mesh, matrix, material, _drawLayer, _camera, 0, null, ShadowCastingMode.Off, true);
             _drawCalls++;
+
+            if (_countView) CountInView(mesh, frame);
+        }
+
+        // --- compact meshes: their frames, and what the first frame's culling would keep -------------------------
+
+        /// <summary>
+        /// A compact mesh's frame: world = <see cref="Origin"/> + local * <see cref="Scale"/>, the local position being a
+        /// UNorm16 lattice code in [0, 1]. Uniform scale, so Unity's normal matrix (the inverse transpose) is the identity
+        /// up to scale, the SNorm8 normals are world normals, and the built-in shaders' normalize undoes the scale.
+        /// </summary>
+        internal sealed class MeshFrame
+        {
+            public readonly Vector3 Origin;
+            public readonly float Scale;
+            public readonly Matrix4x4 Matrix;
+
+            public MeshFrame(Vector3 origin, float scale)
+            {
+                Origin = origin;
+                Scale = scale;
+                Matrix = Matrix4x4.TRS(origin, Quaternion.identity, new Vector3(scale, scale, scale));
+            }
+
+            /// <summary>Local bounds (lattice units) as world bounds.</summary>
+            public Bounds World(Bounds local) => new Bounds(Origin + local.center * Scale, local.size * Scale);
+        }
+
+        /// <summary>
+        /// Every compact mesh's frame, keyed by the mesh. A weak table, so an entry goes with its mesh's managed wrapper and
+        /// nothing has to be removed when <see cref="DestroyBuilt"/> destroys an entry's meshes; static, because the cache
+        /// entries (and their meshes) outlive the view that built them. Main thread only.
+        /// </summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Mesh, MeshFrame> Frames =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<Mesh, MeshFrame>();
+
+        /// <summary>A mesh's bounds in WORLD metres: Mesh.bounds is in its own space, which for a compact mesh is lattice
+        /// units. Every reader of a mesh's bounds goes through here (the map bounds, the emission check's centre).</summary>
+        private static Bounds WorldBoundsOf(Mesh mesh) =>
+            Frames.TryGetValue(mesh, out var frame) ? frame.World(mesh.bounds) : mesh.bounds;
+
+        /// <summary>Set for the first frame's Draw only: <see cref="Submit"/> then counts what the frustum keeps.</summary>
+        private bool _countView;
+
+        /// <summary>The camera's frustum planes for the first-frame count, without the cut's oblique near plane (which is only
+        /// applied inside the render bracket) - so the count is what plain frustum culling keeps, an upper bound.</summary>
+        private readonly Plane[] _viewPlanes = new Plane[6];
+
+        private long _viewTriangles;
+        private long _viewTrianglesIn;
+        private int _viewDrawsIn;
+
+        /// <summary>
+        /// First frame only: the triangles submitted, and those of meshes whose world bounds pass
+        /// GeometryUtility.TestPlanesAABB - the same test against the same bounds Unity's culling makes per DrawMesh. So the
+        /// line's "in view" figure is what reaches the GPU, not what the chunking was meant to achieve.
+        /// </summary>
+        private void CountInView(Mesh mesh, MeshFrame frame)
+        {
+            var triangles = mesh.subMeshCount > 0 ? (long)mesh.GetIndexCount(0) / 3L : 0L;
+            _viewTriangles += triangles;
+
+            var bounds = frame != null ? frame.World(mesh.bounds) : mesh.bounds;
+            if (!GeometryUtility.TestPlanesAABB(_viewPlanes, bounds)) return;
+
+            _viewTrianglesIn += triangles;
+            _viewDrawsIn++;
         }
 
         /// <summary>
@@ -8347,10 +9450,13 @@ namespace QuestTree.UI
                 var mesh = meshes[i];
                 if (mesh == null || mesh.vertexCount == 0) continue;
 
-                if (_mapBoundsSet) _mapBounds.Encapsulate(mesh.bounds);
+                // world bounds: a compact mesh's own are in lattice units
+                var bounds = WorldBoundsOf(mesh);
+
+                if (_mapBoundsSet) _mapBounds.Encapsulate(bounds);
                 else
                 {
-                    _mapBounds = mesh.bounds;
+                    _mapBounds = bounds;
                     _mapBoundsSet = true;
                 }
             }
@@ -9597,6 +10703,10 @@ namespace QuestTree.UI
         private static void Discard(UnityEngine.Object thing)
         {
             if (thing == null) return;
+
+            // A compact mesh's frame goes with it: Unity's Mono has no ephemerons, so the weak table would otherwise keep
+            // every frame (and its key) for the session.
+            if (thing is Mesh mesh) Frames.Remove(mesh);
 
             try
             {
