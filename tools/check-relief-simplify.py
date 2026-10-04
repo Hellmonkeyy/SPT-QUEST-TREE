@@ -3,18 +3,22 @@
 Extracts the ReliefSimplifier region (between "// BEGIN ReliefSimplifier" and "// END ReliefSimplifier") from
 Source/Tarkov-QuestTree/UI/Map3DView.cs, compiles it with a small C# harness in a temporary .NET project, and runs it on a
 synthetic band cut into overlapping blocks exactly as Map3DView.PrepareGroundBlocks cuts it (side quads a step, one quad of
-overlap). The harness unions every block's triangles (identical triangles of an overlap strip counted once) and fails on:
+overlap), at block sides 24, 64 and 253, with the PRODUCTION ReliefSimplifyTolerance and ReliefLeafMaxQuads parsed from
+their declarations in Map3DView.cs (a tolerance of 0 or an unparsable constant fails at once). The harness unions every block's triangles (identical triangles of an overlap strip counted once) and fails on:
 
   - a T-junction or a crack: any drawn vertex lying strictly inside any drawn edge, in grid coordinates - within a block
     (a merged quad next to smaller ones) or across a block line (two blocks splitting their shared line differently);
   - a gap or an overlap: the union's area must equal the whole quads' area, every triangle facing up;
   - the tolerance: every grid height within the tolerance of the drawn surface over it;
   - no simplification at all (so the check cannot pass on a simplifier that does nothing).
+  - at the production-like sides 64 and 253, any leaf size 1, 2, .. ReliefLeafMaxQuads that never formed (so the largest leaves are exercised);
+    each side's leaf-size histogram is printed.
 
 Then it proves it can fail: the same region with the block ring merged (ring 0: a crack at the block lines) and with the fan
-switched off (a merged quad drawn as two triangles beside smaller ones: T-junctions) must both FAIL.
+switched off (a merged quad drawn as two triangles beside smaller ones: T-junctions), and the shipping code at
+tolerance 0 (nothing merges), must all FAIL.
 
-Usage: python tools/check-relief-simplify.py        (exit 0 = the shipping code passes and both broken variants fail)
+Usage: python tools/check-relief-simplify.py        (exit 0 = the shipping code passes and every broken variant fails)
 """
 import os
 import re
@@ -29,15 +33,17 @@ SOURCE = os.path.join(ROOT, 'Source', 'Tarkov-QuestTree', 'UI', 'Map3DView.cs')
 HARNESS = r'''
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 static class Program
 {
-    static int Main()
+    static int Main(string[] args)
     {
-        const int W = 181, H = 157;          // vertices: 180 x 156 quads, not a multiple of the block side
-        const int side = 24;                  // quads a block steps by (PrepareGroundBlocks: 128 m / cell, clamped)
-        const double tol = 0.15;
-        const int maxLeaf = 8;
+        // the production constants, read from Map3DView.cs by the script and passed in
+        var tol = double.Parse(args[0], System.Globalization.CultureInfo.InvariantCulture);
+        var maxLeaf = int.Parse(args[1]);
+
+        const int W = 301, H = 277;          // vertices: 300 x 276 quads, not a multiple of either block side
 
         var h = new float[W * H];
         var rng = new Random(7);
@@ -46,18 +52,38 @@ static class Program
             for (var x = 0; x < W; x++)
             {
                 double y;
-                if (x < 60 && z < 60) y = 10.0;                                   // flat plateau
-                else if (x >= 60 && x < 120 && z < 60) y = 10.0 + 0.05 * x + 0.02 * z;  // tilted plane
-                else if (z >= 60 && z < 110) y = 12.0 + 1.5 * Math.Sin(x * 0.11) * Math.Cos(z * 0.07);  // rolling
-                else y = 11.0 + rng.NextDouble() * 0.6;                           // rough
-                if (x > 140 && z > 20 && z < 50) y += 2.0;                        // a step
+                if (x < 120 && z < 120) y = 10.0;                                       // flat plateau
+                else if (x >= 120 && x < 220 && z < 120) y = 10.0 + 0.05 * x + 0.02 * z;  // tilted plane
+                else if (z >= 120 && z < 200) y = 12.0 + 1.5 * Math.Sin(x * 0.11) * Math.Cos(z * 0.07);  // rolling
+                else y = 11.0 + rng.NextDouble() * 0.6;                                 // rough
+                if (x > 240 && z > 30 && z < 90) y += 2.0;                              // a step
+                if (x > 40 && x < 52 && z > 40 && z < 52) y += 0.5;                     // a bump in the plateau
                 h[z * W + x] = (float)(Math.Round(y * 100.0) / 100.0);
             }
 
         // holes: a patch with no hit, and a scatter
-        for (var z = 70; z < 80; z++) for (var x = 30; x < 37; x++) h[z * W + x] = float.NaN;
-        for (var i = 0; i < 40; i++) h[rng.Next(H) * W + rng.Next(W)] = float.NaN;
+        for (var z = 140; z < 150; z++) for (var x = 50; x < 57; x++) h[z * W + x] = float.NaN;
+        for (var i = 0; i < 80; i++) h[rng.Next(H) * W + rng.Next(W)] = float.NaN;
 
+        var allFailures = new List<string>();
+
+        // PrepareGroundBlocks' side is round(128 m / cell) clamped to sqrt(65535) - 2 = 253, and cells are multiples of
+        // 0.5 m, so the real sides are 253, 128, 85, 64, 51 ... - 253 (0.5 m cells) and 64 (2 m cells) are checked, both
+        // with room for maxLeaf leaves inside the ring, and every leaf size up to maxLeaf must form there. Side 24 is
+        // kept as before (no production side; it clips the leaves at 16).
+        foreach (var side in new[] { 24, 64, 253 })
+        {
+            var failures = Check(h, W, H, side, tol, maxLeaf, side != 24);
+            foreach (var f in failures) allFailures.Add($"side {side}: {f}");
+        }
+
+        foreach (var f in allFailures) Console.WriteLine("FAIL: " + f);
+        Console.WriteLine(allFailures.Count == 0 ? "PASS" : "FAILED");
+        return allFailures.Count == 0 ? 0 : 1;
+    }
+
+    static List<string> Check(float[] h, int W, int H, int side, double tol, int maxLeaf, bool needMaxLeaf)
+    {
         var stride = side + 2;
         var heights = new float[stride * stride];
         var sizes = new int[(stride - 1) * (stride - 1)];
@@ -66,6 +92,7 @@ static class Program
 
         var union = new HashSet<(long, long, long)>();
         var triangles = new List<(int, int, int)>();   // global vertex ids, union order
+        var histogram = new SortedDictionary<int, long>();   // owned leaves by size (quads a side)
         long full = 0, drawn = 0;
 
         for (var firstRow = 0; firstRow < H - 1; firstRow += side)
@@ -84,6 +111,16 @@ static class Program
 
                 drawn += QuestTree.UI.Map3DView.ReliefSimplifier.Build(heights, qw, qh, side, side, tol, maxLeaf, sizes, marks, tris, out var f);
                 full += f;
+
+                // the leaves this block owns (origin quad not in the overlap strip), so none is counted twice
+                for (var z = 0; z < Math.Min(qh, side); z++)
+                    for (var x = 0; x < Math.Min(qw, side); x++)
+                    {
+                        var s = sizes[z * qw + x];
+                        if (s < 1) continue;
+                        histogram.TryGetValue(s, out var n);
+                        histogram[s] = n + 1;
+                    }
 
                 for (var t = 0; t < tris.Count; t += 3)
                 {
@@ -166,10 +203,15 @@ static class Program
 
         if (drawn >= full) failures.Add($"nothing simplified ({drawn} of {full} owned triangles)");
 
-        Console.WriteLine($"owned relief triangles {full} -> {drawn}; union {triangles.Count} triangles, {used.Count} vertices; worst error {worst:0.000} m");
-        foreach (var f in failures) Console.WriteLine("FAIL: " + f);
-        Console.WriteLine(failures.Count == 0 ? "PASS" : "FAILED");
-        return failures.Count == 0 ? 0 : 1;
+        // every leaf size up to maxLeaf must have formed, or the large-leaf paths went untested
+        if (needMaxLeaf)
+            for (var s = 1; s <= maxLeaf; s *= 2)
+                if (!histogram.ContainsKey(s)) failures.Add($"no leaf of size {s} formed (maxLeaf {maxLeaf})");
+
+        var hist = string.Join(", ", histogram.Select(kv => $"{kv.Key}:{kv.Value}"));
+        Console.WriteLine($"side {side}, tolerance {tol}, maxLeaf {maxLeaf}: owned relief triangles {full} -> {drawn}; union {triangles.Count} triangles, {used.Count} vertices; worst error {worst:0.000} m");
+        Console.WriteLine($"side {side} leaf-size histogram (size:count) {hist}");
+        return failures;
     }
 
     static (long, long, long) Canon(int a, int b, int c)
@@ -191,12 +233,33 @@ PROJECT = '''<Project Sdk="Microsoft.NET.Sdk">
 '''
 
 
-def region():
-    text = open(SOURCE, encoding='utf-8').read()
+def source():
+    return open(SOURCE, encoding='utf-8').read()
+
+
+def region(text):
     m = re.search(r'// BEGIN ReliefSimplifier[^\n]*\n(.*?)// END ReliefSimplifier', text, re.S)
     if not m:
         sys.exit('ReliefSimplifier region not found in Map3DView.cs')
     return m.group(1)
+
+
+def constants(text):
+    """The production ReliefSimplifyTolerance and ReliefLeafMaxQuads, parsed from their declarations. A tolerance of 0
+    (the rollback) or a leaf under 2 would make the check vacuous - nothing merges - so either FAILS here, loudly."""
+    m = re.findall(r'\bfloat\s+ReliefSimplifyTolerance\s*=\s*([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)[fF]?\s*;', text)
+    n = re.findall(r'\bconst\s+int\s+ReliefLeafMaxQuads\s*=\s*([0-9_]+)\s*;', text)
+    if len(m) != 1 or len(n) != 1:
+        sys.exit('FAIL: could not parse exactly one ReliefSimplifyTolerance (%d) and ReliefLeafMaxQuads (%d) declaration '
+                 'in Map3DView.cs' % (len(m), len(n)))
+    tol = float(m[0])
+    leaf = int(n[0].replace('_', ''))
+    if not tol > 0:
+        sys.exit('FAIL: production ReliefSimplifyTolerance parses as %r - the simplifier is rolled back and this check '
+                 'would pass vacuously' % tol)
+    if leaf < 2 or leaf & (leaf - 1):
+        sys.exit('FAIL: production ReliefLeafMaxQuads = %d is not a power of two >= 2' % leaf)
+    return tol, leaf
 
 
 def mutate(code, marker, old, new):
@@ -208,7 +271,7 @@ def mutate(code, marker, old, new):
     return '\n'.join(lines)
 
 
-def run(name, code, work):
+def run(name, code, work, tol, leaf):
     folder = os.path.join(work, name)
     os.makedirs(folder)
     with open(os.path.join(folder, 'check.csproj'), 'w') as f:
@@ -217,23 +280,31 @@ def run(name, code, work):
         f.write(HARNESS)
     with open(os.path.join(folder, 'Simplifier.cs'), 'w', encoding='utf-8') as f:
         f.write('namespace QuestTree.UI\n{\n    internal static partial class Map3DView\n    {\n' + code + '\n    }\n}\n')
-    out = subprocess.run(['dotnet', 'run', '-c', 'Release', '--project', folder], capture_output=True, text=True)
+    out = subprocess.run(['dotnet', 'run', '-c', 'Release', '--project', folder, '--', repr(tol), str(leaf)],
+                         capture_output=True, text=True)
     print('--- %s (exit %d)' % (name, out.returncode))
-    print(out.stdout.strip()[-1500:] or out.stderr.strip()[-1500:])
+    print(out.stdout.strip()[-2500:] or out.stderr.strip()[-2500:])
     return out.returncode, out.stdout
 
 
 def main():
-    code = region()
+    text = source()
+    code = region(text)
+    tol, leaf = constants(text)
+    print('production constants: ReliefSimplifyTolerance %r m, ReliefLeafMaxQuads %d' % (tol, leaf))
+
     work = tempfile.mkdtemp(prefix='relief-check-')
     try:
-        ok, _ = run('shipping', code, work)
-        crack, out1 = run('broken-ring0', mutate(code, 'CHECK-MUTATE-RING', '= 1;', '= 0;'), work)
-        tee, out2 = run('broken-nofan', mutate(code, 'CHECK-MUTATE-FAN', 'perimeter.Count > 4', 'false'), work)
+        ok, _ = run('shipping', code, work, tol, leaf)
+        broken = [
+            run('broken-ring0', mutate(code, 'CHECK-MUTATE-RING', '= 1;', '= 0;'), work, tol, leaf),
+            run('broken-nofan', mutate(code, 'CHECK-MUTATE-FAN', 'perimeter.Count > 4', 'false'), work, tol, leaf),
+            run('broken-tolerance0', code, work, 0.0, leaf),
+        ]
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
-    broken_fail = crack == 1 and tee == 1 and 'PASS' not in out1 and 'PASS' not in out2
+    broken_fail = all(rc == 1 and 'PASS' not in out and 'FAILED' in out for rc, out in broken)
     print()
     print('shipping code: %s; broken variants fail: %s' % ('PASS' if ok == 0 else 'FAIL', 'yes' if broken_fail else 'NO'))
     sys.exit(0 if ok == 0 and broken_fail else 1)

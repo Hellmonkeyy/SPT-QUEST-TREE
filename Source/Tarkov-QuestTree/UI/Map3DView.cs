@@ -7627,7 +7627,9 @@ namespace QuestTree.UI
             // the merge rule: a tile with little on this floor is one chunk, not one per cell - per size class, so a small
             // prop's chunk is never merged into one that is always drawn. The roofs and sides keep their ordinary chunks as
             // they were and fold only their small-class ones (opt B), so the size split adds at most a chunk or two per list
-            // where little is small, and never more than two per (destination, cell).
+            // where little is small. Per (destination, cell) it makes one SINK per size class: two for a roof (never a small
+            // prop), three for a side, an atlas tile or a wall tint (normal, small building, small prop). A sink is not one
+            // chunk: the vertex-cap Flush() in PrepareBuildings and PrepareWalls can cut a full sink into several.
             var total = data.Ground.Count + data.RoofsElsewhere.Count;
 
             data.ChunksSplit = total;
