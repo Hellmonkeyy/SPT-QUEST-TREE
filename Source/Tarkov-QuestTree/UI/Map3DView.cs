@@ -6370,7 +6370,10 @@ namespace QuestTree.UI
                     // HQ S3.11: a tile on an alpha page keeps its alpha - RGBA32, compressed to DXT5
                     var alpha = AlphaPage(tile.Page);
 
-                    texture = new Texture2D(tile.W, tile.H, alpha ? TextureFormat.RGBA32 : TextureFormat.RGB24, mipChain: true)
+                    // 2026-10-03: full chain (-1) and ignoreMipmapLimit from the start - never one mip short under a
+                    // texture-quality or SD-mode mip limit: a DXT tile's halved side is no longer whole 4x4 blocks
+                    // (868 -> 434) and D3D11 refuses it (E_INVALIDARG)
+                    texture = new Texture2D(tile.W, tile.H, alpha ? TextureFormat.RGBA32 : TextureFormat.RGB24, -1, false, false, true, null)
                     {
                         name = $"QuestTreeMap3D-tile{index}",
                         wrapMode = TextureWrapMode.Repeat,
@@ -9715,12 +9718,12 @@ namespace QuestTree.UI
                         "({3:0.0} %), {4:#,##0} of {5:#,##0} draw call(s) in view (Unity culls the rest); chunks on a {6} m grid " +
                         "{7:#,##0} split, {8:#,##0} after merging tiles/tints under {9:#,##0} vertices; relief {10:#,##0} -> {11:#,##0} " +
                         "triangles (simplified within {12} m); {13:#,##0} small-prop draw(s) hidden under {14} px; {15:#,##0} small-building " +
-                        "draw(s) without a shadow (small buildings cast shadows: {16}).",
+                        "draw(s) without a shadow (small buildings cast shadows: {16}); {17}.",
                         _mapKey, _viewTrianglesIn, _viewTriangles,
                         _viewTriangles > 0 ? 100d * _viewTrianglesIn / _viewTriangles : 0d,
                         _viewDrawsIn, _drawCalls, SpatialChunkMetres, split, merged, CellSplitMinVertices,
                         reliefFull, reliefDrawn, ReliefSimplifyTolerance, _smallHidden, SmallPropMinPixels, _shadowOff,
-                        _smallShadows ? "on" : "off"));
+                        _smallShadows ? "on" : "off", VramProbe.Text()));
                 }
 
                 // Spot-sun stage B's proof, after the real frame is in the view's texture (the check renders into a

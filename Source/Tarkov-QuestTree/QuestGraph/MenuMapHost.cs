@@ -911,7 +911,7 @@ namespace QuestTree.QuestGraph
                     {
                         ctx.Before = MenuState.Take();
                         Log($"baseline: {ctx.Before.Describe()}");
-                        Log($"baseline memory: {Memory()}");
+                        Log($"baseline memory: {Memory()}; {VramProbe.Text()}");
                     });
 
                     SetPhase("reading the map's scene list");
@@ -1311,13 +1311,21 @@ namespace QuestTree.QuestGraph
             }
 
             yield return Tick();
-            Log($"after the unloads: {Memory()}");
+            Log($"after the unloads: {Memory()}; {VramProbe.Text()}");
 
             if (RaidStarting())
             {
                 // A raid is loading: its first scene loads Single and takes ours with it, and a sweep or a restore now would
                 // land on the raid's own state (its LevelSettings writes the same RenderSettings).
                 ctx.Trouble.Add("a raid started loading during the run - the asset sweep and the restore were skipped");
+
+                // ...but not the texture mip limit, a user setting the raid does not re-apply (see MenuState.MipLimit)
+                if (ctx.Before != null)
+                {
+                    var put = new List<string>();
+                    Try("restoring the texture mip limit", () => ctx.Before.RestoreMipLimit(put));
+                    if (put.Count > 0) Log($"restore: put back {put[0]} (the rest skipped for the raid).");
+                }
             }
             else
             {
@@ -1333,7 +1341,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 Try("the garbage collection", () => MapCapture.CollectGarbage("after the menu map host", force: true));
-                Log($"after UnloadUnusedAssets ({clock.ElapsedMilliseconds} ms) and a collection: {Memory()}");
+                Log($"after UnloadUnusedAssets ({clock.ElapsedMilliseconds} ms) and a collection: {Memory()}; {VramProbe.Text()}");
             }
 
             if (ctx.Before != null && !RaidStarting())
@@ -1372,6 +1380,18 @@ namespace QuestTree.QuestGraph
             var ctx = _current;
 
             DisposeWork(ctx);
+
+            // 2026-10-03: the texture mip limit, which nothing else on this path puts back (see MenuState.MipLimit)
+            try
+            {
+                var restored = new List<string>();
+                ctx?.Before?.RestoreMipLimit(restored);
+                if (restored.Count > 0) Log($"emergency unload: put back {restored[0]}.");
+            }
+            catch (Exception ex)
+            {
+                Log($"emergency unload: the texture mip limit could not be put back ({ex.GetType().Name}: {ex.Message}).");
+            }
 
             try
             {
@@ -2613,6 +2633,15 @@ namespace QuestTree.QuestGraph
             internal float ShadowDistance;
             internal float ControllerBudget;
             internal int ControllerReduction;
+
+            /// <summary>2026-10-03: the global texture mip limit and EFT's SD-mode flag. EFT's SDModeController.Awake (a scene
+            /// component - Streets', by its setting's name; unconfirmed) raises the limit by one when SD mode is on and mip
+            /// streaming off, and only a raid's end (TarkovApplication) puts it back. Something raised it during the
+            /// 2026-10-03 menu run: every DXT texture made afterwards came out one mip short, and one whose halved side was no
+            /// longer whole 4x4 blocks (7812 -> 3906) was refused by D3D11 (E_INVALIDARG, 1,584 lines) until the 3D view
+            /// crashed.</summary>
+            internal int MipLimit;
+            internal bool SdRuntime;
             internal SphericalHarmonicsL2 AmbientProbe;
             internal EnvironmentManagerBase Environment;
 
@@ -2650,6 +2679,8 @@ namespace QuestTree.QuestGraph
                     ShadowDistance = QualitySettings.shadowDistance,
                     ControllerBudget = GraphicsSettingsController.MipStreamingMemoryBudget,
                     ControllerReduction = GraphicsSettingsController.StreamingMipmapsMaxLevelReduction,
+                    MipLimit = QualitySettings.globalTextureMipmapLimit,
+                    SdRuntime = GraphicsSettingsController.ApplySDModeOnRuntime,
                     AmbientProbe = RenderSettings.ambientProbe,
                     Environment = EnvironmentManagerBase.Instance,
                     DirectionLightShadow = Shader.GetGlobalFloat("_DirectionLightShadow"),
@@ -2686,7 +2717,24 @@ namespace QuestTree.QuestGraph
                 $"{(GameWorld ? "SET" : "not set")}; lightmaps {Lightmaps}; NavMesh vertices {NavVertices}; terrains {Terrains}; " +
                 $"ambient {AmbientMode}, fog {Fog}, skybox '{(Skybox != null ? Skybox.name : "none")}', sun '{(Sun != null ? Sun.name : "none")}'; " +
                 $"streaming budget {F(StreamingBudget)} MB / reduction {StreamingReduction} (controller {F(ControllerBudget)}/{ControllerReduction}); " +
+                $"texture mip limit {MipLimit}{(SdRuntime ? " (SD mode on)" : "")}; " +
                 $"shadow distance {F(ShadowDistance)}; EnvironmentManager {(Environment != null ? "'" + Environment.name + "'" : "none")}.";
+
+            /// <summary>2026-10-03: SD mode's raised mip limit (see <see cref="MipLimit"/>) and its flag put back - the flag first,
+            /// since GraphicsSettingsGroup adds one for it whenever the texture quality is next applied. Its own method so the
+            /// paths that skip <see cref="Restore"/> (a raid starting, an emergency unload) still run it: a limit left raised
+            /// would be the next run's clean-looking baseline.</summary>
+            /// <param name="restored">Where to say what was put back, or null.</param>
+            internal void RestoreMipLimit(List<string> restored)
+            {
+                var limit = QualitySettings.globalTextureMipmapLimit;
+                var sd = GraphicsSettingsController.ApplySDModeOnRuntime;
+                if (limit == MipLimit && sd == SdRuntime) return;
+
+                GraphicsSettingsController.ApplySDModeOnRuntime = SdRuntime;
+                QualitySettings.globalTextureMipmapLimit = MipLimit;
+                restored?.Add($"texture mip limit {limit}{(sd ? " SD" : "")} -> {MipLimit}{(SdRuntime ? " SD" : "")}");
+            }
 
             internal IEnumerable<string> Differences(MenuState now)
             {
@@ -2716,6 +2764,8 @@ namespace QuestTree.QuestGraph
                 if (now.ShadowDistance != ShadowDistance) yield return $"shadow distance {F(ShadowDistance)} -> {F(now.ShadowDistance)}";
                 if (now.ControllerBudget != ControllerBudget || now.ControllerReduction != ControllerReduction)
                     yield return "GraphicsSettingsController's streaming statics";
+                if (now.MipLimit != MipLimit || now.SdRuntime != SdRuntime)
+                    yield return $"texture mip limit {MipLimit}{(SdRuntime ? " SD" : "")} -> {now.MipLimit}{(now.SdRuntime ? " SD" : "")}";
                 if (now.AmbientProbe != AmbientProbe) yield return "RenderSettings.ambientProbe";
                 if (!ReferenceEquals(now.Environment, Environment)) yield return "EnvironmentManagerBase._instance";
             }
@@ -2793,6 +2843,8 @@ namespace QuestTree.QuestGraph
                     GraphicsSettingsController.StreamingMipmapsMaxLevelReduction = ControllerReduction;
                     restored.Add("GraphicsSettingsController's streaming statics");
                 }
+
+                RestoreMipLimit(restored);
 
                 if (now.AmbientProbe != AmbientProbe)
                 {

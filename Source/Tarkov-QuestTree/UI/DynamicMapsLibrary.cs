@@ -1388,7 +1388,10 @@ namespace QuestTree.UI
 
                 // RGBA32, not RGB24: see the remarks. LoadImage picks the file's own format, and
                 // this is the one that cannot discard alpha if it ever does not.
-                texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: layer.Mipmapped);
+                // 2026-10-03: ignoreMipmapLimit from the start - never one mip short under a texture-quality or SD-mode mip
+                // limit: a DXT picture's halved side need not be whole 4x4 blocks (7812 -> 3906) and D3D11 refuses it
+                // (E_INVALIDARG). mipCount -1 is the full chain, as mipChain: true.
+                texture = new Texture2D(2, 2, TextureFormat.RGBA32, layer.Mipmapped ? -1 : 1, false, false, true, null);
 
                 // Readable for now: Compress works on the CPU copy. The Apply below drops it.
                 if (!texture.LoadImage(bytes, markNonReadable: false))
@@ -1429,7 +1432,9 @@ namespace QuestTree.UI
 
                 // Every path ends here: no mip rebuild (LoadImage made the chain, Compress kept it) and
                 // makeNoLongerReadable, which frees the CPU copy - as large as the texture was before it
-                // was compressed, and nothing reads it (see the remarks).
+                // was compressed, and nothing reads it (see the remarks). The mip-limit opt-out again only if
+                // LoadImage's re-initialisation dropped it (setting it re-uploads).
+                if (!texture.ignoreMipmapLimit) texture.ignoreMipmapLimit = true;
                 texture.Apply(false, true);
 
                 // Floors and sides alike: trilinear + 4x anisotropy is what keeps a grazing wall, or a whole
