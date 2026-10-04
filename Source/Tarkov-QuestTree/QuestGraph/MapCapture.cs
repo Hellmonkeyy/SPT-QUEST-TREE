@@ -423,6 +423,28 @@ namespace QuestTree.QuestGraph
         /// as a soft vignette rather than as a drawn line somebody might mistake for a wall.</summary>
         private const float ReachRampMetres = 6f;
 
+        /// <summary>Rollback for the reach discs: false marks the walkable mask from NavMesh triangles alone, as
+        /// before. See <see cref="MarkReachDiscs"/>.
+        ///
+        /// Why they exist: the VANILLA NavMesh does not reach every place a player spawns. Interchange's ends at
+        /// z 280.3 while 10 of its spawn markers stand at z 333..385, and Streets has the same pattern (36 of 503).
+        /// DrakiaXYZ-Waypoints' NavMesh reaches them - a raid with Waypoints runs on it, and the menu host loads it too
+        /// when it is installed - so with it the discs add almost nothing (their log line says how much), and without
+        /// it they are the fallback: MapExtentProbe grows the extent to hold such markers, and a mask from triangles
+        /// alone would leave the strip it grew into transparent.
+        ///
+        /// Spawn markers only, not exfiltration points (review): an exit is often a road or a gate leading OFF the map,
+        /// past the walkable world, and a 40 m disc there redraws exactly the hillside the mask exists to remove. A
+        /// spawn marker is by definition where a player stands inside the map.</summary>
+        private static readonly bool ReachDiscs = true;
+
+        /// <summary>Radius, in metres, of the ground a spawn marker makes reachable: the mask is
+        /// fully opaque out to this distance and fades over <see cref="ReachRampMetres"/> past it, the same ramp the
+        /// NavMesh edge gets. Forty metres: a player who spawns somewhere sees and walks the yard around it, and the
+        /// furthest Interchange marker lies 105 m past the NavMesh, so a smaller disc would draw islands rather than
+        /// the strip.</summary>
+        private const float ReachDiscMetres = 40f;
+
         /// <summary>What the mask DOES to a pixel outside the walkable area: nothing at all is drawn
         /// there. The weight becomes the picture's ALPHA - 255 inside, falling to 0 over the ramp - so the
         /// out-of-bounds skirt is transparent and the Maps tab shows its own backdrop through it.
@@ -8569,10 +8591,51 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
-                Sweep(distance, cellsX, cellsZ);
-
                 var inside = Math.Max(1, (int)Math.Round(ReachDilateMetres / ReachCellMetres));
                 var ramp = Math.Max(1, (int)Math.Round(ReachRampMetres / ReachCellMetres));
+
+                // The reach discs go in AFTER the "no triangle on this band" returns above, on purpose: a disc never
+                // makes a band walkable that has no NavMesh of its own. Such a band's mask is empty here and
+                // StoredPicture.BuildMask falls back to the all-storey mask, which carries every disc - so a marker on
+                // a band with no NavMesh is never dropped; it lands in the all-storey fallback, as that band's own
+                // triangles would have.
+                int[] before = null;
+                var discs = 0;
+                if (ReachDiscs)
+                {
+                    before = (int[])distance.Clone();
+                    discs = MarkReachDiscs(plan, distance, cellsX, cellsZ, fromY, untilY, inside);
+                    if (discs == 0) before = null;
+                }
+
+                Sweep(distance, cellsX, cellsZ);
+
+                // Cells the discs newly reached: outside the triangles' own fade (weight 0 from triangles alone) and
+                // inside the final mask. Measured by sweeping the triangles-only field as well - two passes over a
+                // grid of a few hundred thousand cells, and only when a disc was added at all.
+                var newlyReached = 0;
+                if (before != null)
+                {
+                    Sweep(before, cellsX, cellsZ);
+                    for (var i = 0; i < distance.Length; i++)
+                    {
+                        if (before[i] - inside >= ramp && distance[i] - inside < ramp) newlyReached++;
+                    }
+
+                    var banded = fromY > float.NegativeInfinity || untilY < float.PositiveInfinity;
+                    var line =
+                        $"QuestTree: {plan.Key}'s walkable mask{(banded ? $" (band y {F(fromY)}..{F(untilY)})" : "")}: " +
+                        $"{discs} reach disc(s) of {F(ReachDiscMetres)} m around spawn markers, " +
+                        $"{newlyReached} cell(s) of {F(ReachCellMetres)} m newly reached past the NavMesh" +
+                        (newlyReached > 0 ? " - the NavMesh in use does not reach every spawn marker." : ".");
+
+                    // At Info only when the discs actually reached something - the fallback firing, which with
+                    // Waypoints' NavMesh loaded should be rare and is worth seeing - and for the capture's own mask;
+                    // the stored set's per-band masks and a no-op stay at Debug, so a resume does not print one line
+                    // per floor.
+                    if (banded || newlyReached == 0) Plugin.LogSource?.LogDebug(line);
+                    else Plugin.LogSource?.LogInfo(line);
+                }
 
                 var reach = new byte[distance.Length];
                 var dimmed = 0;
@@ -8613,6 +8676,87 @@ namespace QuestTree.QuestGraph
                     $"({ex.GetType().Name}: {ex.Message}) - the whole picture is drawn as reachable.");
                 return null;
             }
+        }
+
+        /// <summary>Seeds the distance field with a disc around every spawn marker that lies inside
+        /// the extent and on this mask's band, and returns how many discs went in.
+        ///
+        /// The band rule is the NavMesh triangles' own, on the point's height instead of a triangle's mean: a point
+        /// counts when fromY &lt;= y &lt; untilY, so a stored set's per-band mask (StoredPicture.BuildMask, the same
+        /// slack included) takes exactly the markers standing at that band's height, and the capture's own mask (no
+        /// band) takes them all. Markers never make a FLOOR: the floors come from MapExtentProbe's NavMesh histogram
+        /// alone, and a disc only adds reach to a band that already has one.
+        ///
+        /// The disc is seeded at radius <see cref="ReachDiscMetres"/> less the dilation <paramref name="inside"/> adds
+        /// to every seeded cell, so after the sweep it is opaque to <see cref="ReachDiscMetres"/> and fades over the
+        /// same <see cref="ReachRampMetres"/> as the NavMesh edge. Marking only ever sets cells to 0, so a disc adds
+        /// reach and never takes any away; the reached cells are then like any other - their alpha, the menu's step 0
+        /// and a raid's closer-stand merge all read only the finished mask.</summary>
+        /// <param name="plan">The capture's plan, for the extent.</param>
+        /// <param name="distance">The distance field being seeded.</param>
+        /// <param name="cellsX">Grid width.</param>
+        /// <param name="cellsZ">Grid height.</param>
+        /// <param name="fromY">The band's lowest height, as BuildReach takes it.</param>
+        /// <param name="untilY">The height the band stops below.</param>
+        /// <param name="inside">The dilation in cells the sweep's weight adds to every seeded cell.</param>
+        private static int MarkReachDiscs(
+            Plan plan, int[] distance, int cellsX, int cellsZ, float fromY, float untilY, int inside)
+        {
+            var points = new List<Vector3>();
+
+            try
+            {
+                foreach (var marker in All<EFT.Game.Spawning.SpawnPointMarker>())
+                {
+                    if (marker != null) points.Add(marker.transform.position);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the spawn markers for {plan.Key}'s reach discs could not be read ({ex.Message}).");
+            }
+
+            // No exfiltration points - see ReachDiscs for why.
+
+            var radiusCells = Math.Max(0d, ReachDiscMetres / ReachCellMetres - inside);
+            var span = (int)Math.Ceiling(radiusCells);
+            var radiusSquared = radiusCells * radiusCells;
+            var discs = 0;
+
+            foreach (var p in points)
+            {
+                if (float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsNaN(p.z) ||
+                    float.IsInfinity(p.x) || float.IsInfinity(p.y) || float.IsInfinity(p.z)) continue;
+
+                // The triangles' band test, word for word (BuildReach).
+                if (p.y < fromY || p.y >= untilY) continue;
+
+                // Inside the final extent only: a point off the picture would mark nothing anybody sees, and a
+                // stray far marker - one MapExtentProbe declined to grow to - must not mark the border either.
+                if (p.x < plan.Extent.MinX || p.x > plan.Extent.MaxX || p.z < plan.Extent.MinZ || p.z > plan.Extent.MaxZ)
+                    continue;
+
+                // The point's position in cell units, so the test below is against cell centres.
+                var cx = (p.x - plan.Extent.MinX) / ReachCellMetres;
+                var cz = (p.z - plan.Extent.MinZ) / ReachCellMetres;
+                var centreX = (int)Math.Floor(cx);
+                var centreZ = (int)Math.Floor(cz);
+
+                for (var z = Math.Max(0, centreZ - span); z <= Math.Min(cellsZ - 1, centreZ + span); z++)
+                {
+                    var dz = z + 0.5d - cz;
+
+                    for (var x = Math.Max(0, centreX - span); x <= Math.Min(cellsX - 1, centreX + span); x++)
+                    {
+                        var dx = x + 0.5d - cx;
+                        if (dx * dx + dz * dz <= radiusSquared) distance[z * cellsX + x] = 0;
+                    }
+                }
+
+                discs++;
+            }
+
+            return discs;
         }
 
         /// <summary>Marks every cell whose centre falls inside one NavMesh triangle, projected onto XZ.

@@ -136,27 +136,37 @@ namespace QuestTree.QuestGraph
         /// <summary>Rollback for <see cref="GrowToPoints"/>: false measures exactly as before it -
         /// the chosen source's box, padded, and nothing else.
         ///
-        /// Why it exists: the menu capture (MenuMapHost) loads a map's scenes in the main menu, and
-        /// there the NavMesh can come out SMALLER than in a raid. Interchange measured 329k NavMesh
-        /// vertices and 915x773 m padded in the menu against 382k and 965x925 m in a raid, with 10
-        /// of its 253 spawn point markers outside the menu rectangle (4.0 %) - every one of them a
-        /// place a player spawns, so walkable ground the menu's NavMesh simply did not carry. The
-        /// rectangle was right where it had data and short where it had none; the points it missed
-        /// were 30-96 m past its padded edge. Growing the box to hold such points is what the pad
-        /// would have done had the mesh been whole.</summary>
-        internal static readonly bool GrowToContainmentPoints = false;   // held off until the NavMesh diagnostics explain the menu gap
+        /// Why it exists: the VANILLA NavMesh of some maps does not reach all their player spawn
+        /// markers. Interchange's (329,031 vertices, all from Shopping_Mall_AI, the same with every one
+        /// of its 18 scenes loaded) ends at z 280.3, while 10 of its 253 spawn markers - all from
+        /// Shopping_Mall_DesignMain, y about 22 m, x 162..280, z 333..385 - lie 24-77 m past the
+        /// padded north edge: 4.0 %, over the 2 % bar. Streets is the same pattern, 36 of 503 (7.2 %).
+        /// The NavMesh DrakiaXYZ-Waypoints swaps in when a raid starts does reach them, which is why raid
+        /// sets measured on it passed; the menu host loads that mesh too when Waypoints is installed
+        /// (MenuMapHost.InjectWaypointsNavMesh), so this growth is the fallback for a game without it, and
+        /// a safety net - logged whenever it fires - with it. A player spawns there, so it is map, and the
+        /// rectangle has to hold it.</summary>
+        internal static readonly bool GrowToContainmentPoints = true;
 
         /// <summary>How far past the PADDED rectangle a zone or spawn point may lie and still be grown
         /// to. Further out it is not a short NavMesh but a stray marker (a dev spawn at the origin of
         /// another map, a point parked under the world) - it is left out, still counts as outside, and
         /// the containment check judges the rectangle as it always did. Interchange's misses were at
-        /// most 96 m out; Customs, Factory and Labs had none.</summary>
+        /// most 77 m out, Streets' about 47-60 m (estimated from the server's spawn table); Customs,
+        /// Factory and Labs had none. This bound, applied per point, is what keeps a bogus far marker
+        /// from dragging the box.</summary>
         private const float MaxGrowMetres = 150f;
 
-        /// <summary>The most one axis of the measured box may grow, as a fraction of its own length.
-        /// A box that would have to grow more than this to hold the points is not short, it is wrong,
-        /// and is left for the containment check to reject. Interchange needed at most about 18 %.</summary>
-        private const float MaxGrowFraction = 0.25f;
+        /// <summary>The most one axis of the measured box may grow, as a fraction of its own length -
+        /// the backstop for a box that is not short but wrong, left for the containment check to
+        /// reject. 40 % is an ESTIMATE, never measured on Streets: Interchange's vanilla NavMesh grows
+        /// 14.7 % in z (280.3 to 385.5 on a 715.5 m axis, measured), and Streets' needs about 25.2 % by
+        /// the server's spawn table used as a stand-in for its scene markers (z span about 681 m against
+        /// a box of about 544 m, markers past both ends) - just over the 25 % first written. 40 % leaves
+        /// it room while still refusing a box under about 70 % of the axis its points span. The fraction
+        /// actually applied is in the growth's log line, so the first real Streets run says how close
+        /// the estimate was.</summary>
+        private const float MaxGrowFraction = 0.40f;
 
         /// <summary>The share of the harvest's TRIGGERS alone the rectangle must contain, which is
         /// the server's ZoneStore.MinTriggerCoverage and has to be checked here as well.
@@ -189,6 +199,27 @@ namespace QuestTree.QuestGraph
         private static string _lastTriangulationMap;
 
         private static NavMeshTriangulation _lastTriangulation;
+
+        /// <summary>Drops both memos - the extent and the triangulation - so the next ask measures the
+        /// scene afresh. For the one place where "a map's NavMesh is the same geometry every time it
+        /// loads" is false: the menu host, whose NavMesh is the vanilla one or DrakiaXYZ-Waypoints' as it
+        /// chooses, and differs from the raid's whenever Waypoints is installed but could not be loaded in
+        /// the menu. It forgets when its NavMesh is in place (so a capture measures that one, not a memo of
+        /// an earlier run or raid) and again when it is taken down (so a raid after it measures its own).
+        /// Never throws.</summary>
+        /// <param name="why">For the log line.</param>
+        internal static void Forget(string why)
+        {
+            var had = _lastMap ?? _lastTriangulationMap;
+
+            _lastMap = null;
+            _lastExtent = null;
+            _lastTriangulationMap = null;
+            _lastTriangulation = default;
+
+            if (had != null)
+                Plugin.LogSource?.LogDebug($"QuestTree: the extent and NavMesh memos of {had} are forgotten ({why}).");
+        }
 
         /// <summary>The extent a capture of <paramref name="map"/> must be drawn to: the very one the
         /// harvest sent, when this raid has already measured it, and a fresh measurement otherwise.
@@ -513,9 +544,10 @@ namespace QuestTree.QuestGraph
         /// It grows ONLY when the padded box would fail the containment check (over
         /// <see cref="MaxOutsideShare"/> outside). A box that passes is never touched, so no map that
         /// measured fine before this existed - in a raid or in the menu - gets a different rectangle.
-        /// It runs the same way in a raid and in the menu: nothing here asks which one it is in, the
-        /// menu is simply where a short NavMesh has been seen (Interchange, see
-        /// <see cref="GrowToContainmentPoints"/>).
+        /// It runs the same way in a raid and in the menu: nothing here asks which one it is in. The
+        /// maps that need it have spawn markers the game's NavMesh does not reach (Interchange and
+        /// Streets, see <see cref="GrowToContainmentPoints"/>); the capture's walkable mask reaches
+        /// them through MapCapture's reach discs.
         ///
         /// What it will not do, so the check still fails for a real failure:
         ///   - grow to a point more than <see cref="MaxGrowMetres"/> past the padded rectangle. That
@@ -587,7 +619,9 @@ namespace QuestTree.QuestGraph
                 $"QuestTree: {map}'s {box.Source} box left {outside} of {points.Count} zones and spawn points outside " +
                 $"its padded rectangle; grown by west {F(box.MinX - grown.MinX)}, east {F(grown.MaxX - box.MaxX)}, " +
                 $"south {F(box.MinZ - grown.MinZ)}, north {F(grown.MaxZ - box.MaxZ)} m to hold {near} of them " +
-                $"(furthest {F(furthest)} m past the pad); {far} further than {F(MaxGrowMetres)} m left out.");
+                $"(furthest {F(furthest)} m past the pad) - x {Percent(lengthX > 0f ? growX / lengthX : 0f)} %, " +
+                $"z {Percent(lengthZ > 0f ? growZ / lengthZ : 0f)} % of the axis, against the estimated " +
+                $"{Percent(MaxGrowFraction)} % cap; {far} further than {F(MaxGrowMetres)} m left out.");
 
             return grown;
         }

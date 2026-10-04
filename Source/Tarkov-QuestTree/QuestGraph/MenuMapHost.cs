@@ -695,6 +695,16 @@ namespace QuestTree.QuestGraph
 
             /// <summary>The caller's work while it runs, innermost on top - disposed top first on every exit.</summary>
             internal readonly Stack<IEnumerator> Work = new Stack<IEnumerator>();
+
+            /// <summary>DrakiaXYZ-Waypoints' NavMesh while it is loaded (<see cref="InjectWaypointsNavMesh"/>): the bundle,
+            /// held open until <see cref="RemoveWaypointsNavMesh"/> unloads it with its objects, and the instance that put
+            /// its NavMeshData into the NavMesh. Null and default when the game's own NavMesh is in use.</summary>
+            internal UnityEngine.Object WaypointsBundle;
+
+            internal NavMeshDataInstance WaypointsInstance;
+
+            /// <summary>Which NavMesh the run measures on, for the log: Waypoints' bundle file, or null for the game's.</summary>
+            internal string WaypointsSource;
         }
 
         /// <summary>The run in progress, for the sceneLoaded handler and an emergency unload when its coroutine dies.</summary>
@@ -958,6 +968,11 @@ namespace QuestTree.QuestGraph
                     EmergencyUnload("the run ended early");
                 }
 
+                // A no-op after UnloadAll or EmergencyUnload took it down; here for any path that reached neither. The
+                // memos go whatever NavMesh was used, so a raid after this run measures its own.
+                RemoveWaypointsNavMesh(ctx, "the run's end");
+                try { MapExtentProbe.Forget("the menu host's run ended"); } catch (Exception) { }
+
                 try
                 {
                     SceneManager.sceneLoaded -= OnSceneLoaded;
@@ -1125,6 +1140,19 @@ namespace QuestTree.QuestGraph
                     force: KeptSceneSuffixes.Any(s => entry.Name.EndsWith(s, StringComparison.OrdinalIgnoreCase))));
             }
 
+            // The NavMesh a raid would have, before anything measures the extent, the floors or the reach: Waypoints'
+            // when it is installed and has a bundle for this location (a raid swaps it in at BotsController.Init), the
+            // scenes' own otherwise. Then the probe's memos are dropped, so the capture measures THIS mesh and not one
+            // memoised by an earlier run or raid.
+            if (ctx.Refusal == null && ctx.Abort == null && measured.Count > 0)
+            {
+                Try("loading DrakiaXYZ-Waypoints' NavMesh", () => InjectWaypointsNavMesh(ctx));
+                Try("noting the NavMesh source", () => nav.Source(ctx.WaypointsSource != null
+                    ? $"DrakiaXYZ-Waypoints' '{ctx.WaypointsSource}' (in place of the scenes' own, as a raid with Waypoints has it)"
+                    : "the game's own, from the hosted scenes"));
+                Try("forgetting the extent memos", () => MapExtentProbe.Forget("the menu host's NavMesh is in place"));
+            }
+
             Try("the NavMesh sampling summary", () => nav.Summary());
 
             if (ctx.Refusal != null) Log($"{ctx.LocationId}: STOPPED LOADING - refused: {ctx.Refusal}.");
@@ -1225,6 +1253,10 @@ namespace QuestTree.QuestGraph
         /// probe does. Anything unproven lands in the run's trouble.</summary>
         internal static IEnumerator UnloadAll(RunContext ctx)
         {
+            // First, before any scene goes: every exit that unloads - the normal end, a refusal, the cancel, a raid
+            // starting - comes through here, and a raid's own Waypoints injection must find the bundle file free.
+            RemoveWaypointsNavMesh(ctx, "the unload");
+
             foreach (var pair in ctx.Operations.ToList())
             {
                 var load = pair.Value;
@@ -1380,6 +1412,8 @@ namespace QuestTree.QuestGraph
             var ctx = _current;
 
             DisposeWork(ctx);
+
+            RemoveWaypointsNavMesh(ctx, "the emergency unload");
 
             // 2026-10-03: the texture mip limit, which nothing else on this path puts back (see MenuState.MipLimit)
             try
@@ -2436,6 +2470,236 @@ namespace QuestTree.QuestGraph
             Log($"{label} memory: before {memBefore}; after {Memory()}. (measured in {clock.ElapsedMilliseconds} ms)");
         }
 
+        // --- DrakiaXYZ-Waypoints' NavMesh --------------------------------------------------------------------------------
+
+        /// <summary>Rollback: false never loads DrakiaXYZ-Waypoints' NavMesh in the menu, and the run measures on the
+        /// scenes' own (vanilla) NavMesh, with MapExtentProbe's growth and MapCapture's reach discs as the fallback.</summary>
+        internal static readonly bool LoadWaypointsNavMesh = true;
+
+        /// <summary>DrakiaXYZ-Waypoints' BepInPlugin GUID (WaypointsPlugin, 1.9.0).</summary>
+        private const string WaypointsGuid = "xyz.drakia.waypoints";
+
+        /// <summary>
+        /// Puts DrakiaXYZ-Waypoints' NavMesh for this location in place of the hosted scenes' own, exactly as Waypoints does
+        /// in a raid, so a menu capture measures its extent, floors and reach on the mesh a raid set was measured on.
+        ///
+        /// What Waypoints does (1.9.0, decompiled, read-only): WaypointPatch is a prefix on BotsController.Init; when its
+        /// setting General.EnableCustomNavmesh is on (default true) it calls InjectNavmesh(GameWorld), which takes
+        /// <c>gameWorld.LocationId.ToLower()</c>, maps a name that StartsWith "factory4" to "factory4" and one that
+        /// StartsWith "sandbox" to "sandbox", looks for <c>&lt;name&gt;-navmesh.bundle</c> in
+        /// <c>WaypointsPlugin.NavMeshFolder</c> (its DLL's folder + "navmesh") and does nothing when the file is missing;
+        /// otherwise <c>AssetBundle.LoadFromFile</c>, the FIRST asset of <c>LoadAllAssets(typeof(NavMeshData))</c>,
+        /// <c>NavMesh.RemoveAllNavMeshData()</c>, <c>NavMesh.AddNavMeshData(data)</c>, <c>bundle.Unload(false)</c>.
+        /// InjectNavmesh is private and wants a GameWorld, which the menu has none of, so its path rule is MIRRORED here
+        /// (<see cref="WaypointsBundlePath"/>) - the two name rewrites are Waypoints' rule, not one of ours - while its
+        /// folder is read from its own static field and its setting from its own config entry.
+        ///
+        /// Two differences, both for the menu: RemoveAllNavMeshData runs only when the menu's baseline NavMesh was 0
+        /// vertices - then every NavMesh instance there is belongs to the hosted scenes, which are about to be unloaded
+        /// anyway (Unity offers no handle to remove a scene's baked instance alone) - and the bundle stays open, to be
+        /// unloaded WITH its objects by <see cref="RemoveWaypointsNavMesh"/> once the instance is removed, so nothing of
+        /// it outlives the run. A run without Waypoints, with the setting off, or with no bundle for the location measures
+        /// on the scenes' own NavMesh, said in one line. Never throws past its caller's Try.
+        /// </summary>
+        private static void InjectWaypointsNavMesh(RunContext ctx)
+        {
+            if (!LoadWaypointsNavMesh)
+            {
+                Log("NavMesh: loading DrakiaXYZ-Waypoints' NavMesh is switched off (LoadWaypointsNavMesh) - the game's own is used.");
+                return;
+            }
+
+            var key = LocationKey(ctx.LocationId, out var why);
+            var path = key == null ? null : WaypointsBundlePath(key, out why);
+            if (path == null)
+            {
+                Log($"NavMesh: no DrakiaXYZ-Waypoints NavMesh for '{ctx.LocationId}' - {why}; the game's own is used.");
+                return;
+            }
+
+            var baseline = ctx.Before?.NavVertices ?? -1;
+            if (baseline != 0)
+            {
+                Log($"NavMesh: DrakiaXYZ-Waypoints has '{path}', but the menu's own NavMesh was {baseline} vertices before " +
+                    "loading (not 0), so removing every NavMesh would take one that is not the hosted scenes' - the game's own is used.");
+                return;
+            }
+
+            var clock = Stopwatch.StartNew();
+            var bundle = BundleLoad(path);
+            if (bundle == null)
+            {
+                Log($"NavMesh: DrakiaXYZ-Waypoints' '{path}' did not load as an asset bundle - the game's own NavMesh is used.");
+                return;
+            }
+
+            NavMeshData data = null;
+            try
+            {
+                var assets = BundleAssets(bundle, typeof(NavMeshData));
+                data = assets != null && assets.Length > 0 ? assets[0] as NavMeshData : null;
+            }
+            catch (Exception ex)
+            {
+                Log($"NavMesh: reading DrakiaXYZ-Waypoints' '{path}' threw {ex.GetType().Name}: {ex.Message}.");
+            }
+
+            if (data == null)
+            {
+                Log($"NavMesh: DrakiaXYZ-Waypoints' '{path}' holds no NavMeshData as its first export - the game's own NavMesh is used.");
+                try { BundleUnload(bundle); } catch (Exception) { }
+                return;
+            }
+
+            // Held by the run BEFORE the NavMesh calls, so a throw below still leaves RemoveWaypointsNavMesh a bundle to
+            // unload - one left open would make a later raid's own Waypoints LoadFromFile of the same file fail.
+            ctx.WaypointsBundle = bundle;
+
+            // From here the scenes' own NavMesh is gone, as it is in a raid with Waypoints.
+            NavMesh.RemoveAllNavMeshData();
+            var instance = NavMesh.AddNavMeshData(data);
+
+            ctx.WaypointsInstance = instance;
+
+            if (!instance.valid)
+            {
+                // Rare and not recoverable here: the scenes' instances cannot be put back. The run goes on with no NavMesh
+                // - MapExtentProbe falls back to the terrain or the BorderZones, MapCapture draws everything as reachable.
+                ctx.WaypointsSource = null;
+                Log($"NavMesh: NavMesh.AddNavMeshData refused DrakiaXYZ-Waypoints' '{path}' after the scenes' own was removed - " +
+                    "this run has NO NavMesh; the bundle is unloaded with the scenes.");
+                return;
+            }
+
+            ctx.WaypointsSource = Path.GetFileName(path);
+            Log($"NavMesh: DrakiaXYZ-Waypoints' '{path}' loaded and added in place of the scenes' own in {clock.ElapsedMilliseconds} ms.");
+        }
+
+        /// <summary>
+        /// Waypoints' bundle for <paramref name="locationKey"/> (the location's Id, as GameWorld.LocationId has it), or null
+        /// with the reason: not installed, did not load, setting off, or no file. Waypoints' own rule - see
+        /// <see cref="InjectWaypointsNavMesh"/> - with the same culture-sensitive ToLower and StartsWith it uses.
+        /// </summary>
+        internal static string WaypointsBundlePath(string locationKey, out string why)
+        {
+            why = null;
+
+            if (!BepInEx.Bootstrap.Chainloader.PluginInfos.TryGetValue(WaypointsGuid, out var info) || info == null)
+            {
+                why = "DrakiaXYZ-Waypoints is not installed";
+                return null;
+            }
+
+            var plugin = info.Instance;
+            if (plugin == null)
+            {
+                why = "DrakiaXYZ-Waypoints is installed but did not start (no plugin instance), so a raid does not use it either";
+                return null;
+            }
+
+            // Its own entry; a missing one means Waypoints' default, true.
+            if (plugin.Config != null &&
+                plugin.Config.TryGetEntry<bool>(new BepInEx.Configuration.ConfigDefinition("General", "EnableCustomNavmesh"), out var enabled) &&
+                enabled != null && !enabled.Value)
+            {
+                why = "its General.EnableCustomNavmesh setting is off, so a raid does not use it either";
+                return null;
+            }
+
+            string folder = null;
+            try
+            {
+                folder = plugin.GetType().GetField("NavMeshFolder", BindingFlags.Public | BindingFlags.Static)?.GetValue(null) as string;
+            }
+            catch (Exception)
+            {
+                // Its folder rule below, then.
+            }
+
+            if (string.IsNullOrEmpty(folder))
+            {
+                var dll = info.Location;
+                if (string.IsNullOrEmpty(dll))
+                {
+                    why = "DrakiaXYZ-Waypoints' folder could not be found";
+                    return null;
+                }
+
+                folder = Path.Combine(Path.GetDirectoryName(dll) ?? "", "navmesh");
+            }
+
+            var name = locationKey.ToLower();
+            if (name.StartsWith("factory4")) name = "factory4";
+            if (name.StartsWith("sandbox")) name = "sandbox";
+
+            var path = Path.Combine(folder, name + "-navmesh.bundle");
+            if (!File.Exists(path))
+            {
+                why = $"DrakiaXYZ-Waypoints has no '{name}-navmesh.bundle' in '{folder}', so a raid uses the game's own too";
+                return null;
+            }
+
+            return path;
+        }
+
+        // UnityEngine.AssetBundle lives in UnityEngine.AssetBundleModule, which this project does not reference; the three
+        // calls go through reflection rather than a project change. Each throws on a missing member, inside its caller's
+        // Try or catch, which then falls back to the game's own NavMesh.
+        private static Type _assetBundleType;
+
+        private static Type AssetBundleType =>
+            _assetBundleType ?? (_assetBundleType = Type.GetType("UnityEngine.AssetBundle, UnityEngine.AssetBundleModule", true));
+
+        /// <summary>AssetBundle.LoadFromFile(path) - null when the file does not load as a bundle.</summary>
+        private static UnityEngine.Object BundleLoad(string path) =>
+            AssetBundleType.GetMethod("LoadFromFile", BindingFlags.Public | BindingFlags.Static, null, new[] { typeof(string) }, null)
+                .Invoke(null, new object[] { path }) as UnityEngine.Object;
+
+        /// <summary>bundle.LoadAllAssets(type).</summary>
+        private static UnityEngine.Object[] BundleAssets(UnityEngine.Object bundle, Type type) =>
+            AssetBundleType.GetMethod("LoadAllAssets", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(Type) }, null)
+                .Invoke(bundle, new object[] { type }) as UnityEngine.Object[];
+
+        /// <summary>bundle.Unload(true): the bundle and every object loaded from it.</summary>
+        private static void BundleUnload(UnityEngine.Object bundle) =>
+            AssetBundleType.GetMethod("Unload", BindingFlags.Public | BindingFlags.Instance, null, new[] { typeof(bool) }, null)
+                .Invoke(bundle, new object[] { true });
+
+        /// <summary>Takes Waypoints' NavMesh down: removes its instance, then unloads its bundle WITH its objects, and drops
+        /// the probe's memos of it. Idempotent - every unload path calls it (<see cref="UnloadAll"/> first of all,
+        /// <see cref="EmergencyUnload"/>, and the run's finally), and only the first finds anything. A failure is trouble
+        /// for the run (restart advised), since a NavMesh left in the menu would be measured by the next run. Never
+        /// throws.</summary>
+        private static void RemoveWaypointsNavMesh(RunContext ctx, string when)
+        {
+            if (ctx == null || (ctx.WaypointsBundle == null && !ctx.WaypointsInstance.valid)) return;
+
+            try
+            {
+                if (ctx.WaypointsInstance.valid) ctx.WaypointsInstance.Remove();
+            }
+            catch (Exception ex)
+            {
+                ctx.Trouble.Add($"DrakiaXYZ-Waypoints' NavMesh could not be removed ({ex.GetType().Name}: {ex.Message})");
+            }
+
+            ctx.WaypointsInstance = default;
+
+            try
+            {
+                if (ctx.WaypointsBundle != null) BundleUnload(ctx.WaypointsBundle);
+            }
+            catch (Exception ex)
+            {
+                ctx.Trouble.Add($"DrakiaXYZ-Waypoints' NavMesh bundle could not be unloaded ({ex.GetType().Name}: {ex.Message})");
+            }
+
+            ctx.WaypointsBundle = null;
+
+            try { MapExtentProbe.Forget("DrakiaXYZ-Waypoints' NavMesh was taken down"); } catch (Exception) { }
+            Log($"NavMesh: DrakiaXYZ-Waypoints' '{ctx.WaypointsSource ?? "NavMesh"}' removed and its bundle unloaded ({when}).");
+        }
+
         /// <summary>Diagnostics only: which scenes add NavMesh area. After a scene loads, the NavMesh is triangulated and a
         /// line is logged only when its vertex count or XZ box changed, naming the scene(s) since the last sample.
         ///
@@ -2521,6 +2785,29 @@ namespace QuestTree.QuestGraph
                 _minX = minX; _maxX = maxX; _minZ = minZ; _maxZ = maxZ;
                 _lastSampled = index;
                 _firstUnsampled = null;
+            }
+
+            /// <summary>One line naming the NavMesh the run measures on, with its vertex count and XZ box - always logged, the
+            /// line a reader compares with a raid's. Not counted against <see cref="MaxSamples"/>: it runs once per run.</summary>
+            internal void Source(string source)
+            {
+                var clock = Stopwatch.StartNew();
+                var vertices = NavMesh.CalculateTriangulation().vertices ?? Array.Empty<Vector3>();
+                float minX = float.MaxValue, maxX = float.MinValue, minZ = float.MaxValue, maxZ = float.MinValue;
+                foreach (var v in vertices)
+                {
+                    if (v.x < minX) minX = v.x;
+                    if (v.x > maxX) maxX = v.x;
+                    if (v.z < minZ) minZ = v.z;
+                    if (v.z > maxZ) maxZ = v.z;
+                }
+
+                _bytes += vertices.Length * 12L;
+                Log($"NavMesh source: {source} - {vertices.Length} vertices; " +
+                    (vertices.Length == 0
+                        ? "empty"
+                        : $"xz x {F(minX)}..{F(maxX)} z {F(minZ)}..{F(maxZ)} ({F(maxX - minX)}x{F(maxZ - minZ)} m)") +
+                    $" [{clock.ElapsedMilliseconds} ms].");
             }
 
             internal void Summary() =>
