@@ -3,14 +3,29 @@
 Written by `Source/Tarkov-QuestTree/QuestGraph/SelfTest.cs`. To start it, switch on F12 > Advanced > "Run self-test (main menu)" in the main menu.
 
 - **File:** `<SPT>/BepInEx/plugins/QuestTree/selftest/selftest-<yyyyMMdd-HHmmss>.json`, one file per run. The time is local. A refused run writes one too.
-- **Log line:** `QuestTree: self-test: N passed, M failed - PASS|FAIL|CANCELLED|REFUSED (reason) in S s; report <path>; failed: step/map: check | ...` (in LogOutput.log).
-- **Player.log markers:** `QUESTTREE-SELFTEST-BEGIN <runId>` and `QUESTTREE-SELFTEST-END <runId>`, logged through Unity. The Player.log lines between them belong to the run.
+- **Log line:** `QuestTree: self-test: N passed, M failed, W warning(s) - PASS|FAIL|CANCELLED|REFUSED (reason) in S s; report <path>; failed: step/map: check | ...` (in LogOutput.log).
+- **Markers:** `[Info   : QuestTree] QUESTTREE-SELFTEST-BEGIN <runId>` and `... QUESTTREE-SELFTEST-END <runId>`, logged through BepInEx's log source, so they appear in BOTH LogOutput.log and Player.log. The lines between them belong to the run. (A `Debug.Log` marker never reached either file: EFT's managed `Debug.unityLogger` drops Log and Warning.)
+- **Canary lines:** the canary may log an ERROR containing `qt-selftest-canary-<hex>` ("Quest Tree self-test canary ... not a game error"). **check_logs.py must ignore any line containing `qt-selftest-canary-`.**
 
 ## d3d11 errors: what the in-game counter can and cannot see
 
-The counter listens on `Application.logMessageReceivedThreaded`, so it sees messages from every thread, the render thread included. The `logcanary` step proves this: it logs a warning from a worker thread and fails with "error counter not receiving threaded logs" if the handler never sees it.
+The counter listens on `Application.logMessageReceivedThreaded`, so it sees messages from every thread, the render thread included.
 
-Unity's NATIVE d3d11 messages may be written only to Player.log and never raised to managed callbacks. The in-game counter cannot see those. **`check_logs.py` must scan Player.log between the BEGIN and END markers**, or between `startedLocal` and `finishedLocal`, and treat those lines as the authority for d3d11 errors.
+The `logcanary` step tries to prove this:
+- **How it logs:** a worker-thread line and a main-thread line, as a pair, first at Warning. EFT drops Warning even when the logger says it is allowed, so if neither line arrives, the pair is retried once at Error with a fresh token. Every token starts `qt-selftest-canary-`, and the handler drops canary lines before counting. The logger's state is recorded in `loggerEnabled`, `loggerFilter` and `loggerHandler`.
+- **Pass:** the worker's line arrives. `canaryLevel` records which level worked.
+- **Fail:** only the main thread's line arrives ("error counter not receiving threaded logs").
+- **Skip:** neither line arrives at Error either. The step then reports `skipped` with a WARN that explains the finding.
+
+The 2026-10-04 run found that the handler did receive the game's own messages (103 exceptions), but not a managed `Debug.LogWarning` from any thread.
+
+Unity's NATIVE d3d11 messages may be written only to Player.log and never raised to managed callbacks. The in-game counter cannot see those. **`check_logs.py` must scan Player.log between the BEGIN and END markers** and treat those lines as the authority for d3d11 errors.
+
+## Checks, warnings and results
+
+- A check is `{ "name", "pass", "warn", "detail" }`.
+- A **WARN** has `pass: true, warn: true`. Because `pass` is true, it is ALSO counted in `passed`. The top-level `warnings` count tells them apart: clean passes are `passed - warnings`. A WARN never counts in `failed` and does not fail its step.
+- A step can be `skipped`, for example `logcanary` when the canary cannot be delivered.
 
 ## Top level
 
@@ -20,7 +35,8 @@ Unity's NATIVE d3d11 messages may be written only to Player.log and never raised
 | `kind` | string | `"questtree-selftest"` |
 | `runId` | string | 12 hex chars; also in the markers |
 | `overall` | string | `pass`, `fail`, `cancelled`, `refused` (preconditions failed, nothing run) |
-| `passed`, `failed` | int | counts of every check, across steps and maps |
+| `passed`, `failed` | int | counts of every check, across steps and maps (a WARN counts as passed) |
+| `warnings` | int | checks with `warn: true` |
 | `cancelReason` | string/null | why it was cancelled, refused or died |
 | `startedUtc`, `finishedUtc` | ISO 8601 UTC | |
 | `startedLocal`, `finishedLocal` | `yyyy-MM-dd HH:mm:ss.fff` | the machine's local time, for matching log files |
@@ -42,7 +58,7 @@ Unity's NATIVE d3d11 messages may be written only to Player.log and never raised
 | `result` | string | `pass`, `fail`, `skipped` (after a cancel) |
 | `seconds` | number | |
 | `error` | string/null | the exception that ended it |
-| `checks` | array | `{ "name": string, "pass": bool, "detail": string }` |
+| `checks` | array | `{ "name": string, "pass": bool, "warn": bool, "detail": string }` |
 | `measurements` | object | name -> number/string/bool |
 | `maps` | array of Part | `sweep3d` and `sweep2d` only |
 
@@ -61,8 +77,8 @@ Any step or map can also carry `ran without throwing` (fails when it threw).
 - `the GPU-error filter ignores the Media Foundation info line`
 
 **logcanary**
-- `error counter receives threaded logs`
-- measurement: `token`
+- `error counter receives threaded logs`: pass, fail, or a WARN with the step `skipped` (see above)
+- measurements: `loggerEnabled`, `loggerFilter`, `loggerHandler`, `gameMessagesSoFar`, `canaryLevel` (`Warning`, `Error` or `none`); per level tried: `tokenWarning`/`tokenError`, `workerWarningSeen`/`workerErrorSeen`, `mainWarningSeen`/`mainErrorSeen`
 
 **capture**
 - `the menu host is free`
@@ -82,17 +98,33 @@ Any step or map can also carry `ran without throwing` (fails when it threw).
 - measurements: `candidates`, `map`, `mapName`, `testKey`, `seconds`, `vramBeforeMb`, `vramAfterMb`, `mipLimitBefore`, `sdModeBefore`, `navMeshVerticesBefore`, `unityExceptions`, `unityErrors`
 
 **sweep3d**
-- step: `the menu host is free`, `the catalog has a set with a 3D mesh`; measurements `sets`, `setsWithMesh`
+- step checks:
+  - `the menu host is free`
+  - `the catalog has a set with a 3D mesh`
+  - `VRAM does not keep climbing across the sweep`: FAIL when the sweep's end value (after a 3 s settle) exceeds the FIRST map's after-value by more than 512 MB, or VRAM is unread
+- step measurements: `sets`, `setsWithMesh`, `vramBaselineMb` (before the sweep), `vramFirstAfterMb`, `vramPeakAfterMb`, `vramFinalMb`, `vramAfterSeriesMb` (array)
 - per map:
   - `in the main menu`
   - `no map hosted in the menu`
   - `the view opened`
   - `first frame drawn`
+  - `loads within 15 s`: WARN when load is over 15 s
+  - `draws triangles at its default floor`: FAIL when 0 draw calls or 0 triangles
+  - `idle at measurement`: WARN only, when still busy after the re-wait
   - `still drawing after it settled`
   - `its meshes and textures were destroyed`
-  - `VRAM back near its before-value`: tolerance 256 MB; fails when VRAM is unread
+  - `VRAM back near its before-value`: tolerance 256 MB; a WARN, not a fail, since the driver frees late and the sweep trend decides
   - `no d3d11 or texture-creation errors and no exceptions`
-- per-map measurements: `level`, `attachMs`, `firstFrameMs`, `drawCalls`, `trianglesSubmitted`, `trianglesInView`, `renderMs`, `settledSeconds`, `idle`, `framesRendered`, `vramBeforeMb`, `vramOpenMb`, `vramAfterMb`, `leftoverObjects`
+- per-map measurements:
+  - `level`, `attachMs`
+  - `loadMs`: attach to the build being ready
+  - `firstFrameMs`: the duration of the frame the first render ran in, the view's own "first frame drawn in" sense
+  - `drawCalls`, `trianglesSubmitted`, `trianglesInView`, `renderMs`
+  - `settledSeconds`, `idleRewaitSeconds`, `idle`, `framesRendered`
+  - `vramBeforeMb`, `vramOpenMb`, `vramAfterMb`
+  - `vramAfterFresh`: the read saw a new fetch within 1 s
+  - `leftoverObjects`
+- A VRAM read issues a fetch, waits 3 frames, then polls each frame until the value changes or 1 s passes.
 
 **sweep2d**
 - step: `the menu host is free`, `the catalog has a set`; measurement `sets`

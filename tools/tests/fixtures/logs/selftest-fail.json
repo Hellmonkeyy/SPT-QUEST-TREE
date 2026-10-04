@@ -1,0 +1,54 @@
+{
+ "schema": 1,
+ "kind": "questtree-selftest",
+ "runId": "0123456789ab",
+ "overall": "fail",
+ "passed": 2,
+ "failed": 1,
+ "warnings": 0,
+ "steps": [
+  {
+   "name": "preconditions",
+   "result": "pass",
+   "checks": [
+    {
+     "name": "main menu only, no capture running, hideout not loaded",
+     "pass": true,
+     "warn": false,
+     "detail": ""
+    }
+   ]
+  },
+  {
+   "name": "logcanary",
+   "result": "pass",
+   "checks": [
+    {
+     "name": "error counter receives threaded logs",
+     "pass": true,
+     "warn": false,
+     "detail": "worker line seen"
+    }
+   ]
+  },
+  {
+   "name": "sweep3d",
+   "result": "pass",
+   "checks": [],
+   "maps": [
+    {
+     "name": "Woods",
+     "result": "fail",
+     "checks": [
+      {
+       "name": "first frame drawn",
+       "pass": false,
+       "warn": false,
+       "detail": "timed out"
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

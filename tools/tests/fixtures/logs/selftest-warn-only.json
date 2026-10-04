@@ -1,0 +1,41 @@
+{
+ "schema": 1,
+ "kind": "questtree-selftest",
+ "runId": "0123456789ab",
+ "overall": "pass",
+ "passed": 2,
+ "failed": 0,
+ "warnings": 1,
+ "steps": [
+  {
+   "name": "preconditions",
+   "result": "pass",
+   "checks": [
+    {
+     "name": "main menu only, no capture running, hideout not loaded",
+     "pass": true,
+     "warn": false,
+     "detail": ""
+    }
+   ]
+  },
+  {
+   "name": "logcanary",
+   "result": "pass",
+   "checks": [
+    {
+     "name": "error counter receives threaded logs",
+     "pass": true,
+     "warn": true,
+     "detail": "logger lets nothing through"
+    }
+   ]
+  },
+  {
+   "name": "sweep3d",
+   "result": "pass",
+   "checks": [],
+   "maps": []
+  }
+ ]
+}

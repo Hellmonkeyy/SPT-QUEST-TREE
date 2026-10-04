@@ -44,6 +44,16 @@ namespace QuestTree.QuestGraph
         /// dropped, MB. DXGI's figure is the whole process's and moves with the driver's own allocations.</summary>
         private const double VramToleranceMb = 256d;
 
+        /// <summary>How far VRAM may stand, at the end of the 3D sweep, above the first map's after-value (the sweep's
+        /// warmed-up baseline: shaders, the light-probe rig) before the trend check fails, MB.</summary>
+        private const double SweepToleranceMb = 512d;
+
+        /// <summary>A map whose load (attach to ready) takes longer than this is a WARN, ms.</summary>
+        private const double LoadWarnMs = 15000d;
+
+        /// <summary>The second wait for idle, after the 30 settle frames, before the open-view measurement.</summary>
+        private const double IdleRewaitSeconds = 30d;
+
         private const double FirstFrameTimeoutSeconds = 240d;
         private const double SettleTimeoutSeconds = 60d;
         private const double DecodeTimeoutSeconds = 60d;
@@ -260,10 +270,11 @@ namespace QuestTree.QuestGraph
                 Log($"started (Quest Tracker {ModInfo.Stamp}). Do not start a raid or open the hideout until the summary line. " +
                     "Cancel: switch the setting on again, press the map capture key, or use the Maps tab's Cancel row.");
 
-                // Through Unity, so Player.log carries it too: check_logs.py takes the lines between this and the END
-                // marker as this run's (native d3d11 lines may reach only Player.log, never the managed handler).
+                // Through BepInEx's log source, whose lines reach BOTH LogOutput.log and Player.log. EFT's managed
+                // Debug.unityLogger drops Log lines: the 2026-10-04 run's Debug.Log marker reached neither file. check_logs.py
+                // takes the Player.log lines between this and the END marker as this run's.
                 report.BeginMarker = $"QUESTTREE-SELFTEST-BEGIN {report.RunId}";
-                Guard("the begin marker", () => UnityEngine.Debug.Log(report.BeginMarker));
+                Guard("the begin marker", () => Plugin.LogSource?.LogInfo(report.BeginMarker));
 
                 // The tracker panel is closed at the start, so the Maps tab's picture is not on screen when this run frees
                 // pictures. If the player reopens it, the Maps tab draws flat (MapView.MeshFor) and its capture section
@@ -370,14 +381,14 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Logs the END marker through Unity (after the counter has stopped listening) and records it. Never
-        /// throws.</summary>
+        /// <summary>Logs the END marker through BepInEx's log source (it reaches LogOutput.log and Player.log) and records
+        /// it. Never throws.</summary>
         private static void EndMarker(Report report)
         {
             try
             {
                 report.EndMarker = $"QUESTTREE-SELFTEST-END {report.RunId}";
-                UnityEngine.Debug.Log(report.EndMarker);
+                Plugin.LogSource?.LogInfo(report.EndMarker);
             }
             catch (Exception)
             {
@@ -659,6 +670,14 @@ namespace QuestTree.QuestGraph
 
             step.Maps = new List<Part>();
 
+            var vram = new Vram();
+            var reading = vram.Read();
+            while (reading.MoveNext()) yield return reading.Current;
+            var baseline = vram.UsageMb;
+            step.Measure("vramBaselineMb", baseline);
+
+            var afters = new List<double>();
+
             foreach (var set in meshed)
             {
                 var part = new Part { Name = set.Key, Source = set.Host ? "host" : "local" };
@@ -666,7 +685,39 @@ namespace QuestTree.QuestGraph
 
                 var one = Guarded(part, OpenIn3D(set.Key, set.Entry, part));
                 while (one.MoveNext()) yield return one.Current;
+
+                if (part.Measurements.TryGetValue("vramAfterMb", out var after) && after is double mb && mb >= 0d) afters.Add(mb);
             }
+
+            if (meshed.Count == 0 || _cancel != null) yield break;
+
+            // The trend: does VRAM keep climbing across the sweep? A closed view's memory is freed by the driver later
+            // than the next read, so a single map's after-value proves nothing (those are WARNs). The sweep's last value,
+            // read after a 3 s settle, is compared with the first map's after-value, the warmed-up baseline.
+            var settle = Stopwatch.StartNew();
+            while (settle.Elapsed.TotalSeconds < 3d) yield return null;
+
+            reading = vram.Read();
+            while (reading.MoveNext()) yield return reading.Current;
+            var final = vram.UsageMb;
+
+            step.Measure("vramFinalMb", final);
+            step.Measure("vramAfterSeriesMb", afters.Select(a => Math.Round(a, 0)).ToList());
+
+            var known = final >= 0d && afters.Count > 0;
+            var first = known ? afters[0] : -1d;
+            if (known)
+            {
+                step.Measure("vramFirstAfterMb", first);
+                step.Measure("vramPeakAfterMb", afters.Max());
+            }
+
+            step.Check("VRAM does not keep climbing across the sweep", known && final - first <= SweepToleranceMb,
+                known
+                    ? string.Format(CultureInfo.InvariantCulture,
+                        "first map's after {0:0} MB -> sweep end {1:0} MB ({2:+0;-0} MB, tolerance {3:0}); before the sweep {4:0} MB",
+                        first, final, final - first, SweepToleranceMb, baseline)
+                    : "VRAM could not be read (EFT's VRamUsage plugin)");
         }
 
         private static IEnumerator OpenIn3D(string key, DynamicMapsLibrary.MapEntry entry, Part part)
@@ -715,9 +766,15 @@ namespace QuestTree.QuestGraph
 
                 if (view != null)
                 {
+                    // The view's own "first frame drawn in X ms" is the CPU time of the ONE frame that first renders (a
+                    // clock started inside that LateUpdate). Everything before it - the file read, the meshes built, the
+                    // paced uploads - is the load. So: loadMs is attach to the build being ready (SelfTestReady), and
+                    // firstFrameMs is the duration of the frame the first render ran in.
+                    double? readyMs = null;
                     while (view != null && !view.SelfTestBroke && view.SelfTestFramesRendered == 0 && _cancel == null &&
                            clock.Elapsed.TotalSeconds < FirstFrameTimeoutSeconds)
                     {
+                        if (readyMs == null && view.SelfTestReady) readyMs = clock.Elapsed.TotalMilliseconds;
                         yield return null;
                     }
 
@@ -730,12 +787,30 @@ namespace QuestTree.QuestGraph
 
                     if (drawn)
                     {
-                        // Read in the frame after the first render, before this frame's LateUpdate: the first frame's.
-                        part.Measure("firstFrameMs", Math.Round(clock.Elapsed.TotalMilliseconds, 1));
+                        // Observed in the frame after the first render, before that frame's LateUpdate, so the counts are the
+                        // first frame's and unscaledDeltaTime is the duration of the frame the first render ran in. The view
+                        // becomes ready and renders in the same LateUpdate, so a ready flag first seen now dates from then.
+                        var observedMs = clock.Elapsed.TotalMilliseconds;
+                        var frameMs = Time.unscaledDeltaTime * 1000d;
+                        var loadMs = readyMs ?? Math.Max(0d, observedMs - frameMs);
+
+                        part.Measure("loadMs", Math.Round(loadMs, 1));
+                        part.Measure("firstFrameMs", Math.Round(frameMs, 1));
                         part.Measure("drawCalls", view.SelfTestDrawCalls);
                         part.Measure("trianglesSubmitted", view.SelfTestTrianglesSubmitted);
                         part.Measure("trianglesInView", view.SelfTestTrianglesInView);
                         part.Measure("renderMs", Math.Round(view.SelfTestRenderMs, 2));
+
+                        if (loadMs > LoadWarnMs)
+                            part.Warn("loads within 15 s", $"attach to ready took {loadMs / 1000d:0.0} s");
+                        else
+                            part.Check("loads within 15 s", true, $"attach to ready took {loadMs / 1000d:0.0} s");
+
+                        // A set with a mesh that draws nothing at its default floor is broken (Shoreline, 2026-10-04: 0 draw
+                        // calls, 0 triangles, and every other check passed).
+                        part.Check("draws triangles at its default floor",
+                            view.SelfTestTrianglesSubmitted > 0 && view.SelfTestDrawCalls > 0,
+                            $"{view.SelfTestDrawCalls} draw call(s), {view.SelfTestTrianglesSubmitted:#,##0} triangle(s) submitted at level {level}");
                     }
 
                     var settle = Stopwatch.StartNew();
@@ -745,10 +820,24 @@ namespace QuestTree.QuestGraph
                         yield return null;
                     }
 
+                    part.Measure("settledSeconds", Math.Round(settle.Elapsed.TotalSeconds, 1));
+
                     for (var i = 0; i < 30; i++) yield return null;
 
-                    part.Measure("settledSeconds", Math.Round(settle.Elapsed.TotalSeconds, 1));
-                    part.Measure("idle", view != null && view.SelfTestIdle);
+                    // Walls and pictures can arrive after the first idle (Woods, Interchange and Sandbox were busy again at
+                    // the measurement in 2026-10-04's run), so wait for idle once more before measuring.
+                    var again = Stopwatch.StartNew();
+                    while (view != null && !view.SelfTestBroke && !view.SelfTestIdle && _cancel == null &&
+                           again.Elapsed.TotalSeconds < IdleRewaitSeconds)
+                    {
+                        yield return null;
+                    }
+
+                    var idle = view != null && view.SelfTestIdle;
+                    part.Measure("idleRewaitSeconds", Math.Round(again.Elapsed.TotalSeconds, 1));
+                    part.Measure("idle", idle);
+                    if (!idle && view != null && !view.SelfTestBroke && _cancel == null)
+                        part.Warn("idle at measurement", $"still uploading or building walls after {SettleTimeoutSeconds + IdleRewaitSeconds:0} s; VRAM read while busy");
                     part.Measure("framesRendered", view != null ? view.SelfTestFramesRendered : 0L);
                     part.Check("still drawing after it settled", view != null && !view.SelfTestBroke,
                         view == null ? "the view was destroyed" :
@@ -784,12 +873,17 @@ namespace QuestTree.QuestGraph
             part.Check("its meshes and textures were destroyed", left.Count == 0,
                 left.Count == 0 ? "none of the view's meshes or textures is left" : string.Join(", ", left.Take(10)));
 
+            // Per map a WARN only: the driver frees a closed view's memory later than the next read (2026-10-04: bigmap +833
+            // MB, then the next map's before-value fell back). The sweep's trend check is the one that fails.
+            part.Measure("vramAfterFresh", vram.Changed);
             var known = vramBefore >= 0d && vramAfter >= 0d;
-            part.Check("VRAM back near its before-value", known && vramAfter - vramBefore <= VramToleranceMb,
-                known
-                    ? string.Format(CultureInfo.InvariantCulture, "{0:0} -> {1:0} MB ({2:+0;-0} MB, tolerance {3:0})", vramBefore, vramAfter,
-                        vramAfter - vramBefore, VramToleranceMb)
-                    : "VRAM could not be read (EFT's VRamUsage plugin)");
+            var detail = known
+                ? string.Format(CultureInfo.InvariantCulture, "{0:0} -> {1:0} MB ({2:+0;-0} MB, tolerance {3:0})", vramBefore, vramAfter,
+                    vramAfter - vramBefore, VramToleranceMb)
+                : "VRAM could not be read (EFT's VRamUsage plugin)";
+
+            if (known && vramAfter - vramBefore <= VramToleranceMb) part.Check("VRAM back near its before-value", true, detail);
+            else part.Warn("VRAM back near its before-value", detail);
 
             var delta = Counts.Now().Minus(counts);
             part.Check("no d3d11 or texture-creation errors and no exceptions", delta.Gpu == 0 && delta.Exceptions == 0, delta.Describe());
@@ -1185,18 +1279,44 @@ namespace QuestTree.QuestGraph
 
         private static void Log(string text) => Plugin.LogSource?.LogInfo(Tag + text);
 
-        /// <summary>A VRAM read: a fetch issued, three frames for the render thread to run it, then the value.</summary>
+        /// <summary>
+        /// A VRAM read that is not one fetch behind. VramProbe hands back the LAST fetched value, and the 2026-10-04 run's
+        /// per-map readings lagged a whole map (bigmap's after-value was the next map's before-value, which then fell back).
+        /// So: note the value held now, issue a fetch, give the render thread three frames to run it, then keep fetching and
+        /// polling every frame until the value differs from the one held before, or 1 s passes. The value is taken then.
+        /// </summary>
         private sealed class Vram
         {
             internal double UsageMb = -1d;
 
+            /// <summary>Whether the value changed from the stale one within the poll (false: 1 s passed unchanged).</summary>
+            internal bool Changed;
+
             internal IEnumerator Read()
             {
-                VramProbe.TryRead(out _, out _);
+                var stale = VramProbe.TryRead(out var held, out _) ? held : -1d;   // also issues a fetch
                 yield return null;
                 yield return null;
                 yield return null;
-                UsageMb = VramProbe.TryRead(out var usage, out _) ? Math.Round(usage, 1) : -1d;
+
+                var clock = Stopwatch.StartNew();
+                var now = stale;
+                Changed = false;
+
+                while (true)
+                {
+                    now = VramProbe.TryRead(out var usage, out _) ? usage : -1d;   // reads, and issues the next fetch
+                    if (now >= 0d && Math.Abs(now - stale) > 0.05d)
+                    {
+                        Changed = true;
+                        break;
+                    }
+
+                    if (clock.Elapsed.TotalSeconds >= 1d) break;
+                    yield return null;
+                }
+
+                UsageMb = now >= 0d ? Math.Round(now, 1) : -1d;
             }
         }
 
@@ -1212,7 +1332,14 @@ namespace QuestTree.QuestGraph
         private static int _exceptions;
         private static int _errors;
         private static int _gpu;
+        /// <summary>The worker canary: 0 not seen, 1 seen on a worker thread, 2 seen but raised on the main thread.</summary>
         private static int _canarySeen;
+
+        private static int _canaryMainSeen;
+
+        /// <summary>Every canary token starts with this; the handler drops any line containing it before counting.</summary>
+        private const string CanaryPrefix = "qt-selftest-canary-";
+        private static int _mainThreadId;
         private static volatile string _canaryToken;
         private static readonly object MessageLock = new object();
         private static readonly List<string> _firstMessages = new List<string>();
@@ -1232,6 +1359,7 @@ namespace QuestTree.QuestGraph
             Interlocked.Exchange(ref _errors, 0);
             Interlocked.Exchange(ref _gpu, 0);
             Interlocked.Exchange(ref _canarySeen, 0);
+            Interlocked.Exchange(ref _canaryMainSeen, 0);
 
             lock (MessageLock)
             {
@@ -1243,7 +1371,8 @@ namespace QuestTree.QuestGraph
         private static void StartListening()
         {
             ResetMessages();
-            _canaryToken = "qt-selftest-canary-" + Guid.NewGuid().ToString("N");
+            _mainThreadId = Thread.CurrentThread.ManagedThreadId;
+            _canaryToken = CanaryPrefix + Guid.NewGuid().ToString("N");
             Application.logMessageReceivedThreaded -= OnLog;
             Application.logMessageReceivedThreaded += OnLog;
             _listening = true;
@@ -1265,20 +1394,90 @@ namespace QuestTree.QuestGraph
             if (_report != null) FillMessages(_report);
         }
 
-        /// <summary>The canary: one warning logged from a WORKER thread with this run's token, which only a threaded
-        /// handler sees. If it never arrives, the counter is blind to the render thread's d3d11 errors, and this fails.</summary>
+        /// <summary>
+        /// The canary: one line logged from a WORKER thread with this run's token. Only a threaded handler sees it.
+        ///
+        /// Found in play (2026-10-04 run): EFT's managed Debug.unityLogger drops Log and Warning before any callback, so
+        /// even a main-thread Debug.Log never reached Player.log, LogOutput.log or the handler. The game's own errors did
+        /// reach the handler (103 exceptions). So a worker-thread line and a main-thread line are logged as a pair, first
+        /// at Warning and, when neither arrives, once more at Error with a fresh token. Each line names itself, and
+        /// check_logs.py must ignore "qt-selftest-canary-". The handler drops every canary line before counting.
+        /// - the worker's line arrives: PASS, and the level is recorded;
+        /// - only the main thread's arrives: the threaded callback misses worker threads, so FAIL;
+        /// - neither arrives at Error either: Unity does not deliver this logger's lines to managed callbacks, so SKIP with
+        ///   that finding, and check_logs.py's Player.log scan is the authority.
+        /// </summary>
         private static IEnumerator Canary(Part step)
         {
-            var token = _canaryToken;
-            step.Measure("token", token);
+            var logger = UnityEngine.Debug.unityLogger;
 
-            Task.Run(() => UnityEngine.Debug.LogWarning(token));
+            step.Measure("loggerEnabled", logger != null && logger.logEnabled);
+            step.Measure("loggerFilter", logger != null ? logger.filterLogType.ToString() : "none");
+            step.Measure("loggerHandler", logger?.logHandler?.GetType().FullName ?? "none");
+            step.Measure("gameMessagesSoFar", Volatile.Read(ref _exceptions) + Volatile.Read(ref _errors));
 
-            for (var i = 0; i < 300 && Volatile.Read(ref _canarySeen) == 0; i++) yield return null;
+            // Warning first, then ONE retry at Error: EFT's logger says Warning is allowed and drops it all the same
+            // (2026-10-04), so a Warning pair that never arrives decides nothing on its own.
+            var tried = new List<string>();
 
-            var seen = Volatile.Read(ref _canarySeen) != 0;
-            step.Check("error counter receives threaded logs", seen,
-                seen ? "the worker thread's warning reached logMessageReceivedThreaded" : "error counter not receiving threaded logs");
+            foreach (var kind in new[] { LogType.Warning, LogType.Error })
+            {
+                // Each attempt has a fresh token under the shared prefix, so a late line from the previous attempt is
+                // dropped by the handler without setting this attempt's flags.
+                var token = CanaryPrefix + Guid.NewGuid().ToString("N");
+                Interlocked.Exchange(ref _canarySeen, 0);
+                Interlocked.Exchange(ref _canaryMainSeen, 0);
+                _canaryToken = token;
+
+                var level = kind.ToString();
+                step.Measure($"token{level}", token);
+                tried.Add(level);
+
+                void Emit(string text)
+                {
+                    if (kind == LogType.Warning) UnityEngine.Debug.LogWarning(text);
+                    else UnityEngine.Debug.LogError(text);
+                }
+
+                Task.Run(() => Emit($"{token}-w (Quest Tree self-test canary from a worker thread - not a game error)"));
+                Emit($"{token}-m (Quest Tree self-test canary from the main thread - not a game error)");
+
+                for (var i = 0; i < 300 && (Volatile.Read(ref _canarySeen) == 0 || Volatile.Read(ref _canaryMainSeen) == 0); i++)
+                    yield return null;
+
+                var worker = Volatile.Read(ref _canarySeen);
+                var main = Volatile.Read(ref _canaryMainSeen) != 0;
+                step.Measure($"worker{level}Seen", worker != 0);
+                step.Measure($"main{level}Seen", main);
+
+                if (worker != 0)
+                {
+                    // Both arrived (or the worker's did, which is the proof): PASS at this level.
+                    step.Measure("canaryLevel", level);
+                    step.Check("error counter receives threaded logs", true,
+                        $"the worker thread's {level} reached logMessageReceivedThreaded" +
+                        (worker == 1 ? " on that worker thread" : " (raised on the main thread)") +
+                        (main ? "; the main thread's arrived too" : ""));
+                    yield break;
+                }
+
+                if (main)
+                {
+                    step.Measure("canaryLevel", level);
+                    step.Check("error counter receives threaded logs", false,
+                        $"error counter not receiving threaded logs (the main thread's {level} arrived, the worker thread's did not)");
+                    yield break;
+                }
+
+                // Neither line of this pair arrived: the logger dropped this level. Try the next one.
+            }
+
+            step.Measure("canaryLevel", "none");
+            step.Result = "skipped";
+            step.Warn("error counter receives threaded logs",
+                $"not testable here: neither the worker's nor the main thread's canary arrived at {string.Join(" or ", tried)} " +
+                $"({step.Measurements["loggerHandler"]}), while the game's own messages did; check_logs.py's Player.log scan " +
+                "is the authority for d3d11 errors");
         }
 
         /// <summary>Counts what Unity logs while the run goes, on any thread: exceptions, errors (and asserts), and the
@@ -1293,10 +1492,17 @@ namespace QuestTree.QuestGraph
             {
                 var text = condition ?? "";
 
-                var token = _canaryToken;
-                if (token != null && text.IndexOf(token, StringComparison.Ordinal) >= 0)
+                // Every canary line, this attempt's or a late one from an earlier attempt, returns BEFORE any counting.
+                if (text.IndexOf(CanaryPrefix, StringComparison.Ordinal) >= 0)
                 {
-                    Interlocked.Exchange(ref _canarySeen, 1);
+                    var token = _canaryToken;
+                    if (token != null && text.IndexOf(token, StringComparison.Ordinal) >= 0)
+                    {
+                        if (text.IndexOf(token + "-m", StringComparison.Ordinal) >= 0) Interlocked.Exchange(ref _canaryMainSeen, 1);
+                        else if (Thread.CurrentThread.ManagedThreadId != _mainThreadId) Interlocked.Exchange(ref _canarySeen, 1);
+                        else Interlocked.Exchange(ref _canarySeen, 2);   // the worker's line, but raised on the main thread
+                    }
+
                     return;
                 }
 
@@ -1384,6 +1590,11 @@ namespace QuestTree.QuestGraph
             internal void Check(string name, bool pass, string detail) =>
                 Checks.Add(new CheckResult { Name = name, Pass = pass, Detail = detail ?? "" });
 
+            /// <summary>A WARN: recorded with pass true and warn true. It counts toward "warnings", never toward
+            /// "failed".</summary>
+            internal void Warn(string name, string detail) =>
+                Checks.Add(new CheckResult { Name = name, Pass = true, Warn = true, Detail = detail ?? "" });
+
             internal void Measure(string name, object value) => Measurements[name] = value;
 
             /// <summary>"pass" when every check passed, no error was recorded and every map passed; "skipped" stays.</summary>
@@ -1401,6 +1612,7 @@ namespace QuestTree.QuestGraph
         {
             [JsonProperty("name")] public string Name;
             [JsonProperty("pass")] public bool Pass;
+            [JsonProperty("warn")] public bool Warn;
             [JsonProperty("detail")] public string Detail;
         }
 
@@ -1411,6 +1623,7 @@ namespace QuestTree.QuestGraph
             [JsonProperty("overall")] public string Overall;
             [JsonProperty("passed")] public int Passed;
             [JsonProperty("failed")] public int Failed;
+            [JsonProperty("warnings")] public int Warnings;
             [JsonProperty("cancelReason")] public string CancelReason;
             [JsonProperty("runId")] public string RunId;
             [JsonProperty("startedUtc")] public string StartedUtc;
@@ -1496,6 +1709,7 @@ namespace QuestTree.QuestGraph
                 var checks = report.Steps.SelectMany(s => s.Checks.Concat(s.Maps?.SelectMany(m => m.Checks) ?? Enumerable.Empty<CheckResult>())).ToList();
                 report.Passed = checks.Count(c => c.Pass);
                 report.Failed = checks.Count - report.Passed;
+                report.Warnings = checks.Count(c => c.Warn);
                 var finished = DateTime.Now;
                 report.FinishedUtc = finished.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
                 report.FinishedLocal = finished.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
@@ -1522,7 +1736,7 @@ namespace QuestTree.QuestGraph
                     .ToList();
 
                 Plugin.LogSource?.LogInfo(
-                    $"{Tag}{report.Passed} passed, {report.Failed} failed - {report.Overall.ToUpperInvariant()}" +
+                    $"{Tag}{report.Passed} passed, {report.Failed} failed, {report.Warnings} warning(s) - {report.Overall.ToUpperInvariant()}" +
                     (report.CancelReason != null ? $" ({report.CancelReason})" : "") +
                     $" in {report.Seconds.ToString("0", CultureInfo.InvariantCulture)} s; report {path ?? "NOT WRITTEN"}" +
                     (failedNames.Count > 0 ? "; failed: " + string.Join(" | ", failedNames) : "") + ".");

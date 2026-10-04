@@ -1,0 +1,5 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Error  : QuestTree] qt-selftest-canary-3f2a9c1e5b7d4e6f8a0b1c2d3e4f5a6b-w (Quest Tree self-test canary from a worker thread - not a game error)
+qt-selftest-canary-3f2a9c1e5b7d4e6f8a0b1c2d3e4f5a6b-m (Quest Tree self-test canary from the main thread - not a game error)
+[Error  : QuestTree] QuestTree: the map tab failed to build (InvalidOperationException: test).

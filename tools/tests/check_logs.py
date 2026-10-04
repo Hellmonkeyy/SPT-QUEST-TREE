@@ -30,6 +30,7 @@ the regex keys on the text, so a line moving does not break it. Paths are read, 
 """
 
 import datetime
+import json
 import os
 import re
 import sys
@@ -354,7 +355,67 @@ SUMMARY_ANCHORS = {  # the summary parsers' texts, held to the source like the r
     "info: captured": ["captured {name} from game files: ", 'Tag = "QuestTree: menu capture: "'],
     "info: uploaded": ["QuestTree: capture of {key} uploaded to the host - "],
     "info: host tag": ['HostTag = "QuestTree: menu map host: "'],
+    "selftest_report": ['Tag = "QuestTree: self-test: "', "{report.Passed} passed, {report.Failed} failed, {report.Warnings} warning(s) - ",
+                        "; report {path ?? \"NOT WRITTEN\"}", '"qt-selftest-canary-"'],
 }
+
+# The in-game self-test's canary (SelfTest.cs:1372, logged at Warning or Error on purpose, "not a game error"): no
+# FAIL/WARN rule may count a line holding it (tools/tests/README_selftest.md).
+CANARY = "qt-selftest-canary-"
+
+# SelfTest.cs:1729-1732: "QuestTree: self-test: N passed, M failed, W warning(s) - PASS (reason) in S s; report <path>
+# [; failed: ...]." - the warnings part is absent from older builds.
+SELFTEST_LINE = re.compile(r"QuestTree: self-test: (\d+) passed, (\d+) failed(?:, (\d+) warning\(s\))? - (\w+)"
+                           r"(?: \((.*?)\))? in [\d.]+ s; report (.+?)(?:; failed: (.*))?\.\s*$")
+
+
+def _walk_checks(part):
+    for c in part.get("checks") or []:
+        yield part.get("name", "?"), c
+    for m in part.get("maps") or []:
+        for name, c in _walk_checks(m):
+            yield f"{part.get('name', '?')}/{name}", c
+
+
+def selftest_report(lines, resolve=None):
+    """The LAST self-test summary line of a session, judged by its report JSON when that reads, else by the line.
+    FAIL: a check failed (pass false, not warn) or the run's overall is fail; WARN: only warnings, or the run was
+    cancelled/refused; PASS (info) otherwise. None when the session holds no summary line."""
+    m = None
+    for l in lines:
+        m = SELFTEST_LINE.search(l) or m
+    if m is None:
+        return None
+    passed, failed, warns = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    overall, path, named = m.group(4).lower(), m.group(6).strip(), m.group(7)
+    source = "the summary line"
+    failing, warning = [], []
+    target = resolve(path) if resolve else path
+    try:
+        with open(target, "r", encoding="utf-8-sig") as f:
+            report = json.load(f)
+        for step in report.get("steps") or []:
+            for where, c in _walk_checks(step):
+                if c.get("warn"):
+                    warning.append(f"{where}: {c.get('name')}")
+                elif not c.get("pass", True):
+                    failing.append(f"{where}: {c.get('name')}")
+        overall = str(report.get("overall", overall)).lower()
+        passed = int(report.get("passed", passed))
+        failed, warns = len(failing), len(warning)
+        source = f"report {os.path.basename(target)}"
+    except (OSError, ValueError, TypeError, AttributeError) as ex:
+        source = f"the summary line (report unread: {type(ex).__name__})"
+    if failed > 0 or overall == "fail":
+        status = FAIL
+    elif warns > 0 or overall in ("cancelled", "refused"):
+        status = WARN
+    else:
+        status = PASS
+    what = "; ".join(failing[:5] or warning[:5]) or (named or "")
+    return Result(LAYER, "selftest_report", status,
+                  _clip(f"{passed} passed, {failed} failed, {warns} warning(s), overall {overall} (from {source})"
+                        + (f"; {what}" if what else "") + f"; report {path}"))
 
 
 # --- rule anchors --------------------------------------------------------------------------------------------------
@@ -427,7 +488,7 @@ def evaluate(sessions, rules=RULES):
         for label, scope, lines, prev in sessions:
             if scope != rule.scope:
                 continue
-            hits = rule.match(lines)
+            hits = rule.match([l for l in lines if CANARY not in l])
             if hits:
                 per[label] = len(hits)
                 if first is None or (not prev and not current):
@@ -497,6 +558,13 @@ def run(ctx=None):
                               _clip(f"{f['count']} hit(s) [{per}]{prev}; first: {f['first']}  <{rule.source}>")))
 
     results += anchor_results(paths["repo_root"])
+
+    for label, sc, s, p in sessions:  # the in-game self-test's verdict, from the first current client log holding one
+        if sc == "client" and not p:
+            r = selftest_report(s)
+            if r is not None:
+                results.append(r._replace(detail=f"{r.detail} ({label})"))
+                break
 
     current_client = [(l, s) for l, sc, s, p in sessions if sc == "client" and not p]
     ok = sum(1 for _, s in current_client for l in s if PASS_MATCHES.search(l))
@@ -608,6 +676,19 @@ def self_test(ctx=None):
     got = anchor_results(repo, [fake], {})
     say(any(r.status == FAIL and "rule fake_rule no longer matches any source text" in r.detail for r in got),
         "rule anchors: a fake anchor FAILs 'rule fake_rule no longer matches any source text'")
+    # the in-game self-test's canary: ignored by every rule, while a real QuestTree Error beside it still FAILs
+    hits = evaluate([("f", "client", fixture("selftest_canary", "client"), False)])
+    say(set(hits) == {"questtree_error_line"} and hits["questtree_error_line"]["count"] == 1,
+        f"canary Error line ignored, the real QuestTree Error beside it flagged once (fired: {sorted(hits)})")
+    # the self-test report: JSON authoritative when it reads, the summary line otherwise
+    resolve = lambda path: os.path.join(FIXTURES, os.path.basename(path.replace("\\", "/")))
+    for name, want in (("selftest_pass", PASS), ("selftest_fail", FAIL), ("selftest_warn_only", WARN),
+                       ("selftest_fail_line_warn_json", WARN), ("selftest_no_json_fail", FAIL),
+                       ("selftest_bad_json_pass", PASS)):
+        r = selftest_report(fixture(name, "client"), resolve)
+        say(r is not None and r.status == want, f"{name}: expected {want}, got {r.status if r else None}"
+            + (f" ({r.detail[:110]})" if r else ""))
+    say(selftest_report(fixture("clean_client", "client"), resolve) is None, "no self-test line: no selftest_report result")
     return out
 
 
