@@ -133,6 +133,31 @@ namespace QuestTree.QuestGraph
         /// drawn off the picture - so it is thrown away and the harvest goes without it.</summary>
         private const float MaxOutsideShare = 0.02f;
 
+        /// <summary>Rollback for <see cref="GrowToPoints"/>: false measures exactly as before it -
+        /// the chosen source's box, padded, and nothing else.
+        ///
+        /// Why it exists: the menu capture (MenuMapHost) loads a map's scenes in the main menu, and
+        /// there the NavMesh can come out SMALLER than in a raid. Interchange measured 329k NavMesh
+        /// vertices and 915x773 m padded in the menu against 382k and 965x925 m in a raid, with 10
+        /// of its 253 spawn point markers outside the menu rectangle (4.0 %) - every one of them a
+        /// place a player spawns, so walkable ground the menu's NavMesh simply did not carry. The
+        /// rectangle was right where it had data and short where it had none; the points it missed
+        /// were 30-96 m past its padded edge. Growing the box to hold such points is what the pad
+        /// would have done had the mesh been whole.</summary>
+        internal static readonly bool GrowToContainmentPoints = false;   // held off until the NavMesh diagnostics explain the menu gap
+
+        /// <summary>How far past the PADDED rectangle a zone or spawn point may lie and still be grown
+        /// to. Further out it is not a short NavMesh but a stray marker (a dev spawn at the origin of
+        /// another map, a point parked under the world) - it is left out, still counts as outside, and
+        /// the containment check judges the rectangle as it always did. Interchange's misses were at
+        /// most 96 m out; Customs, Factory and Labs had none.</summary>
+        private const float MaxGrowMetres = 150f;
+
+        /// <summary>The most one axis of the measured box may grow, as a fraction of its own length.
+        /// A box that would have to grow more than this to hold the points is not short, it is wrong,
+        /// and is left for the containment check to reject. Interchange needed at most about 18 %.</summary>
+        private const float MaxGrowFraction = 0.25f;
+
         /// <summary>The share of the harvest's TRIGGERS alone the rectangle must contain, which is
         /// the server's ZoneStore.MinTriggerCoverage and has to be checked here as well.
         ///
@@ -297,10 +322,20 @@ namespace QuestTree.QuestGraph
 
             var spawns = SpawnMarkerPositions();
 
-            // The rectangle everything below measures against: the chosen source's own box, with
-            // nothing done to it. Named because four lines below read it, and because this is where
-            // the clamp used to be - see the class comment for why there is none.
-            var box = chosen;
+            // Diagnostics only, no effect on the result: every source's raw XZ box, logged the same
+            // way in a raid and in the menu (MenuMapHost's "together" line uses SourceBounds), so a
+            // menu capture whose extent came out short (Interchange, Streets) can be compared with
+            // a raid's line for the same map. Debug, so a raid harvest keeps a quiet console.
+            Plugin.LogSource?.LogDebug(
+                $"QuestTree: {map} extent sources - {BoundsLine(nav, Union("spawn markers", spawns), border, terrain)}.");
+
+            // The rectangle everything below measures against: the chosen source's own box, clamped
+            // by nothing - see the class comment for why there is no clamp - and at most grown to
+            // hold zones and spawn points lying just past it.
+            // Grown only where the plain box would FAIL the check below; a box that passes is returned
+            // untouched, so every map that measured fine before measures bit-for-bit the same now and
+            // a stored set is not replaced by a rectangle a few metres different. See GrowToPoints.
+            var box = GrowToContainmentPoints ? GrowToPoints(map, chosen, triggers, spawns) : chosen;
 
             var rect = Pad(box);
             var floors = Floors(map, vertices, spawns, box, nav);
@@ -341,6 +376,7 @@ namespace QuestTree.QuestGraph
                     $"{outside} of {total} zones and spawn points outside it " +
                     $"({Percent(outside, total)} %, over {Percent(MaxOutsideShare)} %) - it is wrong, so the " +
                     "harvest is sent without one.");
+                LogOutsidePoints(map, rect, triggers);
                 return null;
             }
 
@@ -353,6 +389,7 @@ namespace QuestTree.QuestGraph
                     $"{triggerInside} of {triggerTotal} harvested zones, under the " +
                     $"{Percent((float)MinTriggerCoverage)} % the server requires - it is wrong, so the " +
                     "harvest is sent without one.");
+                LogOutsidePoints(map, rect, triggers);
                 return null;
             }
 
@@ -387,9 +424,173 @@ namespace QuestTree.QuestGraph
             return extent;
         }
 
+        /// <summary>Diagnostics for a rejected rectangle: up to <see cref="MaxOutsideLogged"/> of the
+        /// zones and spawn markers outside it, furthest first, each with what it is, where, and how
+        /// far past which edge. Spawn markers are read again here (with their names and scenes), only
+        /// on this failure path, so the accepted path costs nothing more. Log only; never throws.</summary>
+        private static void LogOutsidePoints(string map, Rect rect, ICollection<HarvestedTrigger> triggers)
+        {
+            try
+            {
+                var found = new List<KeyValuePair<double, string>>();
+
+                foreach (var trigger in triggers ?? Array.Empty<HarvestedTrigger>())
+                {
+                    if (trigger == null || !Outside(rect, trigger.X, trigger.Z)) continue;
+                    found.Add(new KeyValuePair<double, string>(
+                        Beyond(rect, trigger.X, trigger.Z),
+                        $"trigger '{trigger.Id}' ({trigger.Kind}) at ({F(trigger.X)}, {F(trigger.Y)}, {F(trigger.Z)}) " +
+                        $"{F(Beyond(rect, trigger.X, trigger.Z))} m {Edge(rect, trigger.X, trigger.Z)}"));
+                }
+
+                foreach (var marker in SpawnMarkers())
+                {
+                    if (marker == null) continue;
+                    var p = marker.transform.position;
+                    if (!Outside(rect, p.x, p.z)) continue;
+                    found.Add(new KeyValuePair<double, string>(
+                        Beyond(rect, p.x, p.z),
+                        $"spawn marker '{marker.name}' (scene '{marker.gameObject.scene.name}') at ({F(p.x)}, {F(p.y)}, {F(p.z)}) " +
+                        $"{F(Beyond(rect, p.x, p.z))} m {Edge(rect, p.x, p.z)}"));
+                }
+
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {map} rect x {F(rect.MinX)}..{F(rect.MaxX)} z {F(rect.MinZ)}..{F(rect.MaxZ)} - " +
+                    $"{found.Count} point(s) outside, the {Math.Min(found.Count, MaxOutsideLogged)} furthest: " +
+                    string.Join("; ", found.OrderByDescending(f => f.Key).Take(MaxOutsideLogged).Select(f => f.Value).ToArray()) + ".");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: listing {map}'s outside points failed ({ex.Message}).");
+            }
+        }
+
+        private const int MaxOutsideLogged = 20;
+
+        /// <summary>Which edges of <paramref name="rect"/> a point lies past: "W", "NE" and so on
+        /// (x is east, z is north), or "?" for a point that is not a number.</summary>
+        private static string Edge(Rect rect, float x, float z)
+        {
+            if (!IsFinite(x) || !IsFinite(z)) return "?";
+            var ns = z > rect.MaxZ ? "N" : z < rect.MinZ ? "S" : "";
+            var ew = x > rect.MaxX ? "E" : x < rect.MinX ? "W" : "";
+            return "past " + ns + ew;
+        }
+
+        /// <summary>The XZ boxes of the NavMesh <paramref name="navVertices"/>, the spawn markers,
+        /// the BorderZones and the Terrain, as one log fragment in the format the probe's own
+        /// "extent sources" line uses - for MenuMapHost's "together" line. Diagnostics only.</summary>
+        internal static string SourceBounds(Vector3[] navVertices) =>
+            BoundsLine(Union("navmesh", navVertices), Union("spawn markers", SpawnMarkerPositions()), BorderZoneBox(), TerrainBox());
+
+        private static string BoundsLine(params Box[] boxes) => string.Join("; ", boxes.Select(XZ).ToArray());
+
+        private static string XZ(Box b) =>
+            b.Valid
+                ? $"{b.Source} x {F(b.MinX)}..{F(b.MaxX)} z {F(b.MinZ)}..{F(b.MaxZ)} " +
+                  $"({F(b.MaxX - b.MinX)}x{F(b.MaxZ - b.MinZ)} m, {b.Count})"
+                : $"{b.Source} none ({b.Count})";
+
         private static bool Outside(Rect rect, float x, float z) =>
             !IsFinite(x) || !IsFinite(z) ||
             x < rect.MinX || x > rect.MaxX || z < rect.MinZ || z > rect.MaxZ;
+
+        /// <summary>How far past <paramref name="rect"/> a point lies, in metres along the worse axis;
+        /// 0 inside, infinity for a point that is not a number.</summary>
+        private static double Beyond(Rect rect, float x, float z)
+        {
+            if (!IsFinite(x) || !IsFinite(z)) return double.PositiveInfinity;
+
+            var dx = Math.Max(Math.Max(rect.MinX - x, x - rect.MaxX), 0d);
+            var dz = Math.Max(Math.Max(rect.MinZ - z, z - rect.MaxZ), 0d);
+            return Math.Max(dx, dz);
+        }
+
+        /// <summary><paramref name="box"/>, grown in X and Z to hold the zones and spawn points that lie
+        /// just past its padded rectangle - or <paramref name="box"/> itself, the very object, when
+        /// there is nothing to grow for or growing would not be honest.
+        ///
+        /// It grows ONLY when the padded box would fail the containment check (over
+        /// <see cref="MaxOutsideShare"/> outside). A box that passes is never touched, so no map that
+        /// measured fine before this existed - in a raid or in the menu - gets a different rectangle.
+        /// It runs the same way in a raid and in the menu: nothing here asks which one it is in, the
+        /// menu is simply where a short NavMesh has been seen (Interchange, see
+        /// <see cref="GrowToContainmentPoints"/>).
+        ///
+        /// What it will not do, so the check still fails for a real failure:
+        ///   - grow to a point more than <see cref="MaxGrowMetres"/> past the padded rectangle. That
+        ///     point stays outside and is counted as outside by the check below;
+        ///   - grow either axis by more than <see cref="MaxGrowFraction"/> of its length. Then the box
+        ///     is returned unchanged and the check rejects it as before.
+        /// The grown box is padded like any other, so a grown point gets the full margin too, and
+        /// <see cref="Inset"/> recovers the grown box from the stored rectangle.</summary>
+        /// <param name="map">The map's name, for the log line.</param>
+        /// <param name="box">The box the ranking chose.</param>
+        /// <param name="triggers">The harvest's triggers, or null (a capture's own measurement).</param>
+        /// <param name="spawns">The spawn point marker positions.</param>
+        private static Box GrowToPoints(string map, Box box, ICollection<HarvestedTrigger> triggers, Vector3[] spawns)
+        {
+            var rect = Pad(box);
+
+            // The same population, in the same order, the containment check counts.
+            var points = new List<Vector2>();
+            foreach (var trigger in triggers ?? Array.Empty<HarvestedTrigger>())
+            {
+                if (trigger != null) points.Add(new Vector2(trigger.X, trigger.Z));
+            }
+
+            foreach (var spawn in spawns ?? Array.Empty<Vector3>()) points.Add(new Vector2(spawn.x, spawn.z));
+
+            var outside = points.Count(p => Outside(rect, p.x, p.y));
+            if (points.Count == 0 || outside <= points.Count * MaxOutsideShare) return box;
+
+            var grown = box.Copy();
+            var near = 0;
+            var far = 0;
+            var furthest = 0d;
+
+            foreach (var p in points)
+            {
+                if (!Outside(rect, p.x, p.y)) continue;
+
+                var beyond = Beyond(rect, p.x, p.y);
+                if (beyond > MaxGrowMetres)
+                {
+                    far++;
+                    continue;
+                }
+
+                // Y is the box's own, so only the XZ rectangle moves; the floors' fallback Y range
+                // is what it was.
+                grown.Add(new Vector3(p.x, grown.MinY, p.y));
+                near++;
+                if (beyond > furthest) furthest = beyond;
+            }
+
+            if (near == 0) return box;
+
+            var lengthX = box.MaxX - box.MinX;
+            var lengthZ = box.MaxZ - box.MinZ;
+            var growX = (grown.MaxX - grown.MinX) - lengthX;
+            var growZ = (grown.MaxZ - grown.MinZ) - lengthZ;
+
+            if (growX > lengthX * MaxGrowFraction || growZ > lengthZ * MaxGrowFraction)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {map}'s {box.Source} box would have to grow {F(growX)} x {F(growZ)} m to hold its " +
+                    $"{near} zones and spawn points just outside it - over {Percent(MaxGrowFraction)} % of an axis, " +
+                    "so it is not grown and is judged as measured.");
+                return box;
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: {map}'s {box.Source} box left {outside} of {points.Count} zones and spawn points outside " +
+                $"its padded rectangle; grown by west {F(box.MinX - grown.MinX)}, east {F(grown.MaxX - box.MaxX)}, " +
+                $"south {F(box.MinZ - grown.MinZ)}, north {F(grown.MaxZ - box.MaxZ)} m to hold {near} of them " +
+                $"(furthest {F(furthest)} m past the pad); {far} further than {F(MaxGrowMetres)} m left out.");
+
+            return grown;
+        }
 
         // --- the rectangle --------------------------------------------------------------------
 
@@ -745,6 +946,23 @@ namespace QuestTree.QuestGraph
                 .ToArray();
         }
 
+        /// <summary>The SpawnPointMarkers themselves, read the way <see cref="SpawnMarkerPositions"/>
+        /// reads them, for the outside-points diagnostics. Never null.</summary>
+        private static SpawnPointMarker[] SpawnMarkers()
+        {
+            try
+            {
+                var registered = LocationScene.GetAll<SpawnPointMarker>()?.Where(m => m != null).ToArray();
+                if (registered != null && registered.Length > 0) return registered;
+            }
+            catch (Exception)
+            {
+                // The scene search below, as SpawnMarkerPositions does.
+            }
+
+            return UnityEngine.Object.FindObjectsOfType<SpawnPointMarker>().Where(m => m != null).ToArray();
+        }
+
         /// <summary>"Ground", "Floor 2", "Floor 3", "Basement", "Basement 2" - what the Maps tab shows
         /// and what an objective's floor vocabulary is matched against.</summary>
         /// <param name="level">0 for the ground floor, positive up, negative down.</param>
@@ -831,6 +1049,20 @@ namespace QuestTree.QuestGraph
             public float MaxX = float.MinValue;
             public float MaxY = float.MinValue;
             public float MaxZ = float.MinValue;
+
+            /// <summary>A separate box with the same source, count and bounds, for
+            /// <see cref="GrowToPoints"/> to grow without touching the one it was handed.</summary>
+            public Box Copy() => new Box(Source)
+            {
+                Count = Count,
+                Valid = Valid,
+                MinX = MinX,
+                MinY = MinY,
+                MinZ = MinZ,
+                MaxX = MaxX,
+                MaxY = MaxY,
+                MaxZ = MaxZ
+            };
 
             public void Add(Bounds bounds)
             {

@@ -1020,6 +1020,8 @@ namespace QuestTree.QuestGraph
         internal static IEnumerator LoadAll(IList<SceneEntry> scenes, RunContext ctx)
         {
             var measured = new List<Scene>();
+            var nav = new NavTrack();
+            Try("sampling the NavMesh before loading", () => nav.Sample(null, 0, scenes.Count, force: true));
 
             for (var i = 0; i < scenes.Count; i++)
             {
@@ -1119,7 +1121,11 @@ namespace QuestTree.QuestGraph
 
                 measured.Add(scene);
                 Try($"measuring {label}", () => MeasureScene(label, entry.Name, scene, loadMs, memBefore, errorsBefore));
+                Try($"sampling the NavMesh after {label}", () => nav.Sample(entry.Name, i + 1, scenes.Count,
+                    force: KeptSceneSuffixes.Any(s => entry.Name.EndsWith(s, StringComparison.OrdinalIgnoreCase))));
             }
+
+            Try("the NavMesh sampling summary", () => nav.Summary());
 
             if (ctx.Refusal != null) Log($"{ctx.LocationId}: STOPPED LOADING - refused: {ctx.Refusal}.");
             else if (ctx.Abort != null) Log($"{ctx.LocationId}: STOPPED LOADING: {ctx.Abort}.");
@@ -2410,6 +2416,100 @@ namespace QuestTree.QuestGraph
             Log($"{label} memory: before {memBefore}; after {Memory()}. (measured in {clock.ElapsedMilliseconds} ms)");
         }
 
+        /// <summary>Diagnostics only: which scenes add NavMesh area. After a scene loads, the NavMesh is triangulated and a
+        /// line is logged only when its vertex count or XZ box changed, naming the scene(s) since the last sample.
+        ///
+        /// Cost: Unity exposes no cheap NavMesh-data counter (NavMesh.GetSettingsCount counts agent types, which scene
+        /// data does not change), so the triangulation is the signal. On an empty or small NavMesh it costs ~0 ms; it
+        /// reaches 30-40 ms and ~10 MB of fresh arrays per call once a large mesh (an _AI scene) is in - garbage the
+        /// non-compacting Mono heap keeps reserved. So every scene is sampled only while the arrays allocated so far are
+        /// under <see cref="DenseBytes"/> AND the last count was under <see cref="DenseVertices"/> vertices (and the GC
+        /// is on); otherwise only _AI scenes, every <see cref="SparseEvery"/>th scene and the last. At most
+        /// <see cref="MaxSamples"/> samples in all: worst case ~256 MB + 40 x ~11 MB plus the forced _AI and last samples, about 700 MB (far less in practice). A
+        /// sparse sample's delta is attributed to the range of scenes since the previous sample.</summary>
+        private sealed class NavTrack
+        {
+            private const long DenseBytes = 256L * 1024 * 1024;
+            private const int DenseVertices = 50000;
+            private const int SparseEvery = 25;
+            private const int MaxSamples = 40;
+
+            private int _verts = -1;
+            private float _minX, _maxX, _minZ, _maxZ;
+            private long _spentMs, _bytes;
+            private int _samples, _changes, _skipped, _scenes;
+            private int _lastSampled;
+            private string _firstUnsampled;
+
+            internal void Sample(string sceneName, int index, int count, bool force)
+            {
+                if (sceneName != null) _scenes++;
+                if (_firstUnsampled == null) _firstUnsampled = sceneName;
+
+                // Each triangulation allocates its arrays anew (~10 MB on a 300k-vertex mesh); with the collector off
+                // (EFT turns it off in a raid) that garbage would stay, so then only the sparse samples run.
+                var dense = _bytes < DenseBytes && _verts < DenseVertices &&
+                            UnityEngine.Scripting.GarbageCollector.GCMode == UnityEngine.Scripting.GarbageCollector.Mode.Enabled;
+                // The _AI scene and the last are never skipped: on Streets the NavMesh arrives at scene 245 of 245, long
+                // after the cheap empty-mesh samples have spent the cap.
+                var must = force || index == count;
+                if (!must && (_samples >= MaxSamples || (!dense && index % SparseEvery != 0)))
+                {
+                    _skipped++;
+                    return;
+                }
+
+                var clock = Stopwatch.StartNew();
+                var triangulation = NavMesh.CalculateTriangulation();
+                var vertices = triangulation.vertices ?? Array.Empty<Vector3>();
+                _bytes += vertices.Length * 12L + (triangulation.indices?.Length ?? 0) * 4L + (triangulation.areas?.Length ?? 0) * 4L;
+                float minX = float.MaxValue, maxX = float.MinValue, minZ = float.MaxValue, maxZ = float.MinValue;
+                foreach (var v in vertices)
+                {
+                    if (v.x < minX) minX = v.x;
+                    if (v.x > maxX) maxX = v.x;
+                    if (v.z < minZ) minZ = v.z;
+                    if (v.z > maxZ) maxZ = v.z;
+                }
+
+                var ms = clock.ElapsedMilliseconds;
+                _spentMs += ms;
+                _samples++;
+
+                var changed = vertices.Length != _verts || minX != _minX || maxX != _maxX || minZ != _minZ || maxZ != _maxZ;
+
+                if (changed && sceneName != null)
+                {
+                    _changes++;
+                    var which = index - _lastSampled <= 1
+                        ? $"scene {index}/{count} '{sceneName}'"
+                        : $"scenes {_lastSampled + 1}-{index}/{count} ('{_firstUnsampled}'..'{sceneName}', one sample for all {index - _lastSampled})";
+                    var before = Math.Max(_verts, 0);
+                    var delta = vertices.Length - before;
+                    Log($"NavMesh after {which}: {before} -> {vertices.Length} vertices ({(delta >= 0 ? "+" : "")}{delta}); " +
+                        (vertices.Length == 0
+                            ? "empty"
+                            : $"xz x {F(minX)}..{F(maxX)} z {F(minZ)}..{F(maxZ)} ({F(maxX - minX)}x{F(maxZ - minZ)} m)") +
+                        $" [{ms} ms].");
+                }
+                else if (sceneName == null)
+                {
+                    Log($"NavMesh before loading: {vertices.Length} vertices [{ms} ms].");
+                }
+
+                _verts = vertices.Length;
+                _minX = minX; _maxX = maxX; _minZ = minZ; _maxZ = maxZ;
+                _lastSampled = index;
+                _firstUnsampled = null;
+            }
+
+            internal void Summary() =>
+                Log($"NavMesh per-scene sampling: {_samples} sample(s) (incl. the one before loading) in {_spentMs} ms " +
+                    $"(~{_bytes / (1024 * 1024)} MB of arrays), {_changes} change(s); of {_scenes} loaded scene(s) {_skipped} not sampled " +
+                    $"(dense under {DenseBytes / (1024 * 1024)} MB and {DenseVertices} vertices, then every {SparseEvery}th, the last " +
+                    $"and every _AI scene; at most {MaxSamples} samples).");
+        }
+
         /// <summary>Everything loaded, together: what phase 2's capture would find, and whether any camera draws it.</summary>
         internal static void MeasureTogether(List<Scene> scenes, MenuState before)
         {
@@ -2431,6 +2531,10 @@ namespace QuestTree.QuestGraph
                 $"SpawnPointMarkers {spawns}, ExfiltrationPoints {exits}, BotZones {botZones}; TriggerWithId (incl. inactive) {triggers}; " +
                 $"Singleton<GameWorld> {(Singleton<GameWorld>.Instantiated ? "SET" : "not set")}, " +
                 $"Singleton<LevelSettings> {(Singleton<LevelSettings>.Instantiated ? "SET" : "not set")}; Camera.main '{(Camera.main != null ? Camera.main.name : "none")}'.");
+
+            // Diagnostics: the XZ boxes MapExtentProbe chooses from, in the format its own "extent sources" line uses in a
+            // raid, so a menu run and a raid on the same map compare line for line.
+            Try("the together bounds", () => Log($"together bounds: {MapExtentProbe.SourceBounds(triangulation.vertices)}."));
 
             if (before != null)
             {
