@@ -23,7 +23,7 @@ namespace QuestTree.Patches
         protected override MethodBase GetTargetMethod() =>
             AccessTools.Method(typeof(GameWorld), "OnGameStarted");
 
-        /// <summary>Whether the three watchers (mesh probe, capture, campaign) are installed only when the map name
+        /// <summary>Whether the three key watchers (mesh probe, capture, campaign; not the raid watch) are installed only when the map name
         /// is already known at OnGameStarted. True: a local SPT raid sets MainPlayer.Location inside LocalGame.Run,
         /// before the hook (review F58). The rollback switch if a co-op client turns out to set it later.</summary>
         private const bool RequireMapNameAtStart = true;
@@ -42,13 +42,28 @@ namespace QuestTree.Patches
                 return;
             }
 
+            // The raid watch the menu map host's raid checks read (MenuMapHost.InMenu / RaidStarting). Permanent and the
+            // first thing done: on EVERY raid world, with no map-name gate, because a raid the watch missed is a raid the
+            // menu host could load a map into - the check must fail closed. Ahead of the HarvestZones gate: whether a raid
+            // is running does not depend on whether it is harvested. Not on a HideoutGameWorld, which InMenu allows (it can
+            // outlive a hideout visit); the trader visit has returned above. Catches for itself; the try is so nothing it
+            // throws can reach the harvest below.
+            try
+            {
+                if (!(__instance is HideoutGameWorld)) RaidWatch.Install(__instance);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: could not install the raid watch ({ex.Message}).");
+            }
+
             var hasMap = !string.IsNullOrEmpty(MapName(__instance));
             var watchers = hasMap || !RequireMapNameAtStart;
 
             if (!watchers)
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: OnGameStarted on a {__instance.GetType().Name} with no map name - the capture, " +
-                    "campaign and probe keys are not installed; the zone harvest still looks for one in a few seconds.");
+                    "campaign and probe keys are not installed (the raid watch is); the zone harvest still looks for one in a few seconds.");
 
             // THROWAWAY (the 3D map experiments): the mesh probe key, in a try of its OWN. It used to
             // share the block below, which put a debug tool in front of the harvest, the capture and the

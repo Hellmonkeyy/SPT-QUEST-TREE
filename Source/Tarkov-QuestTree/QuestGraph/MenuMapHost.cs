@@ -3241,7 +3241,7 @@ namespace QuestTree.QuestGraph
                 var singleton = Singleton<GameWorld>.Instance;
                 var screen = CurrentScreen();
 
-                if (MeshProbe.RaidWatchers > 0) why = "in a raid (a raid watcher is alive)";
+                if (RaidWatch.Live) why = "in a raid (a raid watcher is alive)";
                 else if (singleton != null && !(singleton is HideoutGameWorld))
                     why = $"a raid GameWorld is the singleton ({singleton.GetType().Name})";
                 else if (raidWorld != null) why = $"a raid GameWorld object exists ({raidWorld.GetType().Name}; a raid is loading)";
@@ -3281,7 +3281,7 @@ namespace QuestTree.QuestGraph
             try
             {
                 var singleton = Singleton<GameWorld>.Instance;
-                return MeshProbe.RaidWatchers > 0 || (singleton != null && !(singleton is HideoutGameWorld));
+                return RaidWatch.Live || (singleton != null && !(singleton is HideoutGameWorld));
             }
             catch (Exception)
             {
