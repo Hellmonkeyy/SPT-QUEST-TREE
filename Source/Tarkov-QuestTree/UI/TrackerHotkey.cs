@@ -71,6 +71,9 @@ namespace QuestTree.UI
             // proven to tick in the menu. After the host's dead-run check above.
             QuestGraph.SelfTest.Poll(this);
 
+            // Track T stage T0: the map data probe's start switch, cancel and end. After the host's dead-run check above.
+            QuestGraph.MapDataProbe.Poll(this);
+
             if (!ModSettings.Ready) return;
 
             var shortcut = ModSettings.OpenTracker.Value;

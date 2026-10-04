@@ -369,6 +369,11 @@ namespace QuestTree
         /// Switching it on again during a run cancels the run. Off by default; F12 and the cfg only, not in Entries.</summary>
         public static ConfigEntry<bool> SelfTestRun { get; private set; }
 
+        /// <summary>Track T stage T0: the map data probe's start switch (QuestGraph.MapDataProbe) - a location id runs it once
+        /// for that map in the main menu; empty is off. The probe clears it before it starts; setting it again during a run
+        /// cancels the run. F12 and the cfg only, not in Entries.</summary>
+        public static ConfigEntry<string> MapDataProbeLocation { get; private set; }
+
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -1146,6 +1151,15 @@ namespace QuestTree
                 "It switches itself back off when it starts. Switch it on again, or press the map capture key, to cancel. It " +
                 "refuses in a raid, in the hideout, with the hideout preloaded, or while a capture runs. Restart the game " +
                 "after it, before any raid.");
+
+            // Track T stage T0: the map data probe's start switch - out of Entries like the self-test's; F12 and the cfg only.
+            MapDataProbeLocation = config.Bind(
+                "Advanced", "Run map data probe (main menu)", "",
+                "Debug only. Set to a location id (bigmap, Woods, Interchange, ...) in the MAIN MENU to run a read-only probe " +
+                "of that map once: it hosts the map's scenes in the menu, measures its textures, terrain, decals, trees, normal " +
+                "maps, a test light and memory, unloads the map, and writes BepInEx/plugins/QuestTree/probe/mapdata-<id>-<time>.json. " +
+                "It changes no map set and uploads nothing. It clears itself when it starts; set it again during a run to " +
+                "cancel. It refuses in a raid, in the hideout, or while a capture or the self-test runs. Empty = off.");
 
             // WP2: the 3D mesh's accumulation - out of Entries, so the in-panel Settings tab shows no row for them; F12 and
             // the cfg file only.
