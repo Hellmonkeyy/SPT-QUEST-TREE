@@ -1056,6 +1056,63 @@ namespace QuestTree.UI
         private const double PositionQuantum = 1d / 256d;
 
         /// <summary>
+        /// Opt B: the relief's simplification tolerance, metres. Inside each relief block, aligned squares of whole quads are
+        /// merged bottom-up into one leaf (<see cref="ReliefSimplifier"/>) while all its (side + 1)^2 heights lie within a slab
+        /// this thick around their least-squares plane - so any triangulation of the leaf's grid points, and the true surface,
+        /// both lie in that slab, and the drawn ground is never more than this far from the full-resolution one. The outer quad
+        /// ring of a block (its overlap with the neighbour, and the neighbour's overlap with it) is never merged, and a leaf
+        /// with a smaller neighbour's corner on its side is drawn as a fan through it, so no crack and no T-junction. Rollback:
+        /// 0 (every whole quad drawn, as before). Static readonly so the branch is not folded away.
+        /// </summary>
+        internal static readonly float ReliefSimplifyTolerance = 0.15f;
+
+        /// <summary>The largest relief leaf, in quads a side (a power of two): 32 quads is 16 m at 0.5 m cells.</summary>
+        private const int ReliefLeafMaxQuads = 32;
+
+        /// <summary>
+        /// Opt B: a renderer (one file "building") whose largest world extent is under this many metres is a SMALL PROP: its
+        /// faces (not its roofs) go to chunks of their own (<see cref="SizeClassSmallProp"/>), which <see cref="Submit"/> skips
+        /// when the prop would come to less than <see cref="SmallPropMinPixels"/> on screen.
+        /// </summary>
+        internal static readonly float SmallPropMetres = 4f;
+
+        /// <summary>Opt B: the on-screen size, pixels, under which a small-prop chunk is not drawn - measured for the largest
+        /// prop in the chunk at the chunk's nearest point to the camera, so it never hides a prop that would show. Rollback: 0
+        /// (never hidden, and no small-prop chunks).</summary>
+        internal static readonly float SmallPropMinPixels = 2f;
+
+        /// <summary>Opt B: a renderer whose largest world extent is under this many metres is a SMALL BUILDING: its chunks cast
+        /// no shadow when "3D map: small buildings cast shadows" is off. The 3D extent rather than the footprint, so a lamp post
+        /// or a mast keeps its long shadow. Rollback: 0 (no small-building chunks).</summary>
+        internal static readonly float SmallShadowMetres = 6f;
+
+        /// <summary>A chunk's size class (<see cref="MeshData.SizeClass"/>): an ordinary one.</summary>
+        private const byte SizeClassNormal = 0;
+
+        /// <summary>A small building's chunk: no shadow under the setting.</summary>
+        private const byte SizeClassSmallBuilding = 1;
+
+        /// <summary>A small prop's chunk: no shadow under the setting, and not drawn when under the pixel threshold.</summary>
+        private const byte SizeClassSmallProp = 2;
+
+        /// <summary>The size class of a renderer of largest extent <paramref name="extent"/> m; a roof is never a small prop
+        /// (the roofs carry the top picture, which the map is read by from far away), only a small building.</summary>
+        private static byte SizeClassOf(float extent, bool roof)
+        {
+            if (!(extent >= 0f)) return SizeClassNormal;
+            if (!roof && SmallPropMinPixels > 0f && extent < SmallPropMetres) return SizeClassSmallProp;
+            return extent < SmallShadowMetres ? SizeClassSmallBuilding : SizeClassNormal;
+        }
+
+        /// <summary>The chunk-name suffix of a size class.</summary>
+        private static string SizeSuffix(byte sizeClass) =>
+            sizeClass == SizeClassNormal ? "" : sizeClass == SizeClassSmallProp ? "-prop" : "-small";
+
+        /// <summary>The setting "3D map: small buildings cast shadows"; true (today's look) before the settings are ready.</summary>
+        private static bool SmallBuildingShadowsWanted =>
+            !ModSettings.Ready || ModSettings.MapSmallBuildingShadows == null || ModSettings.MapSmallBuildingShadows.Value;
+
+        /// <summary>
         /// How far the mesh file's extent may differ from the picture's before the mesh is refused, in
         /// metres.
         ///
@@ -1170,6 +1227,10 @@ namespace QuestTree.UI
             public long BuildingTriangles;
             public int BuildingCount;
             public long Cells;
+
+            /// <summary>Opt B: the relief's owned triangles before simplification (<see cref="ReliefSimplifyTolerance"/>);
+            /// <see cref="GroundTriangles"/> is after. For the first-frame line.</summary>
+            public long GroundTrianglesFull;
 
             /// <summary>The buildings' vertical faces, one entry per colour: see <see cref="WallTint"/>.
             /// Empty until <see cref="WallsPending"/> clears. Owned here like the rest of the geometry -
@@ -2754,6 +2815,7 @@ namespace QuestTree.UI
 
                 into.Cells = data.Cells;
                 into.GroundTriangles = data.GroundTriangles;
+                into.GroundTrianglesFull = data.GroundTrianglesFull;
                 into.BuildingTriangles = data.BuildingTriangles;
                 into.BuildingCount = data.BuildingCount;
                 into.Dropped = data.Dropped;
@@ -5156,13 +5218,23 @@ namespace QuestTree.UI
         /// casting and receiving.</summary>
         private void SubmitAll(List<Mesh> meshes, Material material, bool ground)
         {
-            for (var i = 0; i < meshes.Count; i++)
-            {
-                var mesh = meshes[i];
-                if (mesh == null) continue;
+            // opt B: a check draws exactly the meshes it names - no small-prop skip, no shadow rule
+            _plainSubmit = true;
 
-                if (ground) Submit(mesh, material, castShadows: false);
-                else Submit(mesh, material);
+            try
+            {
+                for (var i = 0; i < meshes.Count; i++)
+                {
+                    var mesh = meshes[i];
+                    if (mesh == null) continue;
+
+                    if (ground) Submit(mesh, material, castShadows: false);
+                    else Submit(mesh, material);
+                }
+            }
+            finally
+            {
+                _plainSubmit = false;
             }
         }
 
@@ -6459,6 +6531,13 @@ namespace QuestTree.UI
             public int[] Indices;
             public Color32[] Colours;
 
+            /// <summary>Opt B: the chunk's size class (<see cref="SizeClassOf"/>) and, for a small one, the largest extent (m)
+            /// of any renderer in it - what <see cref="Submit"/> measures against the pixel threshold. Set by the sinks, kept
+            /// through MergeSmall (the max) and Pack, and registered with the mesh by <see cref="MakeMesh"/>.</summary>
+            public byte SizeClass;
+
+            public float PropExtent;
+
             /// <summary>Its UVs are in repeats of a tile drawn with wrapMode Repeat (an atlas chunk), so a whole-repeat shift
             /// of all of them samples the same texels - which is what lets <see cref="Pack"/> bring them into [0, 1].</summary>
             public bool RepeatUvs;
@@ -6934,6 +7013,10 @@ namespace QuestTree.UI
             public int Level;
             public long Cells;
             public long GroundTriangles;
+
+            /// <summary>Opt B: the relief's triangles before simplification; see <see cref="Built.GroundTrianglesFull"/>.</summary>
+            public long GroundTrianglesFull;
+
             public long BuildingTriangles;
             public long TopTriangles;
             public long SideTriangles;
@@ -7191,6 +7274,8 @@ namespace QuestTree.UI
                 _minY = float.PositiveInfinity;
 
                 var any = false;
+                var min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                var max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
 
                 for (var i = 0; i < n; i++)
                 {
@@ -7203,10 +7288,23 @@ namespace QuestTree.UI
                     _positions[i] = vertex;
                     any |= _finite[i];
                     if (_finite[i] && vertex.y < _minY) _minY = vertex.y;
+
+                    if (!_finite[i]) continue;
+
+                    min = Vector3.Min(min, vertex);
+                    max = Vector3.Max(max, vertex);
                 }
+
+                // opt B: the renderer's size, over its finite vertices (NaN with none - SizeClassOf calls that normal)
+                var size = max - min;
+                LoadedExtent = any ? Mathf.Max(size.x, Mathf.Max(size.y, size.z)) : float.NaN;
 
                 return any;
             }
+
+            /// <summary>Opt B: the largest world extent (m) of the building last loaded, over its finite vertices; NaN with
+            /// none. Its size class (<see cref="SizeClassOf"/>).</summary>
+            public float LoadedExtent { get; private set; } = float.NaN;
 
             /// <summary>The relief of the band the building last loaded is filed in, or null. See GroundSkirt.</summary>
             private MapMeshFile.ReliefBand _skirtBand;
@@ -7526,19 +7624,27 @@ namespace QuestTree.UI
                 PrepareBuildings(p, level, data, cancel);
             }
 
-            // the merge rule: a tile with little on this floor is one chunk, not one per cell
-            var total = data.Ground.Count + data.Roofs.Count + data.RoofsElsewhere.Count;
-            foreach (var side in data.Sides) total += side?.Count ?? 0;
+            // the merge rule: a tile with little on this floor is one chunk, not one per cell - per size class, so a small
+            // prop's chunk is never merged into one that is always drawn. The roofs and sides keep their ordinary chunks as
+            // they were and fold only their small-class ones (opt B), so the size split adds at most a chunk or two per list
+            // where little is small, and never more than two per (destination, cell).
+            var total = data.Ground.Count + data.RoofsElsewhere.Count;
 
             data.ChunksSplit = total;
             data.ChunksMerged = total;
 
-            foreach (var pair in data.Atlas)
+            void Merge(List<MeshData> chunks, bool smallOnly)
             {
-                data.ChunksSplit += pair.Value.Count;
-                MergeSmall(pair.Value);
-                data.ChunksMerged += pair.Value.Count;
+                if (chunks == null) return;
+
+                data.ChunksSplit += chunks.Count;
+                MergeSmall(chunks, smallOnly);
+                data.ChunksMerged += chunks.Count;
             }
+
+            Merge(data.Roofs, true);
+            foreach (var side in data.Sides) Merge(side, true);
+            foreach (var pair in data.Atlas) Merge(pair.Value, false);
 
             if (p.Compact) PackAll(data, cancel);
 
@@ -7551,9 +7657,48 @@ namespace QuestTree.UI
         /// not worth it for a few small props. Concatenated as they are (normals made, UVs unshifted, before Pack), so
         /// nothing about a face changes; only its draw call does. Under the rollback, or with one chunk, nothing to do.
         /// </summary>
-        private static void MergeSmall(List<MeshData> chunks)
+        private static void MergeSmall(List<MeshData> chunks, bool smallOnly = false)
         {
             if (SpatialChunkMetres <= 0f || CellSplitMinVertices <= 0 || chunks == null || chunks.Count <= 1) return;
+
+            // Opt B: per size class (MeshData.SizeClass) - a merged chunk is one class, so Submit can still skip or unshadow it
+            // whole. smallOnly leaves the ordinary class as it is (the roofs and sides, which were never merged).
+            var mixed = false;
+
+            foreach (var chunk in chunks)
+                mixed |= (chunk?.SizeClass ?? SizeClassNormal) != (chunks[0]?.SizeClass ?? SizeClassNormal);
+
+            if (!mixed)
+            {
+                if (!smallOnly || (chunks[0]?.SizeClass ?? SizeClassNormal) != SizeClassNormal) MergeRun(chunks);
+                return;
+            }
+
+            var runs = new List<MeshData>[SizeClassSmallProp + 1];
+
+            foreach (var chunk in chunks)
+            {
+                var size = chunk?.SizeClass ?? SizeClassNormal;
+                (runs[size] ??= new List<MeshData>()).Add(chunk);
+            }
+
+            chunks.Clear();
+
+            for (var size = 0; size < runs.Length; size++)
+            {
+                var run = runs[size];
+                if (run == null) continue;
+
+                if (!smallOnly || size != SizeClassNormal) MergeRun(run);
+                chunks.AddRange(run);
+            }
+        }
+
+        /// <summary>WORKER. <see cref="MergeSmall"/>'s merge of one run of chunks of ONE size class: all into one chunk when
+        /// they come to no more than <see cref="CellSplitMinVertices"/> vertices.</summary>
+        private static void MergeRun(List<MeshData> chunks)
+        {
+            if (chunks.Count <= 1) return;
 
             var vertices = 0;
             var indices = 0;
@@ -7578,7 +7723,8 @@ namespace QuestTree.UI
                 Uvs = new Vector2[vertices],
                 Indices = new int[indices],
                 Colours = colours ? new Color32[vertices] : null,
-                RepeatUvs = chunks[0].RepeatUvs
+                RepeatUvs = chunks[0].RepeatUvs,
+                SizeClass = chunks[0].SizeClass
             };
 
             var v = 0;
@@ -7596,6 +7742,7 @@ namespace QuestTree.UI
                 for (var i = 0; i < chunk.Indices.Length; i++) merged.Indices[k++] = chunk.Indices[i] + v;
 
                 v += n;
+                merged.PropExtent = Mathf.Max(merged.PropExtent, chunk.PropExtent);
             }
 
             chunks.Clear();
@@ -7698,6 +7845,7 @@ namespace QuestTree.UI
                     data.Ground.Add(MeshData.From($"{p.MapKey}-relief-{band.Level}-{first}", vertices, uvs, indices, colours,
                         creases: false));
                     data.GroundTriangles += indices.Count / 3;
+                    data.GroundTrianglesFull += indices.Count / 3;
                 }
 
                 if (last >= band.Height - 1) break;
@@ -7722,6 +7870,12 @@ namespace QuestTree.UI
             // one quad of overlap each way: side + 1 quads, side + 2 vertices a row
             var stride = side + 2;
             var map = new int[stride * stride];
+
+            // opt B: the block's heights for the simplifier (NaN = no hit), its scratch, and its triangles as vertex slots
+            var heights = new float[stride * stride];
+            var sizes = new int[(stride - 1) * (stride - 1)];
+            var marks = new bool[stride * stride];
+            var triangles = new List<int>();
 
             var vertices = new List<Vector3>();
             var uvs = new List<Vector2>();
@@ -7748,33 +7902,37 @@ namespace QuestTree.UI
                     indices.Clear();
                     colours?.Clear();
 
-                    for (var row = firstRow; row < lastRow; row++)
+                    // Opt B: the block's quads through ReliefSimplifier - every whole quad (all four corners measured, as in
+                    // the strips) as before, or merged leaves where the ground is flat to ReliefSimplifyTolerance. Its
+                    // vertices are the block's own grid points, so Corner places them exactly as it always has: same heights,
+                    // same lattice points, same planar UVs (linear in x and z, so a merged quad samples the picture exactly as
+                    // the quads it replaces did), and the flat-colour build's one FlatGroundColour on every vertex - there is
+                    // no colour boundary for a merge to cross.
+                    var quadsW = lastCol - firstCol;
+                    var quadsH = lastRow - firstRow;
+                    var width = quadsW + 1;
+
+                    for (var z = 0; z <= quadsH; z++)
                     {
-                        for (var col = firstCol; col < lastCol; col++)
+                        for (var x = 0; x <= quadsW; x++)
                         {
-                            // All four or none, as in the strips.
-                            if (band.CodeAt(col, row) == MapMeshFile.NoHit) continue;
-                            if (band.CodeAt(col + 1, row) == MapMeshFile.NoHit) continue;
-                            if (band.CodeAt(col, row + 1) == MapMeshFile.NoHit) continue;
-                            if (band.CodeAt(col + 1, row + 1) == MapMeshFile.NoHit) continue;
-
-                            // the overlap quad belongs to the next block: drawn here, counted there
-                            if (row < ownRows && col < ownCols) owned++;
-
-                            var a = Corner(p, band, col, row, firstCol, firstRow, stride, map, vertices, uvs, colours);
-                            var b = Corner(p, band, col + 1, row, firstCol, firstRow, stride, map, vertices, uvs, colours);
-                            var c = Corner(p, band, col, row + 1, firstCol, firstRow, stride, map, vertices, uvs, colours);
-                            var d = Corner(p, band, col + 1, row + 1, firstCol, firstRow, stride, map, vertices, uvs, colours);
-
-                            indices.Add(a);
-                            indices.Add(c);
-                            indices.Add(b);
-
-                            indices.Add(b);
-                            indices.Add(c);
-                            indices.Add(d);
+                            var code = band.CodeAt(firstCol + x, firstRow + z);
+                            heights[z * width + x] = code == MapMeshFile.NoHit ? float.NaN : p.File.HeightOf(code);
                         }
                     }
+
+                    // the overlap quad belongs to the next block: drawn here, counted there
+                    owned = ReliefSimplifier.Build(heights, quadsW, quadsH, ownCols - firstCol, ownRows - firstRow,
+                        ReliefSimplifyTolerance, ReliefLeafMaxQuads, sizes, marks, triangles, out var ownedFull);
+
+                    for (var t = 0; t < triangles.Count; t++)
+                    {
+                        var slot = triangles[t];
+                        indices.Add(Corner(p, band, firstCol + slot % width, firstRow + slot / width, firstCol, firstRow, stride, map,
+                            vertices, uvs, colours));
+                    }
+
+                    data.GroundTrianglesFull += ownedFull;
 
                     if (indices.Count == 0) continue;
 
@@ -7793,10 +7951,214 @@ namespace QuestTree.UI
                     }
 
                     data.Ground.Add(block);
-                    data.GroundTriangles += owned * 2;
+                    data.GroundTriangles += owned;
                 }
             }
         }
+
+        // BEGIN ReliefSimplifier - tools/check-relief-simplify.py compiles this region on its own: no Unity type in it.
+        /// <summary>
+        /// WORKER. Opt B: one relief block's triangles, simplified within a tolerance and free of cracks and T-junctions.
+        ///
+        /// Input: the block's vertex heights, (quadsW + 1) x (quadsH + 1) row-major, NaN where nothing was hit. A quad is WHOLE
+        /// when its four corners were hit (all four or none, as ever). Output: triangles as vertex slots (z * (quadsW + 1) + x),
+        /// wound as the relief always was - (a, c, b) / (b, c, d), a = (x, z), b = (x + 1, z), c = (x, z + 1) - so they face up.
+        ///
+        /// The rule, and why it holds:
+        /// <list type="number">
+        /// <item>Leaves. Every whole quad starts as a leaf of size 1. Bottom-up, for s = 2, 4, .. maxLeaf, an aligned s x s
+        /// square becomes ONE leaf when its four s/2 children are leaves and all its (s + 1)^2 heights lie in a slab of
+        /// thickness <c>tolerance</c> around their least-squares plane. Any triangulation of the leaf's grid points lies in
+        /// that slab (a convex set), and so does the full-resolution surface, so the two differ by at most the tolerance.</item>
+        /// <item>The ring. Leaves are only made inside quads [1, quadsW - 2] x [1, quadsH - 2]: the block's outer quad ring -
+        /// its overlap quad, and the neighbour's overlap quad it starts on - is always full resolution, the same triangles
+        /// in both blocks. So the line a block ends on is, in its neighbour, the edge of an unmerged quad strip: both blocks
+        /// have every grid vertex along it, and the shared edges match exactly (no crack).</item>
+        /// <item>No T-junction. A vertex is drawn only where it is the corner of a leaf (or a fan centre, strictly inside its
+        /// leaf). A leaf of size 1 has no grid point inside its sides. A larger leaf collects every leaf corner lying on its
+        /// perimeter - exactly the corners of the smaller neighbours along it - and, when there is any beyond its own four,
+        /// is drawn as a fan from its centre through all of them; so every edge ends at every vertex lying on it, and
+        /// two leaves sharing a stretch of side split it at the same points. No balance rule is needed.</item>
+        /// </list>
+        /// With tolerance 0 (or maxLeaf under 2) nothing merges: every whole quad, two triangles, as before.
+        /// Returns the triangles owned (quads with x &lt; ownCols and z &lt; ownRows; the overlap quads are the next block's);
+        /// <c>ownedFull</c> is what that was before simplification (two a whole owned quad).
+        /// </summary>
+        internal static class ReliefSimplifier
+        {
+            public static int Build(
+                float[] heights, int quadsW, int quadsH, int ownCols, int ownRows, double tolerance, int maxLeaf,
+                int[] sizes, bool[] marks, System.Collections.Generic.List<int> triangles, out int ownedFull)
+            {
+                triangles.Clear();
+                ownedFull = 0;
+
+                var width = quadsW + 1;
+                var owned = 0;
+
+                // --- sizes[quad]: a leaf's size at its origin quad, 0 for a quad inside a bigger leaf, -1 for a hole
+                for (var z = 0; z < quadsH; z++)
+                {
+                    for (var x = 0; x < quadsW; x++)
+                    {
+                        var at = z * width + x;
+                        var whole = !float.IsNaN(heights[at]) && !float.IsNaN(heights[at + 1]) &&
+                                    !float.IsNaN(heights[at + width]) && !float.IsNaN(heights[at + width + 1]);
+
+                        sizes[z * quadsW + x] = whole ? 1 : -1;
+                        if (whole && x < ownCols && z < ownRows) ownedFull += 2;
+                    }
+                }
+
+                // --- merge, bottom-up, inside the ring
+                const int ring = 1;   // CHECK-MUTATE-RING
+
+                if (tolerance > 0d)
+                {
+                    for (var s = 2; s <= maxLeaf; s *= 2)
+                    {
+                        var h = s / 2;
+
+                        for (var z0 = ring; z0 + s - 1 <= quadsH - 1 - ring; z0 += s)
+                        {
+                            for (var x0 = ring; x0 + s - 1 <= quadsW - 1 - ring; x0 += s)
+                            {
+                                if (sizes[z0 * quadsW + x0] != h || sizes[z0 * quadsW + x0 + h] != h ||
+                                    sizes[(z0 + h) * quadsW + x0] != h || sizes[(z0 + h) * quadsW + x0 + h] != h)
+                                    continue;
+
+                                if (!Flat(heights, width, x0, z0, s, tolerance)) continue;
+
+                                sizes[z0 * quadsW + x0] = s;
+                                sizes[z0 * quadsW + x0 + h] = 0;
+                                sizes[(z0 + h) * quadsW + x0] = 0;
+                                sizes[(z0 + h) * quadsW + x0 + h] = 0;
+                            }
+                        }
+                    }
+                }
+
+                // --- every leaf's corners
+                for (var i = 0; i < width * (quadsH + 1); i++) marks[i] = false;
+
+                for (var z = 0; z < quadsH; z++)
+                {
+                    for (var x = 0; x < quadsW; x++)
+                    {
+                        var s = sizes[z * quadsW + x];
+                        if (s < 1) continue;
+
+                        marks[z * width + x] = true;
+                        marks[z * width + x + s] = true;
+                        marks[(z + s) * width + x] = true;
+                        marks[(z + s) * width + x + s] = true;
+                    }
+                }
+
+                // --- the triangles
+                var perimeter = new System.Collections.Generic.List<int>();
+
+                for (var z = 0; z < quadsH; z++)
+                {
+                    for (var x = 0; x < quadsW; x++)
+                    {
+                        var s = sizes[z * quadsW + x];
+                        if (s < 1) continue;
+
+                        var a = z * width + x;
+                        var b = a + s;
+                        var c = a + s * width;
+                        var d = c + s;
+                        var before = triangles.Count;
+
+                        perimeter.Clear();
+
+                        if (s > 1)
+                        {
+                            // clockwise seen from above (x right, z up), as a -> c -> d -> b: the winding of (a, c, b)
+                            for (var k = 0; k < s; k++) Mark(perimeter, marks, a + k * width);          // up the left side
+                            for (var k = 0; k < s; k++) Mark(perimeter, marks, c + k);                  // along the top
+                            for (var k = 0; k < s; k++) Mark(perimeter, marks, d - k * width);          // down the right side
+                            for (var k = 0; k < s; k++) Mark(perimeter, marks, b - k);                  // back along the bottom
+                        }
+
+                        if (perimeter.Count > 4)   // CHECK-MUTATE-FAN
+                        {
+                            var centre = (z + s / 2) * width + x + s / 2;
+
+                            for (var k = 0; k < perimeter.Count; k++)
+                            {
+                                triangles.Add(centre);
+                                triangles.Add(perimeter[k]);
+                                triangles.Add(perimeter[(k + 1) % perimeter.Count]);
+                            }
+                        }
+                        else
+                        {
+                            triangles.Add(a);
+                            triangles.Add(c);
+                            triangles.Add(b);
+
+                            triangles.Add(b);
+                            triangles.Add(c);
+                            triangles.Add(d);
+                        }
+
+                        if (x < ownCols && z < ownRows) owned += (triangles.Count - before) / 3;
+                    }
+                }
+
+                return owned;
+            }
+
+            private static void Mark(System.Collections.Generic.List<int> perimeter, bool[] marks, int slot)
+            {
+                if (marks[slot]) perimeter.Add(slot);
+            }
+
+            /// <summary>Whether the (s + 1)^2 heights of the square at (x0, z0) lie in a slab of thickness
+            /// <paramref name="tolerance"/> around their least-squares plane.</summary>
+            private static bool Flat(float[] heights, int width, int x0, int z0, int s, double tolerance)
+            {
+                var half = s / 2d;
+                var n = (double)(s + 1) * (s + 1);
+                double sum = 0d, sx = 0d, sz = 0d;
+
+                for (var z = 0; z <= s; z++)
+                {
+                    for (var x = 0; x <= s; x++)
+                    {
+                        var y = (double)heights[(z0 + z) * width + x0 + x];
+                        sum += y;
+                        sx += y * (x - half);
+                        sz += y * (z - half);
+                    }
+                }
+
+                // sum over the grid of (x - s/2)^2 = (s + 1) * s (s + 1) (s + 2) / 12
+                var sxx = (s + 1d) * s * (s + 1d) * (s + 2d) / 12d;
+                var mean = sum / n;
+                var gx = sx / sxx;
+                var gz = sz / sxx;
+
+                var lo = double.PositiveInfinity;
+                var hi = double.NegativeInfinity;
+
+                for (var z = 0; z <= s; z++)
+                {
+                    for (var x = 0; x <= s; x++)
+                    {
+                        var r = heights[(z0 + z) * width + x0 + x] - (mean + gx * (x - half) + gz * (z - half));
+                        if (r < lo) lo = r;
+                        if (r > hi) hi = r;
+                        if (hi - lo > tolerance) return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+        // END ReliefSimplifier
 
         /// <summary>
         /// WORKER. A relief vertex's normal from the band itself: the area-weighted sum of both triangles of each of the (up
@@ -7873,6 +8235,11 @@ namespace QuestTree.UI
         /// chunk used to see, so the normals are the ones before spatial chunking. Side faces use unshared vertices
         /// (per-face light), like the tints. Every chunk holds at most <see cref="ChunkVertexCap"/> vertices - a hard
         /// bound now, the crease split having happened before the cut.
+        ///
+        /// Opt B: every sink is also keyed by the renderer's size class (<see cref="SizeClassOf"/>), so a small prop's or a
+        /// small building's faces land in chunks of their own that <see cref="Submit"/> can skip or draw without a shadow as
+        /// a whole - a (tile, cell) chunk holds many renderers, and its bounds say nothing about any one of them. At most three
+        /// chunks where there was one, and only where small renderers are; MergeSmall folds the light ones back per class.
         /// </summary>
         private static void PrepareBuildings(Prep p, int level, FloorData data, CancellationToken cancel)
         {
@@ -7882,12 +8249,12 @@ namespace QuestTree.UI
             var remap = new ChunkRemap();
             var groups = new BuildingGroups();
 
-            // One per (tile, cell) and per (floor the roof stands on, cell), made on first use.
-            var tileSinks = new Dictionary<(int Tile, int Cell), GroupSink>();
-            var roofSinks = new Dictionary<(int Floor, int Cell), GroupSink>();
+            // One per (tile, cell, size class) and per (floor the roof stands on, cell, size class), made on first use.
+            var tileSinks = new Dictionary<(int Tile, int Cell, byte Size), GroupSink>();
+            var roofSinks = new Dictionary<(int Floor, int Cell, byte Size), GroupSink>();
 
-            // One per (side slot, cell), made on the first face that side takes there.
-            var sideSinks = new Dictionary<(int Slot, int Cell), MeshSink>();
+            // One per (side slot, cell, size class), made on the first face that side takes there.
+            var sideSinks = new Dictionary<(int Slot, int Cell, byte Size), MeshSink>();
 
             foreach (var building in p.File.Buildings)
             {
@@ -7900,6 +8267,11 @@ namespace QuestTree.UI
 
                 p.LoadBuilding(building);
                 groups.Begin(building.VertexCount);
+
+                // opt B: this renderer's size class - for its faces (maybe a small prop), and for its roofs (never a prop)
+                var extent = p.LoadedExtent;
+                var faceSize = SizeClassOf(extent, roof: false);
+                var roofSize = SizeClassOf(extent, roof: true);
 
                 // Three at a time; a triangle with an index past the building's own vertices is dropped - a
                 // caller that trusts a file it did not write is a caller that throws inside a mesh build.
@@ -7987,20 +8359,23 @@ namespace QuestTree.UI
                     {
                         var slot = view - 1;
 
-                        if (!sideSinks.TryGetValue((slot, cell), out var sink))
+                        if (!sideSinks.TryGetValue((slot, cell, faceSize), out var sink))
                         {
                             sink = new MeshSink
                             {
                                 Flat = false,
-                                Name = CellName(p, "side" + SideOrder[slot], level, cell),
-                                Target = data.Sides[slot] ??= new List<MeshData>()
+                                Name = CellName(p, "side" + SideOrder[slot], level, cell) + SizeSuffix(faceSize),
+                                Target = data.Sides[slot] ??= new List<MeshData>(),
+                                SizeClass = faceSize
                             };
-                            sideSinks[(slot, cell)] = sink;
+                            sideSinks[(slot, cell, faceSize)] = sink;
                         }
 
                         var side = p.Sides[slot];
 
                         if (sink.Count + 3 > cap) sink.Flush();
+
+                        sink.Note(extent);
 
                         sink.Add(pa, SideUv(side, pa));
                         sink.Add(pb, SideUv(side, pb));
@@ -8032,6 +8407,8 @@ namespace QuestTree.UI
                     // a new vertex numbering (the group's, after the crease split): every chunk places it afresh
                     remap.Begin(shaded.Vertices.Length);
 
+                    var size = group.Roof ? roofSize : faceSize;
+
                     for (var t = 0; t < triangles; t++)
                     {
                         var cell = group.Cells[t];
@@ -8039,25 +8416,27 @@ namespace QuestTree.UI
 
                         if (group.Roof)
                         {
-                            if (!roofSinks.TryGetValue((group.Key, cell), out sink))
+                            if (!roofSinks.TryGetValue((group.Key, cell, size), out sink))
                             {
                                 var floor = group.Key;
-                                var name = floor == level
+                                var name = (floor == level
                                     ? CellName(p, "buildings", level, cell)
-                                    : CellName(p, "buildings", level, cell) + "-on" + floor.ToString(CultureInfo.InvariantCulture);
+                                    : CellName(p, "buildings", level, cell) + "-on" + floor.ToString(CultureInfo.InvariantCulture)) +
+                                    SizeSuffix(size);
 
-                                sink = new GroupSink(remap, name, p.Flat, false, floor == level
+                                sink = new GroupSink(remap, name, p.Flat, false, size, floor == level
                                     ? (Action<MeshData>)(mesh => data.Roofs.Add(mesh))
                                     : mesh => data.RoofsElsewhere.Add((floor, mesh)));
-                                roofSinks[(group.Key, cell)] = sink;
+                                roofSinks[(group.Key, cell, size)] = sink;
                             }
                         }
-                        else if (!tileSinks.TryGetValue((group.Key, cell), out sink))
+                        else if (!tileSinks.TryGetValue((group.Key, cell, size), out sink))
                         {
                             var list = AtlasList(data, group.Key);
-                            sink = new GroupSink(remap, CellName(p, "tile" + group.Key.ToString(CultureInfo.InvariantCulture), level, cell),
-                                false, true, list.Add);
-                            tileSinks[(group.Key, cell)] = sink;
+                            sink = new GroupSink(remap,
+                                CellName(p, "tile" + group.Key.ToString(CultureInfo.InvariantCulture), level, cell) + SizeSuffix(size),
+                                false, true, size, list.Add);
+                            tileSinks[(group.Key, cell, size)] = sink;
                         }
 
                         if (sink.Count + 3 > cap)
@@ -8068,6 +8447,7 @@ namespace QuestTree.UI
                         }
 
                         sink.Triangle(shaded, t);
+                        sink.Note(extent);
                     }
                 }
             }
@@ -8189,6 +8569,7 @@ namespace QuestTree.UI
             private readonly string _name;
             private readonly bool _flat;
             private readonly bool _repeat;
+            private readonly byte _size;
             private readonly Action<MeshData> _target;
             private readonly List<Vector3> _vertices = new List<Vector3>();
             private readonly List<Vector3> _normals = new List<Vector3>();
@@ -8197,23 +8578,32 @@ namespace QuestTree.UI
             private readonly List<int> _indices = new List<int>();
             private int _owner;
             private int _part;
+            private float _extent;
 
             /// <param name="remap">The pass's remap.</param>
             /// <param name="name">The chunk name's stem.</param>
             /// <param name="flat">A flat-colour build: each vertex gets the flat building colour.</param>
             /// <param name="repeat">Atlas UVs, in repeats of a Repeat-wrapped tile (MeshData.RepeatUvs).</param>
+            /// <param name="size">Opt B: the size class of every renderer this sink takes (MeshData.SizeClass).</param>
             /// <param name="target">Where each flushed chunk goes.</param>
-            public GroupSink(ChunkRemap remap, string name, bool flat, bool repeat, Action<MeshData> target)
+            public GroupSink(ChunkRemap remap, string name, bool flat, bool repeat, byte size, Action<MeshData> target)
             {
                 _remap = remap;
                 _name = name;
                 _flat = flat;
                 _repeat = repeat;
+                _size = size;
                 _target = target;
                 _owner = remap.NewOwner();
             }
 
             public int Count => _vertices.Count;
+
+            /// <summary>Opt B: a renderer of largest extent <paramref name="extent"/> m has faces in this chunk.</summary>
+            public void Note(float extent)
+            {
+                if (extent > _extent) _extent = extent;
+            }
 
             /// <summary>Triangle <paramref name="t"/> of <paramref name="shaded"/>.</summary>
             public void Triangle(MeshData shaded, int t)
@@ -8254,9 +8644,13 @@ namespace QuestTree.UI
                         Colours = _flat ? _colours.ToArray() : null,
 
                         // drawn on the tile's own texture with wrapMode Repeat: Pack may shift these UVs by whole repeats
-                        RepeatUvs = _repeat
+                        RepeatUvs = _repeat,
+                        SizeClass = _size,
+                        PropExtent = _extent
                     });
                 }
+
+                _extent = 0f;
 
                 _vertices.Clear();
                 _normals.Clear();
@@ -8438,25 +8832,32 @@ namespace QuestTree.UI
                 var k = bucketOf[w];
                 var count = building.Indices.Length - building.Indices.Length % 3;
 
+                // opt B: the renderer's size class, as PrepareBuildings keys its sinks (walls are never roofs)
+                var extent = p.LoadedExtent;
+                var size = SizeClassOf(extent, roof: false);
+
                 for (var i = 0; i < count; i += 3)
                 {
                     if (!p.WallTriangle(building, i, out var a, out var b, out var c)) continue;
 
                     var cell = p.CellOf(a, b, c);
-                    var key = (long)k * cells + cell;
+                    var key = ((long)k * cells + cell) * 3 + size;
 
                     if (!sinks.TryGetValue(key, out var sink))
                     {
                         sink = new MeshSink
                         {
                             Flat = p.Flat,
-                            Name = CellName(p, "walls", level, cell) + "-" + k.ToString(CultureInfo.InvariantCulture),
-                            Target = data.Tints[k].Meshes
+                            Name = CellName(p, "walls", level, cell) + "-" + k.ToString(CultureInfo.InvariantCulture) + SizeSuffix(size),
+                            Target = data.Tints[k].Meshes,
+                            SizeClass = size
                         };
                         sinks[key] = sink;
                     }
 
                     if (sink.Count + 3 > cap) sink.Flush();
+
+                    sink.Note(extent);
 
                     sink.Add(a, p.PlanarUv(a.x, a.z));
                     sink.Add(b, p.PlanarUv(b.x, b.z));
@@ -8499,13 +8900,23 @@ namespace QuestTree.UI
             /// <summary>The list each flushed chunk goes to.</summary>
             public List<MeshData> Target;
 
+            /// <summary>Opt B: the size class of every renderer this sink takes (MeshData.SizeClass).</summary>
+            public byte SizeClass;
+
             private readonly List<Vector3> _vertices = new List<Vector3>();
             private readonly List<Vector2> _uvs = new List<Vector2>();
             private readonly List<int> _indices = new List<int>();
             private readonly List<Color32> _colours = new List<Color32>();
             private int _part;
+            private float _extent;
 
             public int Count => _vertices.Count;
+
+            /// <summary>Opt B: a renderer of largest extent <paramref name="extent"/> m has faces in this chunk.</summary>
+            public void Note(float extent)
+            {
+                if (extent > _extent) _extent = extent;
+            }
 
             public void Add(Vector3 position, Vector2 uv)
             {
@@ -8519,13 +8930,18 @@ namespace QuestTree.UI
             {
                 if (_indices.Count == 0 || Target == null) return;
 
-                Target.Add(MeshData.From(Name + "-" + (_part++).ToString(CultureInfo.InvariantCulture), _vertices, _uvs, _indices,
-                    Flat ? _colours : null));
+                var data = MeshData.From(Name + "-" + (_part++).ToString(CultureInfo.InvariantCulture), _vertices, _uvs, _indices,
+                    Flat ? _colours : null);
+
+                data.SizeClass = SizeClass;
+                data.PropExtent = _extent;
+                Target.Add(data);
 
                 _vertices.Clear();
                 _uvs.Clear();
                 _indices.Clear();
                 _colours.Clear();
+                _extent = 0f;
             }
         }
 
@@ -8624,7 +9040,12 @@ namespace QuestTree.UI
 
             try
             {
-                return data.Packed != null ? MakeCompactMesh(data) : MakeFloatMesh(data);
+                var mesh = data.Packed != null ? MakeCompactMesh(data) : MakeFloatMesh(data);
+
+                // opt B: a small chunk's class and largest prop go with the mesh, for Submit
+                if (mesh != null && data.SizeClass != SizeClassNormal) Sizes.Add(mesh, new MeshSize(data.SizeClass, data.PropExtent));
+
+                return mesh;
             }
             finally
             {
@@ -9164,6 +9585,7 @@ namespace QuestTree.UI
                             (_rt != null && !_rt.IsCreated()) ||
                             _renderedViewVersion != ViewVersion || !SameCut(_cutY, _renderedCutY) ||
                             tileVersion != _renderedTileVersion ||
+                            SmallBuildingShadowsWanted != _smallShadows ||
                             (RenderHeartbeatFrames > 0 && _framesSeen % RenderHeartbeatFrames == 0);
 
                 if (!dirty)
@@ -9186,6 +9608,11 @@ namespace QuestTree.UI
                 _renderedViewVersion = ViewVersion;
                 _renderedCutY = _cutY;
                 _renderedTileVersion = tileVersion;
+
+                // opt B: the setting as this render reads it (a change re-renders above, never rebuilds), and its counts
+                _smallShadows = SmallBuildingShadowsWanted;
+                _smallHidden = 0;
+                _shadowOff = 0;
                 _framesRendered++;
 
                 var clock = first ? Stopwatch.StartNew() : null;
@@ -9265,6 +9692,8 @@ namespace QuestTree.UI
                     // chunk count before and after the merge rule (walls only where they are built by now).
                     var split = 0;
                     var merged = 0;
+                    var reliefFull = 0L;
+                    var reliefDrawn = 0L;
                     var counted = new HashSet<Built>();
 
                     foreach (var floor in _floors)
@@ -9274,16 +9703,22 @@ namespace QuestTree.UI
 
                         split += built.ChunksSplit + built.WallChunksSplit;
                         merged += built.ChunksMerged + built.WallChunksMerged;
+                        reliefFull += built.GroundTrianglesFull;
+                        reliefDrawn += built.GroundTriangles;
                     }
 
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame: {1:#,##0} of {2:#,##0} submitted triangles in the view frustum " +
                         "({3:0.0} %), {4:#,##0} of {5:#,##0} draw call(s) in view (Unity culls the rest); chunks on a {6} m grid " +
-                        "{7:#,##0} split, {8:#,##0} after merging tiles/tints under {9:#,##0} vertices.",
+                        "{7:#,##0} split, {8:#,##0} after merging tiles/tints under {9:#,##0} vertices; relief {10:#,##0} -> {11:#,##0} " +
+                        "triangles (simplified within {12} m); {13:#,##0} small-prop draw(s) hidden under {14} px; {15:#,##0} small-building " +
+                        "draw(s) without a shadow (small buildings cast shadows: {16}).",
                         _mapKey, _viewTrianglesIn, _viewTriangles,
                         _viewTriangles > 0 ? 100d * _viewTrianglesIn / _viewTriangles : 0d,
-                        _viewDrawsIn, _drawCalls, SpatialChunkMetres, split, merged, CellSplitMinVertices));
+                        _viewDrawsIn, _drawCalls, SpatialChunkMetres, split, merged, CellSplitMinVertices,
+                        reliefFull, reliefDrawn, ReliefSimplifyTolerance, _smallHidden, SmallPropMinPixels, _shadowOff,
+                        _smallShadows ? "on" : "off"));
                 }
 
                 // Spot-sun stage B's proof, after the real frame is in the view's texture (the check renders into a
@@ -9349,12 +9784,90 @@ namespace QuestTree.UI
             // other mesh (the calibration quads, a float chunk under the rollback) has none and draws with identity, as before.
             var matrix = Frames.TryGetValue(mesh, out var frame) ? frame.Matrix : Matrix4x4.identity;
 
+            // Opt B: a small chunk (MeshData.SizeClass) - a small prop's skipped while its largest prop would be under
+            // SmallPropMinPixels on screen, and any small one drawn without a shadow when the setting says so.
+            if (!_plainSubmit && Sizes.TryGetValue(mesh, out var size))
+            {
+                if (size.Class == SizeClassSmallProp &&
+                    TooSmallOnScreen(frame != null ? frame.World(mesh.bounds) : mesh.bounds, size.Extent))
+                {
+                    _smallHidden++;
+                    return;
+                }
+
+                if (castShadows && !_smallShadows)
+                {
+                    castShadows = false;
+                    _shadowOff++;
+                }
+            }
+
             if (castShadows) Graphics.DrawMesh(mesh, matrix, material, _drawLayer, _camera);
             else
                 Graphics.DrawMesh(mesh, matrix, material, _drawLayer, _camera, 0, null, ShadowCastingMode.Off, true);
             _drawCalls++;
 
             if (_countView) CountInView(mesh, frame);
+        }
+
+        // --- opt B: small chunks ----------------------------------------------------------------------------------
+
+        /// <summary>A small chunk's size class and the largest extent (m) of a renderer in it (<see cref="MeshData.SizeClass"/>).</summary>
+        internal sealed class MeshSize
+        {
+            public readonly byte Class;
+            public readonly float Extent;
+
+            public MeshSize(byte sizeClass, float extent)
+            {
+                Class = sizeClass;
+                Extent = extent;
+            }
+        }
+
+        /// <summary>Every small chunk's <see cref="MeshSize"/>, keyed by its mesh; removed with the mesh, like
+        /// <see cref="Frames"/>. Main thread only.</summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Mesh, MeshSize> Sizes =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<Mesh, MeshSize>();
+
+        /// <summary>Set while <see cref="SubmitAll"/> draws a check's named meshes: Submit applies no opt B rule then.</summary>
+        private bool _plainSubmit;
+
+        /// <summary>"3D map: small buildings cast shadows" as the current render read it.</summary>
+        private bool _smallShadows = true;
+
+        /// <summary>This render's small-prop chunks skipped, and small chunks drawn without a shadow - for the first-frame line.</summary>
+        private int _smallHidden;
+
+        private int _shadowOff;
+
+        /// <summary>
+        /// Whether a prop <paramref name="extent"/> m across, anywhere in <paramref name="world"/>, comes to less than
+        /// <see cref="SmallPropMinPixels"/> on screen: measured at the bounds' NEAREST point to the camera (perspective) or
+        /// by the orthographic size, so the largest prop in the chunk at its largest - never hides one that would show.
+        /// </summary>
+        private bool TooSmallOnScreen(Bounds world, float extent)
+        {
+            if (SmallPropMinPixels <= 0f || _camera == null || !(extent > 0f)) return false;
+
+            var pixels = _rt != null ? _rt.height : _camera.pixelHeight;
+            if (pixels <= 0) return false;
+
+            float metresPerPixel;
+
+            if (_camera.orthographic)
+            {
+                metresPerPixel = 2f * _camera.orthographicSize / pixels;
+            }
+            else
+            {
+                var distance = Mathf.Sqrt(world.SqrDistance(_camera.transform.position));
+                if (!(distance > 0f)) return false;
+
+                metresPerPixel = 2f * distance * Mathf.Tan(_camera.fieldOfView * 0.5f * Mathf.Deg2Rad) / pixels;
+            }
+
+            return extent < SmallPropMinPixels * metresPerPixel;
         }
 
         // --- compact meshes: their frames, and what the first frame's culling would keep -------------------------
@@ -10706,7 +11219,11 @@ namespace QuestTree.UI
 
             // A compact mesh's frame goes with it: Unity's Mono has no ephemerons, so the weak table would otherwise keep
             // every frame (and its key) for the session.
-            if (thing is Mesh mesh) Frames.Remove(mesh);
+            if (thing is Mesh mesh)
+            {
+                Frames.Remove(mesh);
+                Sizes.Remove(mesh);
+            }
 
             try
             {

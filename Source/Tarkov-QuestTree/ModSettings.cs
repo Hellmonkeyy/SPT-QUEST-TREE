@@ -311,6 +311,8 @@ namespace QuestTree
         /// <summary>Opt B (2026-10-01): whether the 3D map's small buildings and props (under about 6 m across) cast the sun's
         /// shadow. Read by Map3DView at every redraw, which it triggers itself on a change - no mesh rebuild. F12 and the cfg
         /// only, like the other 3D-map switches.</summary>
+        public static ConfigEntry<bool> MapSmallBuildingShadows { get; private set; }
+
         /// <summary>THROWAWAY. The debug key of the 3D map experiments - see QuestGraph/MeshProbe.cs,
         /// which measures in one raid and one menu visit whether a scene mesh can be read back off the
         /// GPU, whether colliders stream out with the player, which layer has no renderer on it, and
@@ -1190,6 +1192,12 @@ namespace QuestTree
                     new AcceptableValueList<int>(90, 120, 150, 180)));
 
             // Opt B (2026-10-01): out of Entries like the other 3D map switches; F12 and the cfg file only.
+            MapSmallBuildingShadows = config.Bind(
+                "Advanced", "3D map: small buildings cast shadows", true,
+                "On, the default: every building and prop in the 3D map casts the sun's shadow. Off, the small ones - under " +
+                "about 6 m across: sheds, crates, cars, barrels - cast none, which saves shadow work on a crowded map. Takes " +
+                "effect at the next redraw, without rebuilding the map.");
+
             Entries.AddRange(new ConfigEntryBase[]
             {
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
