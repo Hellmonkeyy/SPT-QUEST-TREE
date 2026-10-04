@@ -67,6 +67,10 @@ namespace QuestTree.UI
             QuestGraph.MenuCaptureRunner.Poll();
             QuestGraph.MapTransfer.CheckUploadHost();
 
+            // The in-game self-test's start switch, cancel and dead-run check. Its runs go on this behaviour, which is
+            // proven to tick in the menu. After the host's dead-run check above.
+            QuestGraph.SelfTest.Poll(this);
+
             if (!ModSettings.Ready) return;
 
             var shortcut = ModSettings.OpenTracker.Value;

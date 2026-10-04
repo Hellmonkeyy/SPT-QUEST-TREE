@@ -123,6 +123,10 @@ namespace QuestTree.UI
             // MeshFor, so the view comes back in 3D on the repaint the run's end makes.
             if (MenuHostBusy) return null;
 
+            // While the self-test runs it opens every map in 3D itself, one at a time, so the Maps tab draws flat. A second
+            // view would share the private layer and blur the self-test's VRAM readings.
+            if (QuestGraph.SelfTest.Running) return null;
+
             return _refusedMeshes.ContainsKey(path) ? null : path;
         }
 
@@ -135,6 +139,7 @@ namespace QuestTree.UI
             if (string.IsNullOrEmpty(path)) return null;
 
             if (MenuHostBusy) return "a capture from game files is running";
+            if (QuestGraph.SelfTest.Running) return "the self-test is running";
 
             return _refusedMeshes.TryGetValue(path, out var reason) ? reason : null;
         }
@@ -202,6 +207,20 @@ namespace QuestTree.UI
             AuxLayout.AddSectionHeader(content, ref y, "Capture from game files", x, width);
 
             var dim = "<color=#FFFFFF60>";
+
+            // The self-test hosts its own test capture and opens the 3D view itself, so no capture can start while it
+            // runs. It gets a cancel here as well (the map capture key and its setting cancel it too).
+            if (QuestGraph.SelfTest.Running)
+            {
+                AuxLayout.AddWrapped(content,
+                    $"<color=#FFFFFFB0>The self-test is running: {QuestGraph.SelfTest.Progress}</color>", x, ref y, width, 11);
+                AuxLayout.AddWrapped(content,
+                    $"{dim}Do not start a raid or open the hideout until it ends. Capturing is unavailable until then.</color>",
+                    x, ref y, width, 11);
+                AuxLayout.AddClickableRow(content, "Cancel the self-test", x, ref y, width, false,
+                    () => QuestGraph.SelfTest.Cancel("cancelled from the Maps tab"));
+                return;
+            }
 
             if (QuestGraph.MenuCaptureRunner.Running)
             {

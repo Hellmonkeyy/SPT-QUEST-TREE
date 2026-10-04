@@ -364,6 +364,11 @@ namespace QuestTree
         /// only. Delete with the probe settings.</summary>
         public static ConfigEntry<bool> ShowMenuTestSets { get; private set; }
 
+        /// <summary>The in-game self-test (QuestGraph.SelfTest). Switching it on in the main menu starts one unattended
+        /// run. The self-test switches it back off before it starts, so a crash never leaves it on for the next launch.
+        /// Switching it on again during a run cancels the run. Off by default; F12 and the cfg only, not in Entries.</summary>
+        public static ConfigEntry<bool> SelfTestRun { get; private set; }
+
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -1131,6 +1136,16 @@ namespace QuestTree
                 "Debug only, and temporary. On, a map in the Maps tab is drawn from its <id>-menu test set (what the menu " +
                 "capture location setting above writes, e.g. bigmap-menu) when one exists, instead of its real set - so a test " +
                 "capture can be looked at. Off, the default, the test sets are never drawn.");
+
+            // The self-test's start switch - out of Entries like the other debug entries; F12 and the cfg only.
+            SelfTestRun = config.Bind(
+                "Advanced", "Run self-test (main menu)", false,
+                "Switch on in the MAIN MENU to run the self-test unattended. It runs a test capture of the smallest map into " +
+                "its throwaway <id>-menu test set (never a real set, never uploaded, deleted again at the end), opens every " +
+                "captured map in 3D and in 2D one at a time, and writes BepInEx/plugins/QuestTree/selftest/selftest-<time>.json. " +
+                "It switches itself back off when it starts. Switch it on again, or press the map capture key, to cancel. It " +
+                "refuses in a raid, in the hideout, with the hideout preloaded, or while a capture runs. Restart the game " +
+                "after it, before any raid.");
 
             // WP2: the 3D mesh's accumulation - out of Entries, so the in-panel Settings tab shows no row for them; F12 and
             // the cfg file only.

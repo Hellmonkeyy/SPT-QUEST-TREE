@@ -581,6 +581,42 @@ namespace QuestTree.UI
             return string.IsNullOrEmpty(modPath) ? null : Path.Combine(modPath, CapturesFolder);
         }
 
+        // --- QuestGraph.SelfTest: read-only access to what the catalog reads -----------------------------------------
+
+        /// <summary>Self-test: the captures folder (<see cref="CapturesRoot"/>), or null. Not created.</summary>
+        internal static string CapturesRootForSelfTest() => CapturesRoot();
+
+        /// <summary>Self-test: every set the catalog reads from disk, as (key, entry, from the host's folder). This
+        /// machine's captures come from the catalog's own scan, the same one Resolve would make. The host's sets come from
+        /// the catalog's scan if it has made one. If it has not, they are read here and NOT kept, because the catalog's
+        /// first host scan (HostCache) is also what starts the host sync. A test that stored its own scan would stop that
+        /// sync from starting. Reads only.</summary>
+        internal static List<(string Key, DynamicMapsLibrary.MapEntry Entry, bool Host)> SetsForSelfTest()
+        {
+            var sets = new List<(string Key, DynamicMapsLibrary.MapEntry Entry, bool Host)>();
+
+            var captures = _captures ??= ScanFolder(null, CapturesRoot(), "captured map");
+            foreach (var pair in captures)
+                if (pair.Value?.Entry != null) sets.Add((pair.Key, pair.Value.Entry, false));
+
+            var host = _hostMaps ?? ScanFolder(null, QuestGraph.MapTransfer.MapsRoot(), "host map");
+            foreach (var pair in host)
+                if (pair.Value?.Entry != null) sets.Add((pair.Key, pair.Value.Entry, true));
+
+            return sets;
+        }
+
+        /// <summary>Self-test: this machine's capture stored under exactly <paramref name="key"/>, or null. No alias is
+        /// tried and no name is added to the entry. Reads only.</summary>
+        /// <param name="key">The capture key (the folder name).</param>
+        internal static DynamicMapsLibrary.MapEntry CaptureForSelfTest(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+
+            var captures = _captures ??= ScanFolder(null, CapturesRoot(), "captured map");
+            return captures.TryGetValue(key, out var capture) ? capture?.Entry : null;
+        }
+
         /// <summary>A capture's meta file, read and validated. Everything a
         /// <see cref="DynamicMapsLibrary.MapEntry"/> needs, and nothing that needs Unity.</summary>
         private sealed class ParsedCapture

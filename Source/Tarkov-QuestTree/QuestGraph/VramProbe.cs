@@ -31,7 +31,23 @@ namespace QuestTree.QuestGraph
         /// <summary>"VRAM 9,812 of 15,104 MB budget (last fetch)", or why there is no reading.</summary>
         internal static string Text()
         {
-            if (_off) return $"VRAM unread ({_why})";
+            if (TryRead(out var usageMb, out var budgetMb))
+                return string.Format(CultureInfo.InvariantCulture, "VRAM {0:#,##0} of {1:#,##0} MB budget (last fetch)", usageMb, budgetMb);
+
+            return _off ? $"VRAM unread ({_why})" : "VRAM not fetched yet";
+        }
+
+        /// <summary>The last fetched local-memory use and budget in MB, and a fresh fetch issued for the next read (so a
+        /// caller wanting a current value reads, waits a frame or two, and reads again). False, with -1s, when nothing was
+        /// fetched yet or the plugin is off for the session. Main thread; never throws. QuestGraph.SelfTest reads this.</summary>
+        /// <param name="usageMb">The GPU's dedicated memory in use, MB.</param>
+        /// <param name="budgetMb">The OS budget for it, MB.</param>
+        internal static bool TryRead(out double usageMb, out double budgetMb)
+        {
+            usageMb = -1d;
+            budgetMb = -1d;
+
+            if (_off) return false;
 
             try
             {
@@ -41,17 +57,18 @@ namespace QuestTree.QuestGraph
                 if (_fetch == IntPtr.Zero) _fetch = GetFunc_FetchLocalMemoryInfo();
                 if (_fetch != IntPtr.Zero) GL.IssuePluginEvent(_fetch, 0);
 
-                if (!got || budget == 0UL) return "VRAM not fetched yet";
+                if (!got || budget == 0UL) return false;
 
-                return string.Format(CultureInfo.InvariantCulture, "VRAM {0:#,##0} of {1:#,##0} MB budget (last fetch)",
-                    usage / (1024d * 1024d), budget / (1024d * 1024d));
+                usageMb = usage / (1024d * 1024d);
+                budgetMb = budget / (1024d * 1024d);
+                return true;
             }
             catch (Exception ex)
             {
                 _off = true;
                 _why = ex.GetType().Name;
                 Plugin.LogSource?.LogDebug($"QuestTree: EFT's VRamUsage plugin could not be read ({ex.GetType().Name}: {ex.Message}) - VRAM is not reported this session.");
-                return $"VRAM unread ({_why})";
+                return false;
             }
         }
     }

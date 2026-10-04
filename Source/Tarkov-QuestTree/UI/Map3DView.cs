@@ -11158,6 +11158,35 @@ namespace QuestTree.UI
         /// </summary>
         internal void Abandon() => _broke = true;
 
+        // --- QuestGraph.SelfTest: read-only views of this view's own state (nothing here changes it) ---------
+
+        /// <summary>Self-test: the first build has finished; drawing starts on the next LateUpdate.</summary>
+        internal bool SelfTestReady => _ready;
+
+        /// <summary>Self-test: the view refused its mesh, threw while drawing, or was abandoned.</summary>
+        internal bool SelfTestBroke => _broke;
+
+        /// <summary>Self-test: why the view refused its mesh, or "".</summary>
+        internal string SelfTestRefusal => _refusal ?? "";
+
+        /// <summary>Self-test: renders made so far; the first one is the first frame.</summary>
+        internal long SelfTestFramesRendered => _framesRendered;
+
+        /// <summary>Self-test: the last render's draw calls. Read in the frame after the first render, this is the
+        /// first frame's count.</summary>
+        internal int SelfTestDrawCalls => _drawCalls;
+
+        /// <summary>Self-test: the first frame's submitted triangles, and how many of them were in the view frustum.</summary>
+        internal long SelfTestTrianglesSubmitted => _viewTriangles;
+
+        internal long SelfTestTrianglesInView => _viewTrianglesIn;
+
+        /// <summary>Self-test: the last render's camera time, ms.</summary>
+        internal double SelfTestRenderMs => _renderMs;
+
+        /// <summary>Self-test: the build is done and nothing is queued (uploads, cuts, walls).</summary>
+        internal bool SelfTestIdle => _ready && _work.Count == 0 && _wallJobs.Count == 0;
+
         /// <summary>Says once that this map's mesh is not usable, and stops. The caller drops the mesh
         /// for the session and repaints into the flat picture.</summary>
         /// <param name="reason">A few words for the toggle's tooltip, written to follow "it was not used:
