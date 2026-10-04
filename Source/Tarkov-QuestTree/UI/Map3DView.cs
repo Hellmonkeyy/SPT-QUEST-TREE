@@ -5379,6 +5379,32 @@ namespace QuestTree.UI
         /// half metre the harvest's bands and the relief's own floor test already allow.</summary>
         private const float FloorFaceSlack = 0.5f;
 
+        /// <summary>The heights a floor's picture camera drew (MapCapture.BeginFloor's camera and far plane, mirrored by
+        /// hand - MapCapture keeps them private, so these MUST follow MapCapture.BeginFloor and BandCameraY; change both together): from its camera - <see cref="CaptureTopCameraHeight"/>
+        /// over the TOPMOST floor's maxY, else <see cref="CaptureCeilingClearance"/> under the next floor's minY but at least
+        /// <see cref="CaptureCeilingClearance"/> over its own maxY (BandCameraY) - down to <see cref="CaptureFarClipSlack"/>
+        /// under its minY, and for the topmost floor <see cref="CaptureTopDepthBelow"/> further (TopBandDepthBelow).
+        /// Geometry outside it was clipped, so that picture holds (0,0,0,0) there.</summary>
+        private static void CaptureWindow(float minY, float maxY, float nextMinY, out float low, out float high)
+        {
+            var top = float.IsInfinity(nextMinY) || float.IsNaN(nextMinY);
+
+            high = top ? maxY + CaptureTopCameraHeight : Mathf.Max(nextMinY - CaptureCeilingClearance, maxY + CaptureCeilingClearance);
+            low = minY - CaptureFarClipSlack - (top ? CaptureTopDepthBelow : 0f);
+        }
+
+        /// <summary>MapCapture.TopBandCameraHeight.</summary>
+        private const float CaptureTopCameraHeight = 300f;
+
+        /// <summary>MapCapture.CeilingClearance (and MinCameraAboveBand, the same half metre).</summary>
+        private const float CaptureCeilingClearance = 0.5f;
+
+        /// <summary>MapCapture.FarClipSlack.</summary>
+        private const float CaptureFarClipSlack = 1f;
+
+        /// <summary>MapCapture.TopBandDepthBelow.</summary>
+        private const float CaptureTopDepthBelow = 50f;
+
         /// <summary>Fills <see cref="_floorRanges"/> from the entry's layers, for the bands the file has. A
         /// band with the catalog's "any height" placeholder (+-2000 m) is left out - a range that claims
         /// every face would take every roof.</summary>
@@ -7099,6 +7125,46 @@ namespace QuestTree.UI
 
             public readonly DynamicMapsLibrary.SidePicture[] Sides = new DynamicMapsLibrary.SidePicture[4];
             public (int Level, float Low, float High)[] FloorRanges = new (int, float, float)[0];
+
+            /// <summary>Per <see cref="FloorRanges"/> entry, the heights its picture's camera drew (<see cref="CaptureWindow"/>),
+            /// and the topmost entry (-1 with none). Made once by <see cref="MeasureWindows"/>, on the main thread, before any
+            /// worker reads them.</summary>
+            private float[] _windowLow = new float[0];
+            private float[] _windowHigh = new float[0];
+            private int _topRange = -1;
+
+            /// <summary>The band level the building last loaded is filed under (<see cref="BandLevelFor"/>): the floor
+            /// <see cref="ViewFor"/> asks <see cref="FloorForFace"/> about, as the roof pass does.</summary>
+            private int _filedLevel;
+
+            /// <summary>Fills the capture windows from <see cref="FloorRanges"/> (their declared bands, the slack taken back
+            /// off; the next floor up's minY as the ceiling). Call once, after FloorRanges is set.</summary>
+            public void MeasureWindows()
+            {
+                var count = FloorRanges.Length;
+
+                _windowLow = new float[count];
+                _windowHigh = new float[count];
+                _topRange = -1;
+
+                for (var i = 0; i < count; i++)
+                {
+                    var minY = FloorRanges[i].Low + FloorFaceSlack;
+                    var nextMinY = float.PositiveInfinity;
+
+                    for (var j = 0; j < count; j++)
+                    {
+                        var low = FloorRanges[j].Low + FloorFaceSlack;
+                        if (j != i && low > minY && low < nextMinY) nextMinY = low;
+                    }
+
+                    CaptureWindow(minY, FloorRanges[i].High - FloorFaceSlack, nextMinY, out _windowLow[i], out _windowHigh[i]);
+
+                    if (_topRange < 0 || FloorRanges[i].Low > FloorRanges[_topRange].Low ||
+                        (FloorRanges[i].Low == FloorRanges[_topRange].Low && FloorRanges[i].Level > FloorRanges[_topRange].Level))
+                        _topRange = i;
+                }
+            }
             public float SpanX;
             public float SpanZ;
 
@@ -7273,7 +7339,8 @@ namespace QuestTree.UI
                     }
                 }
 
-                _skirtBand = File.Band(BandLevelFor(building.Level));
+                _filedLevel = BandLevelFor(building.Level);
+                _skirtBand = File.Band(_filedLevel);
                 _minY = float.PositiveInfinity;
 
                 var any = false;
@@ -7357,6 +7424,20 @@ namespace QuestTree.UI
             /// </summary>
             public int ViewFor(Vector3 a, Vector3 b, Vector3 c)
             {
+                var view = PictureViewFor(a, b, c);
+
+                // Review 2026-10-03: a top face no floor's picture camera drew - the texel under it is the clear colour,
+                // (0,0,0,0), and the roof material does not clip - takes the tint instead. Here, so the roof pass and
+                // WallTriangle still split every triangle exactly once.
+                return view == TopView && FloorForFace((a.y + b.y + c.y) / 3f, _filedLevel) == NoPictureFloor ? TintView : view;
+            }
+
+            /// <summary>The level <see cref="FloorForFace"/> answers for a face no floor's picture camera drew.</summary>
+            public const int NoPictureFloor = int.MinValue;
+
+            /// <summary><see cref="ViewFor"/> before the picture-window test: the face's normal and the side cameras only.</summary>
+            private int PictureViewFor(Vector3 a, Vector3 b, Vector3 c)
+            {
                 if (!SidesActive) return IsRoof(a, b, c) ? TopView : TintView;
 
                 var n = Vector3.Cross(b - a, c - a);
@@ -7423,7 +7504,14 @@ namespace QuestTree.UI
             /// <summary>The floor whose picture textures a top face at height <paramref name="y"/>: the floor
             /// it STANDS ON when its height is inside one floor's band (plus the slack), else
             /// <paramref name="filed"/>. Nearer floor wins an overlap; ties to the higher floor. See
-            /// Built.RoofsOnOtherFloors for why.</summary>
+            /// Built.RoofsOnOtherFloors for why.
+            ///
+            /// On NO floor's band, the filed floor keeps the face only when its picture's camera drew that height
+            /// (<see cref="CaptureWindow"/>); else the TOPMOST floor takes it when its deeper window holds it. Play-test
+            /// 2026-10-03, Woods: 5,300 m2 of shore-bank faces at y -16..-8.5 m, filed under the basement band (-4.5..1 m,
+            /// the nearest by centroid), sampled the basement picture - whose camera stops 1 m under -4.5, so the texel
+            /// there is (0,0,0,0) on 98 % of them - and drew as black blobs over the lake; the top floor's picture, which
+            /// draws down to 50 m under its band, holds them (83 % opaque, 4 % black).</summary>
             public int FloorForFace(float y, int filed)
             {
                 var best = filed;
@@ -7443,8 +7531,54 @@ namespace QuestTree.UI
                     }
                 }
 
-                return best;
+                return bestDistance < float.MaxValue ? best : FloorThatDrew(y, filed);
             }
+
+            /// <summary>A face on no floor's band: <paramref name="filed"/> when its picture's camera window holds
+            /// <paramref name="y"/> (or it has no range to judge by); else the topmost floor when its deeper window holds it;
+            /// else the NEAREST other floor whose window holds it (by distance to its declared band; ties to the higher
+            /// floor); else <see cref="NoPictureFloor"/>: no picture drew that height.
+            ///
+            /// Top before nearest, measured 2026-10-03 on every face this reaches: nearest-first moved 7,600 m2 of Woods'
+            /// outdoor ground (y 1.5-5.5 m, between the basement and ground bands) onto the basement picture, 68 % of it
+            /// (0,0,0,0) there against 2 % on the top picture, and 1,045 m2 on Reserve (15 -> 348 m2 black); laboratory has no
+            /// face off every band, and no face moved to the top picture on Reserve lies inside its bands' -15.5..6.5 m.</summary>
+            private int FloorThatDrew(float y, int filed)
+            {
+                if (_topRange < 0 || _windowLow.Length != FloorRanges.Length) return filed;
+
+                var own = -1;
+
+                for (var i = 0; i < FloorRanges.Length; i++)
+                    if (FloorRanges[i].Level == filed) own = i;
+
+                if (own < 0) return filed;
+                if (InWindow(own, y)) return filed;
+                if (own != _topRange && InWindow(_topRange, y)) return FloorRanges[_topRange].Level;
+
+                var best = -1;
+                var bestDistance = float.MaxValue;
+
+                for (var i = 0; i < FloorRanges.Length; i++)
+                {
+                    if (i == own || i == _topRange || !InWindow(i, y)) continue;
+
+                    var range = FloorRanges[i];
+                    var distance = Mathf.Max(0f, Mathf.Max(range.Low + FloorFaceSlack - y, y - (range.High - FloorFaceSlack)));
+
+                    if (best < 0 || distance < bestDistance ||
+                        (Mathf.Approximately(distance, bestDistance) && range.Level > FloorRanges[best].Level))
+                    {
+                        best = i;
+                        bestDistance = distance;
+                    }
+                }
+
+                return best >= 0 ? FloorRanges[best].Level : NoPictureFloor;
+            }
+
+            /// <summary>Whether range <paramref name="index"/>'s floor's capture camera drew height <paramref name="y"/>.</summary>
+            private bool InWindow(int index, float y) => y >= _windowLow[index] && y <= _windowHigh[index];
 
             /// <summary>The triangle at <paramref name="i"/> of the building last loaded, if it is a usable
             /// WALL (a tint): in range, finite, and <see cref="ViewFor"/> says tint. The exact complement of
@@ -7586,6 +7720,8 @@ namespace QuestTree.UI
                 SpanX = (float)(_file.MaxX - _file.MinX),
                 SpanZ = (float)(_file.MaxZ - _file.MinZ)
             };
+
+            prep.MeasureWindows();
 
             for (var slot = 0; slot < _sides.Length; slot++) prep.Sides[slot] = _sides[slot];
 
@@ -8395,6 +8531,7 @@ namespace QuestTree.UI
                     data.TopArea += area;
 
                     var floorLevel = p.FloorForFace((pa.y + pb.y + pc.y) / 3f, level);
+                    if (floorLevel == Prep.NoPictureFloor) floorLevel = level; // ViewFor tints these; never reached
                     if (floorLevel != level) data.MovedRoofTriangles++;
 
                     groups.Add(p, true, floorLevel, -1, a, b, c, cell);
