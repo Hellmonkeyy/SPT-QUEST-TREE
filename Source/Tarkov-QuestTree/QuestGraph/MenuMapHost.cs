@@ -96,9 +96,16 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        // BEGIN TESTABLE NavTrack.Scenes - tools/tests/unit/run_unit.py compiles this region on its own: no Unity type in it.
         /// <summary>Always loaded whatever <see cref="SkippedSceneSuffixes"/> says: the NavMesh lives only in the _AI scene,
         /// and the capture's extent and floors come from it.</summary>
         internal static readonly string[] KeptSceneSuffixes = { "_AI" };
+
+        /// <summary>Whether <paramref name="sceneName"/> is one <see cref="KeptSceneSuffixes"/> keeps - the scenes
+        /// <see cref="NavTrack"/> always samples.</summary>
+        internal static bool IsKeptScene(string sceneName) =>
+            KeptSceneSuffixes.Any(s => sceneName.EndsWith(s, StringComparison.OrdinalIgnoreCase));
+        // END TESTABLE NavTrack.Scenes
 
         // --- the run slot ------------------------------------------------------------------------------------------------
         // One menu, one run: the probe and the host share this slot, so they never load scenes over each other, and the
@@ -1137,7 +1144,7 @@ namespace QuestTree.QuestGraph
                 measured.Add(scene);
                 Try($"measuring {label}", () => MeasureScene(label, entry.Name, scene, loadMs, memBefore, errorsBefore));
                 Try($"sampling the NavMesh after {label}", () => nav.Sample(entry.Name, i + 1, scenes.Count,
-                    force: KeptSceneSuffixes.Any(s => entry.Name.EndsWith(s, StringComparison.OrdinalIgnoreCase))));
+                    force: IsKeptScene(entry.Name)));
             }
 
             // The NavMesh a raid would have, before anything measures the extent, the floors or the reach: Waypoints'
@@ -2628,12 +2635,8 @@ namespace QuestTree.QuestGraph
                 folder = Path.Combine(Path.GetDirectoryName(dll) ?? "", "navmesh");
             }
 
-            var name = locationKey.ToLower();
-            if (name.StartsWith("factory4")) name = "factory4";
-            if (name.StartsWith("sandbox")) name = "sandbox";
-
-            var path = Path.Combine(folder, name + "-navmesh.bundle");
-            if (!File.Exists(path))
+            var path = WaypointsBundleFile(folder, locationKey, out var name);
+            if (path == null)
             {
                 why = $"DrakiaXYZ-Waypoints has no '{name}-navmesh.bundle' in '{folder}', so a raid uses the game's own too";
                 return null;
@@ -2641,6 +2644,21 @@ namespace QuestTree.QuestGraph
 
             return path;
         }
+
+        // BEGIN TESTABLE WaypointsPath - tools/tests/unit/run_unit.py compiles this region on its own: no Unity type in it.
+        /// <summary>Waypoints' file rule (<see cref="WaypointsBundlePath"/>): <paramref name="locationKey"/> lowered, a name
+        /// starting "factory4" as "factory4" and one starting "sandbox" as "sandbox", then
+        /// <c>&lt;name&gt;-navmesh.bundle</c> in <paramref name="folder"/> - the path when that file exists, else null.</summary>
+        internal static string WaypointsBundleFile(string folder, string locationKey, out string name)
+        {
+            name = locationKey.ToLower();
+            if (name.StartsWith("factory4")) name = "factory4";
+            if (name.StartsWith("sandbox")) name = "sandbox";
+
+            var path = Path.Combine(folder, name + "-navmesh.bundle");
+            return File.Exists(path) ? path : null;
+        }
+        // END TESTABLE WaypointsPath
 
         // UnityEngine.AssetBundle lives in UnityEngine.AssetBundleModule, which this project does not reference; the three
         // calls go through reflection rather than a project change. Each throws on a missing member, inside its caller's
@@ -2713,10 +2731,21 @@ namespace QuestTree.QuestGraph
         /// sparse sample's delta is attributed to the range of scenes since the previous sample.</summary>
         private sealed class NavTrack
         {
+            // BEGIN TESTABLE NavTrack.Rule - tools/tests/unit/run_unit.py compiles this region on its own: no Unity type in it.
             private const long DenseBytes = 256L * 1024 * 1024;
             private const int DenseVertices = 50000;
             private const int SparseEvery = 25;
             private const int MaxSamples = 40;
+
+            /// <summary>Whether <see cref="Sample"/> skips scene <paramref name="index"/> of <paramref name="count"/>. The _AI
+            /// scene (<paramref name="force"/>) and the last are never skipped: on Streets the NavMesh arrives at scene 245 of
+            /// 245, long after the cheap empty-mesh samples have spent the cap.</summary>
+            internal static bool Skips(int index, int count, bool force, int samples, bool dense)
+            {
+                var must = force || index == count;
+                return !must && (samples >= MaxSamples || (!dense && index % SparseEvery != 0));
+            }
+            // END TESTABLE NavTrack.Rule
 
             private int _verts = -1;
             private float _minX, _maxX, _minZ, _maxZ;
@@ -2736,8 +2765,7 @@ namespace QuestTree.QuestGraph
                             UnityEngine.Scripting.GarbageCollector.GCMode == UnityEngine.Scripting.GarbageCollector.Mode.Enabled;
                 // The _AI scene and the last are never skipped: on Streets the NavMesh arrives at scene 245 of 245, long
                 // after the cheap empty-mesh samples have spent the cap.
-                var must = force || index == count;
-                if (!must && (_samples >= MaxSamples || (!dense && index % SparseEvery != 0)))
+                if (Skips(index, count, force, _samples, dense))
                 {
                     _skipped++;
                     return;

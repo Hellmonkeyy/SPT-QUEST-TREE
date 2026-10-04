@@ -522,6 +522,7 @@ namespace QuestTree.QuestGraph
                   $"({F(b.MaxX - b.MinX)}x{F(b.MaxZ - b.MinZ)} m, {b.Count})"
                 : $"{b.Source} none ({b.Count})";
 
+        // BEGIN TESTABLE ExtentGrowth - tools/tests/unit/run_unit.py compiles this region (with the others of the name) on its own.
         private static bool Outside(Rect rect, float x, float z) =>
             !IsFinite(x) || !IsFinite(z) ||
             x < rect.MinX || x > rect.MaxX || z < rect.MinZ || z > rect.MaxZ;
@@ -625,6 +626,7 @@ namespace QuestTree.QuestGraph
 
             return grown;
         }
+        // END TESTABLE ExtentGrowth
 
         // --- the rectangle --------------------------------------------------------------------
 
@@ -714,6 +716,7 @@ namespace QuestTree.QuestGraph
             return box;
         }
 
+        // BEGIN TESTABLE ExtentGrowth
         /// <summary>Grows the box by 4 % of each axis (at least 20 m) and rounds outward to whole
         /// metres, so the number in the log and the number on disk are the same and a re-measurement
         /// of the same map does not drift by centimetres.</summary>
@@ -731,6 +734,7 @@ namespace QuestTree.QuestGraph
                 MaxZ = Math.Ceiling(box.MaxZ + padZ)
             };
         }
+        // END TESTABLE ExtentGrowth
 
         /// <summary>The MEASURED rectangle recovered from a padded one: <see cref="Pad"/> run
         /// backwards, to within the whole metre it rounded outward to.
@@ -1009,6 +1013,7 @@ namespace QuestTree.QuestGraph
 
         // --- helpers -------------------------------------------------------------------------
 
+        // BEGIN TESTABLE ExtentGrowth
         private static bool IsFinite(float v) => !float.IsNaN(v) && !float.IsInfinity(v);
 
         /// <summary>The smaller of two heights, ignoring one that is not a number. Float.MaxValue is
@@ -1120,5 +1125,6 @@ namespace QuestTree.QuestGraph
                 Valid = MaxX > MinX && MaxZ > MinZ;
             }
         }
+        // END TESTABLE ExtentGrowth
     }
 }

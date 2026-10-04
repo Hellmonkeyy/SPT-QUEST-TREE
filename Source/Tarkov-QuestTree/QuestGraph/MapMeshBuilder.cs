@@ -6458,6 +6458,7 @@ namespace QuestTree.QuestGraph
             c.Footprint = Math.Min(c.Footprint, AreaBudget.MinTriangles / AreaBudget.LegacyTrianglesPerSquareMetre);
         }
 
+        // BEGIN TESTABLE PropShare - tools/tests/unit/run_unit.py compiles this region on its own: no Unity type in it.
         /// <summary>The props' share of a cap, triangles.</summary>
         /// <param name="cap">The map's cap.</param>
         internal static long PropShareOf(long cap) => (long)(Math.Max(0L, cap) * PropShareOfCap);
@@ -6484,6 +6485,7 @@ namespace QuestTree.QuestGraph
             var room = (long)(ceiling * BudgetShare) - Math.Max(0L, buildingDemand);
             return Math.Min(PropShareOf(cap), Math.Max(0L, room));
         }
+        // END TESTABLE PropShare
 
         /// <summary>
         /// Admits new prop candidates to the props' share of the cap, LARGEST BOX VOLUME FIRST: each takes min(its source,
@@ -8487,6 +8489,7 @@ namespace QuestTree.QuestGraph
             return tried > 0 && inside >= tried * PlausibleShare;
         }
 
+        // BEGIN TESTABLE MeshGuards - tools/tests/unit/run_unit.py compiles this region (with the others of the name) on its own.
         /// <summary>2026-10-03: whether a world position is inside the renderer's box (already widened by
         /// <see cref="PlausibleSlack"/>) - six float compares, no allocation; NaN is outside.</summary>
         /// <param name="p">The world position.</param>
@@ -8495,6 +8498,7 @@ namespace QuestTree.QuestGraph
             p.x >= source.BoxMin.x && p.x <= source.BoxMax.x &&
             p.y >= source.BoxMin.y && p.y <= source.BoxMax.y &&
             p.z >= source.BoxMin.z && p.z <= source.BoxMax.z;
+        // END TESTABLE MeshGuards
 
         /// <summary>2026-10-03: whether the triangles outside the box are more than <see cref="BoxDropShareMax"/> of those
         /// tested - the building is then refused whole. Ints in, for the harness.</summary>
@@ -8728,6 +8732,7 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        // BEGIN TESTABLE MeshGuards
         /// <summary>2026-10-03: the ground's heights a building is measured against - every band's minY..maxY joined with
         /// the relief's ray hits when there are any (they carry roofs and terrain above a band's own maxY). Floats in, no
         /// Unity type, so the harness can hold it to The Lab's numbers.</summary>
@@ -8830,6 +8835,7 @@ namespace QuestTree.QuestGraph
 
             return true;
         }
+        // END TESTABLE MeshGuards
 
         /// <summary>2026-10-03: the out-of-ground line - the ground and the rule, then the buildings named,
         /// <see cref="ShellDropsLogged"/> to a line, at most <see cref="OutOfGroundNamed"/>. Silent when none.</summary>
@@ -14328,6 +14334,7 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        // BEGIN TESTABLE MeshGuards
         private static bool IsFinite(float v) => !float.IsNaN(v) && !float.IsInfinity(v);
 
         private static bool IsFinite(double v) => !double.IsNaN(v) && !double.IsInfinity(v);
@@ -14353,6 +14360,7 @@ namespace QuestTree.QuestGraph
 
         private static string F(float v) =>
             IsFinite(v) ? v.ToString("0.0", CultureInfo.InvariantCulture) : "n/a";
+        // END TESTABLE MeshGuards
     }
     /// <summary>
     /// The arithmetic of the four oblique side views (plan, stage U - the contract is frozen): which

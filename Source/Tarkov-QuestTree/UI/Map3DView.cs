@@ -5379,6 +5379,7 @@ namespace QuestTree.UI
         /// half metre the harvest's bands and the relief's own floor test already allow.</summary>
         private const float FloorFaceSlack = 0.5f;
 
+        // BEGIN TESTABLE FloorWindow - tools/tests/unit/run_unit.py compiles this region on its own: no Unity type but Mathf.
         /// <summary>The heights a floor's picture camera drew (MapCapture.BeginFloor's camera and far plane, mirrored by
         /// hand - MapCapture keeps them private, so these MUST follow MapCapture.BeginFloor and BandCameraY; change both together): from its camera - <see cref="CaptureTopCameraHeight"/>
         /// over the TOPMOST floor's maxY, else <see cref="CaptureCeilingClearance"/> under the next floor's minY but at least
@@ -5392,6 +5393,7 @@ namespace QuestTree.UI
             high = top ? maxY + CaptureTopCameraHeight : Mathf.Max(nextMinY - CaptureCeilingClearance, maxY + CaptureCeilingClearance);
             low = minY - CaptureFarClipSlack - (top ? CaptureTopDepthBelow : 0f);
         }
+        // END TESTABLE FloorWindow
 
         /// <summary>MapCapture.TopBandCameraHeight.</summary>
         private const float CaptureTopCameraHeight = 300f;
@@ -7124,6 +7126,7 @@ namespace QuestTree.UI
             public bool RoofsFromPicture;
 
             public readonly DynamicMapsLibrary.SidePicture[] Sides = new DynamicMapsLibrary.SidePicture[4];
+            // BEGIN TESTABLE FloorWindow.Prep - tools/tests/unit/run_unit.py compiles this region (with the others of the name) on its own.
             public (int Level, float Low, float High)[] FloorRanges = new (int, float, float)[0];
 
             /// <summary>Per <see cref="FloorRanges"/> entry, the heights its picture's camera drew (<see cref="CaptureWindow"/>),
@@ -7165,6 +7168,7 @@ namespace QuestTree.UI
                         _topRange = i;
                 }
             }
+            // END TESTABLE FloorWindow.Prep
             public float SpanX;
             public float SpanZ;
 
@@ -7501,6 +7505,7 @@ namespace QuestTree.UI
                 return bestScore < MinViewScore ? TintView : best;
             }
 
+            // BEGIN TESTABLE FloorWindow.Prep
             /// <summary>The floor whose picture textures a top face at height <paramref name="y"/>: the floor
             /// it STANDS ON when its height is inside one floor's band (plus the slack), else
             /// <paramref name="filed"/>. Nearer floor wins an overlap; ties to the higher floor. See
@@ -7579,6 +7584,7 @@ namespace QuestTree.UI
 
             /// <summary>Whether range <paramref name="index"/>'s floor's capture camera drew height <paramref name="y"/>.</summary>
             private bool InWindow(int index, float y) => y >= _windowLow[index] && y <= _windowHigh[index];
+            // END TESTABLE FloorWindow.Prep
 
             /// <summary>The triangle at <paramref name="i"/> of the building last loaded, if it is a usable
             /// WALL (a tint): in range, finite, and <see cref="ViewFor"/> says tint. The exact complement of
