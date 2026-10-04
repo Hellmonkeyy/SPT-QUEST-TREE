@@ -1,0 +1,3 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Warning: QuestTree] QuestTree: the extent measured for TarkovStreets-menu (694x588 m, navmesh) leaves 36 of 503 zones and spawn points outside it (7.2 %, over 2.0 %) - it is wrong, so the harvest is sent without one.

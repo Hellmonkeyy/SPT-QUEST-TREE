@@ -1,0 +1,7 @@
+[2026-10-04 00:48:20.953][Information][SPTarkov.Server.Modding.ModLoader] Applying enum prepatch definitions: EnumExtensions.json
+[2026-10-04 00:48:22.572][Information][SPTarkov.Server.Modding.ModValidator] ModLoader: loading: 66 server mods...
+[2026-10-04 00:48:22.704][Information][SPTarkov.Server.Modding.ModValidator] Mod: LootNet version: 1.1.2 (GUID: com.20fpsguy.LootNet | targets SPT: ~4.1.0) by: 20fpsguy loaded
+[2026-10-04 00:48:50.036][Information][QuestTreeServer.QuestPayloadBuilder] Quest Tracker 1.19.0+5360921: serving 1215 quests to the client mod.
+[2026-10-04 00:48:54.813][Information][QuestTreeServer.MapMarkerPayloadBuilder] Quest Tracker: built 163 item-spawn and 680 objective markers across 14 maps.
+[2026-10-04 00:45:26.889][Information][SPTarkov.Server.Middleware.SptLoggerMiddleware] [Client Request] /questtree/quests
+[2026-10-04 01:02:09.056][Information][QuestTreeServer.MapStore] Quest Tracker: map picture set for 'bigmap' stored - 1 floor(s), 4 side(s), 9 atlas page(s) and a 80.9 MB mesh, 106.1 MB.

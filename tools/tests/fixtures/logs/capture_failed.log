@@ -1,0 +1,4 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Info   : QuestTree] QuestTree: menu capture: Woods was not captured: its write failed (IOException: disk full). (3:02)
+[Info   : QuestTree] QuestTree: menu capture: Shoreline was not captured - the capture failed: InvalidOperationException: test. (4:10)

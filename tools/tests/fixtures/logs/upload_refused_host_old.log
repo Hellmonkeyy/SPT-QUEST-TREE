@@ -1,0 +1,3 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Warning: QuestTree] QuestTree: the host refused the capture of Woods (upload schema v3 is newer than the v2 this server reads - this server is older than the client, update the server half) - the rest of it is not sent.

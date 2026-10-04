@@ -1,0 +1,3 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Warning: QuestTree] QuestTree: 9 asynchronous tile readbacks failed in this capture - captures go back to ReadPixels for this session (every failed tile is rendered again).

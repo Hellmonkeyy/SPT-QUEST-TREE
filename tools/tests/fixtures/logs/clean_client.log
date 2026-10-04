@@ -1,0 +1,15 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Error  :ZGFueDkx-AllQuestsCheckmarks] Failed to set custom checkmark in ItemSpecificationPanel!
+ArgumentException: Texture 'collar' is not readable. For this reason, scripts cannot access the memory allocated to it.
+  at (wrapper managed-to-native) UnityEngine.ImageConversion.EncodeToPNG(UnityEngine.Texture2D)
+  at IconCreatorBase`2[TItem,TIcon].SaveIconAsync (TIcon icon) [0x00075] in <cc2d80b06d5b4cb1a5816d2cc901d4c7>:0 
+
+[Info   : QuestTree] QuestTree: menu map host: baseline: 3 scene(s) [CommonUIScene#44, MenuUIScene#48, GameUIScene#46], active 'CommonUIScene'; LocationScenes 0, door colliders 0; Singleton<LevelSettings> not set, Singleton<GameWorld> not set; lightmaps 0; NavMesh vertices 0; terrains 0; ambient Flat, fog False, skybox 'Default-Skybox', sun 'none'; streaming budget 1024 MB / reduction 2 (controller 1024/2); texture mip limit 0; shadow distance 50; EnvironmentManager none.
+[Info   : QuestTree] QuestTree: menu map host: baseline memory: memory: managed heap 1271 MB, Unity allocated 5494 MB; VRAM 3,000 of 8,000 MB budget (last fetch)
+[Info   : QuestTree] QuestTree: TarkovStreets-menu's navmesh box left 4 of 503 zones and spawn points outside its padded rectangle; grown by west 3, east 0, south 0, north 2 m to hold 4 of them.
+[Info   : QuestTree] QuestTree: menu map host: after: 3 scene(s) [CommonUIScene#44, MenuUIScene#48, GameUIScene#46], active 'CommonUIScene'; LocationScenes 0, door colliders 0; Singleton<LevelSettings> not set, Singleton<GameWorld> not set; lightmaps 0; NavMesh vertices 0; terrains 0; ambient Flat, fog False, skybox 'Default-Skybox', sun 'none'; streaming budget 1024 MB / reduction 2 (controller 1024/2); texture mip limit 0; shadow distance 50; EnvironmentManager none.
+[Info   : QuestTree] QuestTree: menu map host: FINISHED tarkovstreets in 134925 ms - 245 scene(s) of 'city.scenespreset.asset' loaded and unloaded; every hosted scene is unloaded and the compared state matches (scenes, LocationScene lists, NavMesh vertices, DontDestroyOnLoad roots). State outside that list is not proven.
+[Info   : QuestTree] QuestTree: menu capture: captured Streets of Tarkov from game files: 2 floor(s) (2:15)
+[Info   : QuestTree] QuestTree: capture of TarkovStreets uploaded to the host - 2 floor(s), 4 side(s), 9 atlas page(s) and a 80.9 MB mesh, 106.1 MB.
+[Info   : QuestTree] QuestTree: 3D map for Woods - first frame drawn in 401.4 ms, render 5.8 ms, 1200 draw call(s), cut 19.3 m, msaa 4x, light sun (50 up, azimuth 135, colour 1.00/0.82/0.57) spot at 15437 m.

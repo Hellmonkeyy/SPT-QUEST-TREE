@@ -1,0 +1,3 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Warning: QuestTree] QuestTree: nothing was captured on TarkovStreets-menu - its extent could not be measured, or was measured and rejected (the warning above says which), and a picture with no rectangle to draw to could never be placed on the map.

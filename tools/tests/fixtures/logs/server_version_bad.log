@@ -1,0 +1,4 @@
+[2026-10-04 00:48:20.953][Information][SPTarkov.Server.Modding.ModLoader] Applying enum prepatch definitions: EnumExtensions.json
+[2026-10-04 00:48:22.572][Information][SPTarkov.Server.Modding.ModValidator] ModLoader: loading: 66 server mods...
+[2026-10-04 00:48:50.036][Information][QuestTreeServer.QuestPayloadBuilder] Quest Tracker 1.19.0+fatal: not a git repository (or any of the parent directories): .git: serving 1215 quests to the client mod.
+[2026-10-04 00:49:50.036][Information][QuestTreeServer.QuestPayloadBuilder] Quest Tracker 1.19.0: serving 1215 quests to the client mod.

@@ -1,0 +1,3 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Info   : QuestTree] QuestTree: menu map host: baseline: 3 scene(s) [CommonUIScene#44, MenuUIScene#48, GameUIScene#46], active 'CommonUIScene'; LocationScenes 0, door colliders 0; Singleton<LevelSettings> not set, Singleton<GameWorld> not set; lightmaps 0; NavMesh vertices 382114; terrains 0; ambient Flat, fog False, skybox 'Default-Skybox', sun 'none'; streaming budget 1024 MB / reduction 2 (controller 1024/2); texture mip limit 0; shadow distance 50; EnvironmentManager none.

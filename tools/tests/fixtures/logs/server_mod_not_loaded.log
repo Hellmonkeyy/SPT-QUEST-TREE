@@ -1,0 +1,3 @@
+[2026-10-04 00:48:20.953][Information][SPTarkov.Server.Modding.ModLoader] Applying enum prepatch definitions: EnumExtensions.json
+[2026-10-04 00:42:40.381][Error][SPTarkov.Server.Modding.ModLoader] Mod `QuestTree` was built for a different version of SPT and was not loaded. Reason: Could not load file or assembly 'BepInEx, Version=5.4.23.5'
+[2026-10-04 00:48:22.572][Information][SPTarkov.Server.Modding.ModValidator] ModLoader: loading: 66 server mods...

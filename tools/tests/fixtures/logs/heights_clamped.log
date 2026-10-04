@@ -1,0 +1,3 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+[Warning: QuestTree] QuestTree: a building on Lighthouse reaches -60..150 m, past the ground's -10..80 m by more than 40 m - its heights are clamped to -50..120 m so the rest of the map keeps its resolution (2 vertices).

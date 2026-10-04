@@ -1,0 +1,3 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+d3d11: failed to create 2D texture id=31337 width=8192 height=8192 mips=14 dxgifmt=77 [D3D error was 8007000e]

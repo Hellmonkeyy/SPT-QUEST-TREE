@@ -1,0 +1,6 @@
+[Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
+[Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
+NullReferenceException: Object reference not set to an instance of an object
+  at QuestTree.UI.Map3DView.Update () [0x00012] in <0000>:0 
+UnityEngine.DebugLogHandler:Internal_LogException(Exception, Object)
+
