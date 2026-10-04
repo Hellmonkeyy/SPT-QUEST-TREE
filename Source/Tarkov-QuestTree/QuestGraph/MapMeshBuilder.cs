@@ -1046,6 +1046,28 @@ namespace QuestTree.QuestGraph
         /// a roof at the wrong height rather than a map at the wrong height.</summary>
         internal const float YRangeMarginMetres = 100f;
 
+        /// <summary>2026-10-03: how far past the GROUND's heights a building's own decoded vertices may reach before the
+        /// building is left out of the file whole, in metres - the band range (every band's minY..maxY) joined with the
+        /// relief's ray hits (<see cref="GroundRange"/>), each end on its own. A live menu capture of The Lab stored a
+        /// building reaching -997..1005 m over ground at -8.5..18.4 m, which the clamp in <see cref="YRange"/> kept as a
+        /// 227 m pillar. Its renderer bounds were under <see cref="MaxBuildingHeight"/> (SizeVerdict passed it); its
+        /// vertices got through because Plausible tests only <see cref="PlausibleSamples"/> sampled indices and takes
+        /// <see cref="PlausibleShare"/> inside, and Inside tests x and z against the extent, never y and never the
+        /// renderer's box - a few stray vertices passed untouched. <see cref="BoxGuard"/> now closes that in Place; this
+        /// rule is the BACKSTOP behind it (and the only rule with the guard rolled back). Three times <see cref="YRangeMarginMetres"/> on purpose: the tallest real things - radio
+        /// masts, chimneys, the Lighthouse tower on its cliff - stand 100-150 m over the ground at most, and the ray hits
+        /// already carry roofs and terrain above a band's own maxY (Customs' hits reach 69 m over a band to 8.5 m), so
+        /// nothing real comes within 150 m of this; the junk seen spans kilometres. Between the two margins the clamp
+        /// stays the safety net. Not part of the recipe: it decides what is stored, not how.</summary>
+        internal const float OutOfGroundMetres = 300f;
+
+        /// <summary>2026-10-03: the rule of <see cref="OutOfGroundMetres"/> (on). Off is the clamp alone, as before.</summary>
+        private static readonly bool DropOutOfGround = true;
+
+        /// <summary>2026-10-03: the buildings <see cref="OutOfGroundMetres"/> left out that are named in the log - the
+        /// rest are counted.</summary>
+        private const int OutOfGroundNamed = 20;
+
         /// <summary>World-bounds slack, in metres, for the check that a building's transformed
         /// vertices land where its renderer says it is - see <see cref="Place"/>.</summary>
         private const float PlausibleSlack = 2f;
@@ -1057,6 +1079,22 @@ namespace QuestTree.QuestGraph
         /// <summary>Vertices sampled for that check. Enough to catch a wrong matrix (which moves ALL of
         /// them) at the cost of a few dozen multiplies a building.</summary>
         private const int PlausibleSamples = 32;
+
+        /// <summary>2026-10-03: Place tests EVERY corner of every kept triangle against the renderer's world bounds plus
+        /// <see cref="PlausibleSlack"/> (Source.BoxMin/BoxMax) under the transform ChooseTransform picked, and drops a
+        /// triangle with any corner outside - Plausible's sample let a few stray vertices through (The Lab: -997..1005 m in
+        /// a box under 300 m tall). The box is Unity's renderer.bounds - the world AABB it culls the renderer by - so for
+        /// a static batch (identity matrix, world-space vertices) it is the same world box the vertices are in. On; off is
+        /// the sampled check alone.</summary>
+        private static readonly bool BoxGuard = true;
+
+        /// <summary>2026-10-03: past this share of a building's triangles outside its own box, the building is refused
+        /// whole rather than stored with holes - that much outside is a wrong decode or a mesh whose bounds lie, not a few
+        /// strays.</summary>
+        internal const float BoxDropShareMax = 0.1f;
+
+        /// <summary>2026-10-03: buildings named in the out-of-box log - the rest are counted.</summary>
+        private const int BoxNamed = 20;
 
         /// <summary>What <see cref="SizeVerdict"/> answers for a building-sized renderer.</summary>
         internal const int SizeOk = 0;
@@ -1771,6 +1809,8 @@ namespace QuestTree.QuestGraph
                 Step(job, "the coincident members", () => ReportShells(job));
 
                 Step(job, "the buildings' log line", () => ReportBuildings(job));
+                Step(job, "the buildings past the ground", () => ReportOutOfGround(job));
+                Step(job, "the triangles outside their bounds", () => ReportOutOfBox(job));
                 Step(job, "the hidden renderers' line", () => ReportHidden(job));
                 Step(job, "the props census line", () => ReportProps(job));
                 Step(job, "the mesh cache", () => ForgetMeshReads(job));
@@ -2026,6 +2066,38 @@ namespace QuestTree.QuestGraph
             internal float VertexLow = float.PositiveInfinity;
 
             internal float VertexHigh = float.NegativeInfinity;
+
+            /// <summary>2026-10-03: the paths of the buildings that set <see cref="VertexLow"/> and
+            /// <see cref="VertexHigh"/>, for the clamp's warning - null while none has.</summary>
+            internal string VertexLowBy;
+
+            internal string VertexHighBy;
+
+            /// <summary>2026-10-03: the ground's heights the out-of-ground rule measures from (<see cref="GroundRange"/>),
+            /// taken once at the first store - the bands and the relief are final by then.</summary>
+            internal bool GroundTaken;
+
+            internal float GroundLow = float.PositiveInfinity;
+            internal float GroundHigh = float.NegativeInfinity;
+
+            /// <summary>2026-10-03: stores refused by <see cref="OutOfGroundMetres"/>, and the first
+            /// <see cref="OutOfGroundNamed"/> distinct paths with their y ranges.</summary>
+            internal int OutOfGround;
+
+            internal readonly List<string> OutOfGroundEntries = new List<string>();
+
+            /// <summary>Distinct renderers (by instance id) the rule refused - a renderer refused at a second store (its
+            /// cluster) is one building.</summary>
+            internal readonly HashSet<int> OutOfGroundSeen = new HashSet<int>();
+
+            /// <summary>2026-10-03 (<see cref="BoxGuard"/>): triangles dropped for a corner outside their renderer's own box,
+            /// the distinct renderers that lost any (by instance id), those refused whole, and the first
+            /// <see cref="BoxNamed"/> named.</summary>
+            internal long BoxDroppedTriangles;
+
+            internal int BoxRefusedBuildings;
+            internal readonly HashSet<int> BoxSeen = new HashSet<int>();
+            internal readonly List<string> BoxEntries = new List<string>();
 
             /// <summary>The kept buildings' vertex heights in METRES, one array per building in the
             /// order of <see cref="MapMeshFile.Buildings"/>, held only until the y range is known and
@@ -3035,6 +3107,13 @@ namespace QuestTree.QuestGraph
             internal double SurfaceArea;
 
             internal int Dropped;
+
+            /// <summary>2026-10-03 (<see cref="BoxGuard"/>): triangles with a corner outside the renderer's own box, of the
+            /// triangles placed; and whether that was past <see cref="BoxDropShareMax"/>, refusing the building.</summary>
+            internal int BoxDropped;
+
+            internal int BoxTested;
+            internal bool BoxRefused;
 
             /// <summary>PART-10 (F3): triangles of transparent submeshes left out at placement.</summary>
             internal int TransparentFaces;
@@ -4169,6 +4248,7 @@ namespace QuestTree.QuestGraph
 
             foreach (var band in job.Bands)
             {
+                if (!RealBand(band.Source.MinY, band.Source.MaxY)) continue;   // 2026-10-03: the probe's empty-box sentinels
                 if (band.Source.MinY < bandLow) bandLow = band.Source.MinY;
                 if (band.Source.MaxY > bandHigh) bandHigh = band.Source.MaxY;
             }
@@ -4189,10 +4269,10 @@ namespace QuestTree.QuestGraph
 
             if (clamped)
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: a building on {job.Request.Map} reaches {F(job.VertexLow)}..{F(job.VertexHigh)} m, " +
+                    $"QuestTree: a building on {job.Request.Map} reaches {F(vertexLow)}..{F(vertexHigh)} m, " +
                     $"past the ground's {F(job.Lowest)}..{F(job.Highest)} m by more than " +
                     $"{N(YRangeMarginMetres)} m - its heights are clamped to {F(low)}..{F(high)} m so the rest " +
-                    "of the map keeps its resolution.");
+                    $"of the map keeps its resolution ({ClampedBy(job, vertexLow, vertexHigh, low, high)}).");
 
             job.File.SetYRange(low, high);
 
@@ -4220,6 +4300,27 @@ namespace QuestTree.QuestGraph
                     job.RequantisedY = new ushort[stored.Buildings.Count][];
                 }
             }
+        }
+
+        /// <summary>2026-10-03: the clamp warning's culprits - for each end the clamp cut, the path of this build's building
+        /// that set it, or the stored mesh when an earlier capture's building did (only a Replace clears that one).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="vertexLow">The low end measured, stored buildings included.</param>
+        /// <param name="vertexHigh">The high end measured.</param>
+        /// <param name="low">The range's low end after the clamp.</param>
+        /// <param name="high">Its high end.</param>
+        private static string ClampedBy(Job job, float vertexLow, float vertexHigh, float low, float high)
+        {
+            const string stored = "a building stored by an earlier capture - Replace the map's mesh to clear it";
+            var parts = new List<string>();
+
+            if (IsFinite(vertexLow) && vertexLow < low)
+                parts.Add("low end: " + (job.VertexLow <= vertexLow && job.VertexLowBy != null ? $"'{job.VertexLowBy}'" : stored));
+
+            if (IsFinite(vertexHigh) && vertexHigh > high)
+                parts.Add("high end: " + (job.VertexHigh >= vertexHigh && job.VertexHighBy != null ? $"'{job.VertexHighBy}'" : stored));
+
+            return parts.Count > 0 ? string.Join("; ", parts.ToArray()) : "no end named";
         }
 
         /// <summary>WP2 (D2): the stored relief into a band this cast left cells of - only when the bands are the ones
@@ -7353,6 +7454,9 @@ namespace QuestTree.QuestGraph
                     job.DroppedTriangles += outcome.Dropped;
                     job.TransparentFaces += outcome.TransparentFaces;
 
+                    // 2026-10-03: triangles outside the renderer's own box (BoxGuard)
+                    if (outcome.BoxDropped > 0) NoteOutOfBox(job, candidate, outcome);
+
                     if (outcome.WorkspaceBytes > job.PeakWorkspaceBytes) job.PeakWorkspaceBytes = outcome.WorkspaceBytes;
                     if (outcome.DecodedBytes > job.PeakDecodedBytes) job.PeakDecodedBytes = outcome.DecodedBytes;
 
@@ -8178,6 +8282,8 @@ namespace QuestTree.QuestGraph
             var textured = uv != null && uv.Length >= local.Length && source.SlotMaterial != null;
 
             var dropped = 0;
+            var boxDropped = 0;
+            var boxTested = 0;
 
             for (var t = 0; t + 2 < triangles.Count; t += 3)
             {
@@ -8201,6 +8307,18 @@ namespace QuestTree.QuestGraph
                     continue;
                 }
 
+                // 2026-10-03: every corner against the renderer's own box - what Plausible's sample let through
+                if (BoxGuard)
+                {
+                    boxTested++;
+
+                    if (!InBox(pa, source) || !InBox(pb, source) || !InBox(pc, source))
+                    {
+                        boxDropped++;
+                        continue;
+                    }
+                }
+
                 var slot = t / 3 < lane.TriSlot.Count ? lane.TriSlot[t / 3] : -1;
 
                 // PART-10 (F3): a transparent submesh's triangle is left out - the window is a hole into the interior, which
@@ -8220,6 +8338,15 @@ namespace QuestTree.QuestGraph
             }
 
             outcome.Dropped += dropped;
+            outcome.BoxDropped += boxDropped;
+            outcome.BoxTested += boxTested;
+
+            // 2026-10-03: past the share, the building is refused whole - its kept triangles are not stored with holes
+            if (BoxRefusedShare(boxDropped, boxTested))
+            {
+                outcome.BoxRefused = true;
+                return null;
+            }
 
             if (lane.T.Count < 3) return null;
 
@@ -8359,6 +8486,22 @@ namespace QuestTree.QuestGraph
 
             return tried > 0 && inside >= tried * PlausibleShare;
         }
+
+        /// <summary>2026-10-03: whether a world position is inside the renderer's box (already widened by
+        /// <see cref="PlausibleSlack"/>) - six float compares, no allocation; NaN is outside.</summary>
+        /// <param name="p">The world position.</param>
+        /// <param name="source">The source, for its box.</param>
+        private static bool InBox(Vector3 p, Source source) =>
+            p.x >= source.BoxMin.x && p.x <= source.BoxMax.x &&
+            p.y >= source.BoxMin.y && p.y <= source.BoxMax.y &&
+            p.z >= source.BoxMin.z && p.z <= source.BoxMax.z;
+
+        /// <summary>2026-10-03: whether the triangles outside the box are more than <see cref="BoxDropShareMax"/> of those
+        /// tested - the building is then refused whole. Ints in, for the harness.</summary>
+        /// <param name="dropped">Triangles with a corner outside.</param>
+        /// <param name="tested">Triangles tested.</param>
+        internal static bool BoxRefusedShare(int dropped, int tested) =>
+            dropped > 0 && tested > 0 && dropped > tested * (double)BoxDropShareMax;
 
         /// <summary>Whether a world position is finite and inside the extent with <see cref="VertexSlack"/>
         /// of slack.</summary>
@@ -8585,6 +8728,180 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>2026-10-03: the ground's heights a building is measured against - every band's minY..maxY joined with
+        /// the relief's ray hits when there are any (they carry roofs and terrain above a band's own maxY). Floats in, no
+        /// Unity type, so the harness can hold it to The Lab's numbers.</summary>
+        /// <param name="bandLow">The lowest band's minY, or +infinity.</param>
+        /// <param name="bandHigh">The highest band's maxY, or -infinity.</param>
+        /// <param name="hitLow">The lowest ray hit, or +infinity when there was none.</param>
+        /// <param name="hitHigh">The highest ray hit, or -infinity.</param>
+        /// <param name="low">The ground's low end.</param>
+        /// <param name="high">Its high end.</param>
+        /// <returns>Whether there is a ground to measure against.</returns>
+        internal static bool GroundRange(float bandLow, float bandHigh, float hitLow, float hitHigh, out float low, out float high)
+        {
+            low = float.PositiveInfinity;
+            high = float.NegativeInfinity;
+
+            if (RealBand(bandLow, bandHigh))
+            {
+                low = bandLow;
+                high = bandHigh;
+            }
+
+            if (IsFinite(hitLow) && IsFinite(hitHigh) && hitHigh >= hitLow)
+            {
+                low = Math.Min(low, hitLow);
+                high = Math.Max(high, hitHigh);
+            }
+
+            return IsFinite(low) && IsFinite(high);
+        }
+
+        /// <summary>2026-10-03: whether a band's minY..maxY is a measured range - finite, in order, and neither end still
+        /// the extent probe's empty-box sentinel (float.MaxValue / float.MinValue, which are FINITE).</summary>
+        /// <param name="min">The band's minY.</param>
+        /// <param name="max">Its maxY.</param>
+        internal static bool RealBand(float min, float max) =>
+            IsFinite(min) && IsFinite(max) && max >= min &&
+            min != float.MaxValue && min != float.MinValue && max != float.MaxValue && max != float.MinValue;
+
+        /// <summary>2026-10-03: whether a building's own y range reaches past the ground by more than
+        /// <see cref="OutOfGroundMetres"/> at either end. Floats in, no Unity type, for the harness. With no ground
+        /// (NaN, infinities) nothing is out - the clamp stays the net.</summary>
+        internal static bool OutOfGroundSpan(float ownLow, float ownHigh, float groundLow, float groundHigh)
+        {
+            if (!IsFinite(groundLow) || !IsFinite(groundHigh)) return false;
+
+            return (IsFinite(ownLow) && ownLow < groundLow - OutOfGroundMetres) ||
+                   (IsFinite(ownHigh) && ownHigh > groundHigh + OutOfGroundMetres);
+        }
+
+        /// <summary>2026-10-03: <see cref="StoreWorld"/>'s out-of-ground rule - the mesh's own y range against the ground
+        /// (<see cref="GroundRange"/>, taken once: the bands are fixed by Prepare and the relief is cast or reused before
+        /// any building is read). A refusal is counted and its path noted with its y range and its renderer's bounds (a
+        /// mesh whose vertices leave its own bounds is the finding, not a building).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="candidate">The candidate being stored.</param>
+        /// <param name="positions">The world-space positions, xyz.</param>
+        /// <param name="vertices">How many.</param>
+        /// <returns>Whether the building is left out.</returns>
+        private static bool OutOfGroundRefused(Job job, Candidate candidate, float[] positions, int vertices)
+        {
+            if (!job.GroundTaken)
+            {
+                job.GroundTaken = true;
+
+                var bandLow = float.PositiveInfinity;
+                var bandHigh = float.NegativeInfinity;
+
+                foreach (var band in job.Bands)
+                {
+                    if (!RealBand(band.Source.MinY, band.Source.MaxY)) continue;
+                    if (band.Source.MinY < bandLow) bandLow = band.Source.MinY;
+                    if (band.Source.MaxY > bandHigh) bandHigh = band.Source.MaxY;
+                }
+
+                if (GroundRange(bandLow, bandHigh, job.Lowest, job.Highest, out var groundLow, out var groundHigh))
+                {
+                    job.GroundLow = groundLow;
+                    job.GroundHigh = groundHigh;
+                }
+            }
+
+            var low = float.PositiveInfinity;
+            var high = float.NegativeInfinity;
+
+            for (var v = 0; v < vertices; v++)
+            {
+                var y = positions[v * 3 + 1];
+                if (y < low) low = y;
+                if (y > high) high = y;
+            }
+
+            if (!OutOfGroundSpan(low, high, job.GroundLow, job.GroundHigh)) return false;
+
+            job.OutOfGround++;
+
+            if (job.OutOfGroundSeen.Add(RendererId(candidate.Renderer)) && job.OutOfGroundEntries.Count < OutOfGroundNamed)
+                job.OutOfGroundEntries.Add(
+                    $"#{job.OutOfGroundEntries.Count + 1} '{SafePath(candidate.Renderer)}' (y {F(low)}..{F(high)} m, renderer bounds y " +
+                    $"{F(candidate.Bounds.min.y)}..{F(candidate.Bounds.max.y)} m, {N(vertices)} vertices)");
+
+            return true;
+        }
+
+        /// <summary>2026-10-03: the out-of-ground line - the ground and the rule, then the buildings named,
+        /// <see cref="ShellDropsLogged"/> to a line, at most <see cref="OutOfGroundNamed"/>. Silent when none.</summary>
+        /// <param name="job">The build.</param>
+        private static void ReportOutOfGround(Job job)
+        {
+            if (job.OutOfGround == 0) return;
+
+            var named = job.OutOfGroundEntries.Count;
+            var distinct = job.OutOfGroundSeen.Count;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: buildings past the ground on {job.Request.Map} - {N(distinct)} building(s) ({N(job.OutOfGround)} " +
+                $"store(s)) reach more than {N(OutOfGroundMetres)} m past the ground's {F(job.GroundLow)}..{F(job.GroundHigh)} m " +
+                "(the bands joined with the relief's hits) and are left out of the 3D map; " +
+                (named < distinct ? $"the first {N(named)} are named below, {N(distinct - named)} more not named." : "each is named below."));
+
+            LogEvery(job, "buildings past the ground left out", job.OutOfGroundEntries);
+        }
+
+        /// <summary>2026-10-03: a renderer's instance id for the logs' distinct counts - 0 for none or one that throws.
+        /// Main thread.</summary>
+        private static int RendererId(Renderer renderer)
+        {
+            try
+            {
+                return renderer != null ? renderer.GetInstanceID() : 0;
+            }
+            catch (Exception)
+            {
+                return 0;
+            }
+        }
+
+        /// <summary>2026-10-03 (<see cref="BoxGuard"/>): a placement's triangles outside its renderer's box, counted, and the
+        /// renderer named once (by instance id) with its counts, at most <see cref="BoxNamed"/>. Main thread (Apply).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="candidate">The candidate placed.</param>
+        /// <param name="outcome">Its worker's outcome.</param>
+        private static void NoteOutOfBox(Job job, Candidate candidate, Outcome outcome)
+        {
+            job.BoxDroppedTriangles += outcome.BoxDropped;
+            if (outcome.BoxRefused) job.BoxRefusedBuildings++;
+
+            if (!job.BoxSeen.Add(RendererId(candidate.Renderer)) || job.BoxEntries.Count >= BoxNamed) return;
+
+            job.BoxEntries.Add(
+                $"#{job.BoxEntries.Count + 1} '{SafePath(candidate.Renderer)}' ({N(outcome.BoxDropped)} of {N(outcome.BoxTested)} " +
+                $"triangle(s) outside its box y {F(candidate.Bounds.min.y)}..{F(candidate.Bounds.max.y)} m" +
+                (outcome.BoxRefused ? $", over {(BoxDropShareMax * 100f).ToString("0", CultureInfo.InvariantCulture)} % - refused whole" : "") + ")");
+        }
+
+        /// <summary>2026-10-03 (<see cref="BoxGuard"/>): the out-of-box line, then the buildings named, as the shells' lines.
+        /// Silent when none.</summary>
+        /// <param name="job">The build.</param>
+        private static void ReportOutOfBox(Job job)
+        {
+            if (job.BoxDroppedTriangles == 0) return;
+
+            var named = job.BoxEntries.Count;
+            var distinct = job.BoxSeen.Count;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: triangles outside their own bounds on {job.Request.Map} - {N(job.BoxDroppedTriangles)} triangle(s) of " +
+                $"{N(distinct)} renderer(s) had a corner more than {N(PlausibleSlack)} m outside the renderer's bounds and were " +
+                $"left out; {N(job.BoxRefusedBuildings)} placement(s) over {(BoxDropShareMax * 100f).ToString("0", CultureInfo.InvariantCulture)} % " +
+                "outside were refused whole; " +
+                (named < distinct ? $"the first {N(named)} are named below, {N(distinct - named)} more not named." : "each is named below."));
+
+            LogEvery(job, "triangles outside their own bounds left out", job.BoxEntries);
+        }
+
         /// <summary>
         /// A world-space mesh - a source stored as it is, or a decimation's result - into the file: x and
         /// z quantised at once, y held in metres until the y range is known (QuantiseBuildings), the stable
@@ -8615,6 +8932,10 @@ namespace QuestTree.QuestGraph
                 job.RefusedBuildingVertices++;
                 return Refused;
             }
+
+            // 2026-10-03: a building reaching far past the ground (a volume, a sky or helper mesh) is left out whole -
+            // before it is stored, replaces anything or moves VertexLow/High, so the clamp in YRange never sees it
+            if (DropOutOfGround && OutOfGroundRefused(job, candidate, world.P, vertices)) return Refused;
 
             // The format's building cap (M1): stop, rather than build a file Write refuses whole. WP2: the stored
             // buildings count - they are in the file this build writes.
@@ -8676,6 +8997,8 @@ namespace QuestTree.QuestGraph
             var z = new ushort[vertices];
             var heights = new float[vertices];
             var heightSum = 0d;
+            var ownLow = float.PositiveInfinity;
+            var ownHigh = float.NegativeInfinity;
 
             for (var v = 0; v < vertices; v++)
             {
@@ -8685,8 +9008,21 @@ namespace QuestTree.QuestGraph
 
                 heightSum += heights[v];
 
-                if (heights[v] < job.VertexLow) job.VertexLow = heights[v];
-                if (heights[v] > job.VertexHigh) job.VertexHigh = heights[v];
+                if (heights[v] < ownLow) ownLow = heights[v];
+                if (heights[v] > ownHigh) ownHigh = heights[v];
+            }
+
+            // 2026-10-03: who set the range's ends, for the clamp's warning - a path only when an end moves
+            if (ownLow < job.VertexLow)
+            {
+                job.VertexLow = ownLow;
+                job.VertexLowBy = SafePath(candidate.Renderer);
+            }
+
+            if (ownHigh > job.VertexHigh)
+            {
+                job.VertexHigh = ownHigh;
+                job.VertexHighBy = SafePath(candidate.Renderer);
             }
 
             var indices = new uint[world.T.Length];
