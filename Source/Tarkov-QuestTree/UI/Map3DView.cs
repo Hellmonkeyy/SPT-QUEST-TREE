@@ -3142,6 +3142,7 @@ namespace QuestTree.UI
         {
             _ready = true;
             _measureFirstFrame = true;
+            _firstFrameComplete = false;
             _timeRender = true;
             _forceRender = true;
             _buildClock.Stop();
@@ -3310,6 +3311,9 @@ namespace QuestTree.UI
         /// draws it next - never half made (see <see cref="AbandonWalls"/>).</summary>
         private void ResetPipeline()
         {
+            // a rebuild's first frame is still to come: the old build's counts are not its
+            _firstFrameComplete = false;
+
             _work.Clear();
 
             // Let go of every job this build waited on. Not cancelled here: another view of the same build may
@@ -3452,8 +3456,31 @@ namespace QuestTree.UI
         /// <summary>The first build is finished and the view draws. Until then the backdrop shows.</summary>
         private bool _ready;
 
-        /// <summary>The next drawn frame is the first: time it and say so, once.</summary>
+        /// <summary>The first COMPLETE frame (every shown floor drawn or failed, <see cref="FirstFrameComplete"/>) is still
+        /// to come: each rendered frame is timed and counted as a candidate, and the first complete one is said, once.</summary>
         private bool _measureFirstFrame;
+
+        /// <summary>This build's first complete frame has been drawn and logged (<see cref="SelfTestFirstFrameComplete"/>).</summary>
+        private bool _firstFrameComplete;
+
+        /// <summary>The first complete frame's own cost, ms: its draw submissions and render, the pictures' decode not
+        /// included (the "first frame drawn in" figure).</summary>
+        private double _firstFrameMs;
+
+        /// <summary>The shown floors' states in the frame being rendered, for <see cref="FirstFrameComplete"/>.</summary>
+        private readonly List<FloorFrame> _shownFrames = new List<FloorFrame>();
+
+        /// <summary>A shown floor as the draw loop left it this frame, for <see cref="FrameOfFloor"/>: drawn; waiting for a
+        /// picture that can still arrive; or never drawable (no materials, no picture to wait for, or one that failed).</summary>
+        private FloorFrame FrameOf(Floor floor)
+        {
+            var materials = floor.GroundMaterial != null && floor.BuildingMaterial != null && floor.Meshes != null;
+            var pictured = _flatColours || (floor.GroundMaterial != null && floor.GroundMaterial.mainTexture != null);
+            var layer = floor.Layer;
+            var canArrive = layer != null && layer.HasArtwork && !layer.ArtworkFailed;
+
+            return FrameOfFloor(materials, pictured, canArrive);
+        }
 
         /// <summary>Draw calls submitted this frame - see <see cref="Submit"/>.</summary>
         private int _drawCalls;
@@ -5427,6 +5454,39 @@ namespace QuestTree.UI
         /// <summary>How far outside its declared height band a face may be and still be ON that floor: the
         /// half metre the harvest's bands and the relief's own floor test already allow.</summary>
         private const float FloorFaceSlack = 0.5f;
+
+        // BEGIN TESTABLE FirstFrame - tools/tests/unit/run_unit.py compiles this region on its own.
+        /// <summary>A shown floor in one rendered frame.</summary>
+        internal enum FloorFrame
+        {
+            Drawn,
+            Waiting,
+            Failed
+        }
+
+        /// <summary>A shown floor's state from what the draw loop saw: no materials or meshes - never drawable; its picture on
+        /// its material (or flat colours) - drawn; else waiting while the picture can still arrive, failed when it cannot
+        /// (no layer, no artwork, or a decode that failed).</summary>
+        private static FloorFrame FrameOfFloor(bool materials, bool pictured, bool pictureCanArrive)
+        {
+            if (!materials) return FloorFrame.Failed;
+            if (pictured) return FloorFrame.Drawn;
+
+            return pictureCanArrive ? FloorFrame.Waiting : FloorFrame.Failed;
+        }
+
+        /// <summary>Whether this rendered frame is the build's first COMPLETE frame: not announced yet, and no shown floor
+        /// still waiting for its picture. A failed floor never holds it back, so the first-frame lines are always said.</summary>
+        private static bool FirstFrameComplete(IReadOnlyList<FloorFrame> shown, bool announced)
+        {
+            if (announced) return false;
+
+            for (var i = 0; i < shown.Count; i++)
+                if (shown[i] == FloorFrame.Waiting) return false;
+
+            return true;
+        }
+        // END TESTABLE FirstFrame
 
         // BEGIN TESTABLE FloorWindow - tools/tests/unit/run_unit.py compiles this region on its own: no Unity type but Mathf.
         /// <summary>The heights a floor's picture camera drew (MapCapture.BeginFloor's camera and far plane, mirrored by
@@ -10202,6 +10262,12 @@ namespace QuestTree.UI
                 _shadowOff = 0;
                 _framesRendered++;
 
+                // The shown floors' pictures onto their materials BEFORE the clock: this is where a picture decodes (one a
+                // frame, in TryGetSprite), and a 1-2 s decode is not what the frame costs to draw. Same floors, same order
+                // (lowest first, the active one last) as the draw loop below, which then only draws.
+                for (var i = 0; i < _floors.Count; i++)
+                    if (IsShown(_floors[i].Level)) AssignPicture(_floors[i]);
+
                 var clock = first ? Stopwatch.StartNew() : null;
                 _drawCalls = 0;
 
@@ -10220,15 +10286,27 @@ namespace QuestTree.UI
                     _countView = true;
                 }
 
+                _shownFrames.Clear();
+
                 try
                 {
                     for (var i = 0; i < _floors.Count; i++)
-                        if (IsShown(_floors[i].Level)) Draw(_floors[i]);
+                    {
+                        if (!IsShown(_floors[i].Level)) continue;
+
+                        Draw(_floors[i], assign: false);
+                        _shownFrames.Add(FrameOf(_floors[i]));
+                    }
                 }
                 finally
                 {
                     _countView = false;
                 }
+
+                // THE first frame is the first on which every shown floor was drawn (or can never be: its picture failed
+                // or it has none). Frames before it render and present as ever - an empty or partial view until the
+                // pictures land - but their counts are not the map's, so they are measured again on the next one.
+                var complete = FirstFrameComplete(_shownFrames, !first);
 
                 // The window's hidden floors: pictures and late walls, never drawn. AFTER the draw loop, and only once
                 // nothing shown is waiting (_unsettled: a floor, side or tile without its picture) and the first frame is
@@ -10240,11 +10318,13 @@ namespace QuestTree.UI
                 Present();
                 PlaceOverlays();
 
-                if (first)
+                if (complete)
                 {
                     // The CPU side of one frame: the DrawMesh submissions and the manual Render. What a map of
                     // this size costs to look at, frame after frame - the number that says whether it holds 60.
                     _measureFirstFrame = false;
+                    _firstFrameComplete = true;
+                    _firstFrameMs = clock.Elapsed.TotalMilliseconds;
 
                     // Stage C: the spot's cone, range, near plane, map size and biases are read BACK from the light, not
                     // taken from the values computed, so the line proves the setters took them (the near plane's
@@ -10256,7 +10336,7 @@ namespace QuestTree.UI
                         "bias {13:0.000}/{14:0.00}, atten x{15:0.00}; shadows {16} to {17:0} m; ground {18}, sides {19}; tonemap {32}; ambient {20}, sky {21}, " +
                         "pixel lights {22}, colour space {23}, exposure x{24:0.00} (white in the sun at {25:0.00}, ambient {26:0.00} of the sun), " +
                         "fog {27}; source {28}; post-processing {29}; probe {30}.",
-                        _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
+                        _mapKey, _firstFrameMs, _renderMs, _drawCalls, CutText(), _rtSamples,
                         Lighting == ModSettings.MapLightMode.Sun
                             ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, azimuth {1:0}, colour {2:0.00}/{3:0.00}/{4:0.00})",
                                 Plan.ElevationDegrees, Mathf.Atan2(Plan.SunDirection.x, Plan.SunDirection.z) * Mathf.Rad2Deg,
@@ -10742,6 +10822,15 @@ namespace QuestTree.UI
         /// white, not the last picture. Every material is checked, since any can be the one holding the destroyed
         /// reference. From <see cref="Draw"/> and, for the hidden floors, <see cref="Prime"/>.
         /// </summary>
+        private void AssignPicture(Floor floor)
+        {
+            var ground = floor.GroundMaterial;
+            var walls = floor.BuildingMaterial;
+            var roofs = RoofMaterialOf(floor);
+
+            if (ground != null && walls != null && roofs != null) AssignPicture(floor, ground, walls, roofs);
+        }
+
         private void AssignPicture(Floor floor, Material ground, Material walls, Material roofs)
         {
             if (!_flatColours && (ground.mainTexture == null || walls.mainTexture == null || roofs.mainTexture == null) &&
@@ -10794,7 +10883,10 @@ namespace QuestTree.UI
         /// <summary>Queues one floor's meshes for our camera, with the floor's picture on them - the
         /// relief through the clipping material, the buildings through the opaque one. Only for a floor
         /// that is shown (<see cref="IsShown"/>); a hidden one is primed instead (<see cref="Prime"/>).</summary>
-        private void Draw(Floor floor)
+        /// <param name="floor">The floor.</param>
+        /// <param name="assign">False from the main draw loop, whose pictures were put on before its clock started
+        /// (<see cref="AssignPicture(Floor)"/>); the check renders' redraws assign their own.</param>
+        private void Draw(Floor floor, bool assign = true)
         {
             var ground = floor.GroundMaterial;
             var walls = floor.BuildingMaterial;
@@ -10802,7 +10894,7 @@ namespace QuestTree.UI
 
             if (ground == null || walls == null) return;
 
-            AssignPicture(floor, ground, walls, roofs);
+            if (assign) AssignPicture(floor, ground, walls, roofs);
 
             // NOT DRAWN until its picture is on it. A textured shader with a null _MainTex samples white,
             // so a peeled lower storey whose PNG is still being decoded would draw as a blank white slab
@@ -11708,6 +11800,15 @@ namespace QuestTree.UI
 
         /// <summary>Self-test: the build is done and nothing is queued (uploads, cuts, walls).</summary>
         internal bool SelfTestIdle => _ready && _work.Count == 0 && _wallJobs.Count == 0;
+
+        /// <summary>The build's first COMPLETE frame - every shown floor drawn, or its picture failed - has been drawn and
+        /// its first-frame lines logged; <see cref="SelfTestDrawCalls"/>, the triangle counts and the render time are that
+        /// frame's until the next render.</summary>
+        internal bool SelfTestFirstFrameComplete => _firstFrameComplete;
+
+        /// <summary>The first complete frame's "first frame drawn in" figure, ms: that frame's draw submissions and render,
+        /// without the picture decode that may have run earlier in the same LateUpdate.</summary>
+        internal double SelfTestFirstFrameMs => _firstFrameMs;
 
         /// <summary>The band the view draws as its top (slice slider S2).</summary>
         internal int SelfTestActiveLevel => _activeLevel;

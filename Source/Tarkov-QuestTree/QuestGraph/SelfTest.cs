@@ -783,36 +783,45 @@ namespace QuestTree.QuestGraph
 
                 if (view != null)
                 {
-                    // The view's own "first frame drawn in X ms" is the CPU time of the ONE frame that first renders (a
-                    // clock started inside that LateUpdate). Everything before it - the file read, the meshes built, the
-                    // paced uploads - is the load. So: loadMs is attach to the build being ready (SelfTestReady), and
-                    // firstFrameMs is the duration of the frame the first render ran in.
+                    // The view's own "first frame drawn in X ms" is the CPU time of its first COMPLETE frame - the first on
+                    // which every shown floor was drawn (or its picture failed), a clock started inside that LateUpdate.
+                    // Frames rendered before it, while the floors' pictures decode, draw part of the map or none of it
+                    // (Sandbox 2026-10-05: 0 draw calls), so the sweep waits for the complete one. loadMs is attach to the
+                    // build being ready (SelfTestReady); completeMs is attach to the start of the Unity frame the complete
+                    // first frame ran in, the pictures' decode included; firstFrameMs is the view's own "first frame drawn in"
+                    // figure, that frame's draw and render without the decode.
                     double? readyMs = null;
-                    while (view != null && !view.SelfTestBroke && view.SelfTestFramesRendered == 0 && _cancel == null &&
+                    while (view != null && !view.SelfTestBroke && !view.SelfTestFirstFrameComplete && _cancel == null &&
                            clock.Elapsed.TotalSeconds < FirstFrameTimeoutSeconds)
                     {
                         if (readyMs == null && view.SelfTestReady) readyMs = clock.Elapsed.TotalMilliseconds;
                         yield return null;
                     }
 
-                    var drawn = view != null && view.SelfTestFramesRendered > 0;
+                    var drawn = view != null && view.SelfTestFirstFrameComplete;
                     part.Check("first frame drawn", drawn && !view.SelfTestBroke,
                         drawn ? "drawn" :
                         view == null ? "the view was destroyed" :
                         view.SelfTestBroke ? "the view stopped: " + (refused ?? (view.SelfTestRefusal.Length > 0 ? view.SelfTestRefusal : "it broke")) :
-                        _cancel != null ? "cancelled" : $"no frame in {FirstFrameTimeoutSeconds:0} s");
+                        _cancel != null ? "cancelled" :
+                        view.SelfTestFramesRendered > 0
+                            ? $"{view.SelfTestFramesRendered} frame(s) rendered, but the shown floors' pictures did not arrive in {FirstFrameTimeoutSeconds:0} s"
+                            : $"no frame in {FirstFrameTimeoutSeconds:0} s");
 
                     if (drawn)
                     {
-                        // Observed in the frame after the first render, before that frame's LateUpdate, so the counts are the
-                        // first frame's and unscaledDeltaTime is the duration of the frame the first render ran in. The view
-                        // becomes ready and renders in the same LateUpdate, so a ready flag first seen now dates from then.
+                        // Observed in the frame after the complete first frame, before that frame's LateUpdate, so the counts
+                        // are that frame's and unscaledDeltaTime is the duration of the frame it ran in. The view can become
+                        // ready and draw its complete frame in the same LateUpdate, so a ready flag first seen now dates
+                        // from then.
                         var observedMs = clock.Elapsed.TotalMilliseconds;
                         var frameMs = Time.unscaledDeltaTime * 1000d;
-                        var loadMs = readyMs ?? Math.Max(0d, observedMs - frameMs);
+                        var completeMs = Math.Max(0d, observedMs - frameMs);
+                        var loadMs = readyMs ?? completeMs;
 
                         part.Measure("loadMs", Math.Round(loadMs, 1));
-                        part.Measure("firstFrameMs", Math.Round(frameMs, 1));
+                        part.Measure("completeMs", Math.Round(completeMs, 1));
+                        part.Measure("firstFrameMs", Math.Round(view.SelfTestFirstFrameMs, 1));
                         part.Measure("drawCalls", view.SelfTestDrawCalls);
                         part.Measure("trianglesSubmitted", view.SelfTestTrianglesSubmitted);
                         part.Measure("trianglesInView", view.SelfTestTrianglesInView);

@@ -107,7 +107,7 @@ Any step or map can also carry `ran without throwing` (fails when it threw).
   - `in the main menu`
   - `no map hosted in the menu`
   - `the view opened`
-  - `first frame drawn`
+  - `first frame drawn`: the view's first COMPLETE frame, the first on which every shown floor was drawn (or its picture failed); FAIL when it does not come within 240 s, saying whether frames rendered while the pictures never arrived
   - `loads within 15 s`: WARN when load is over 15 s
   - `draws triangles at its default floor`: FAIL when 0 draw calls or 0 triangles
   - `idle at measurement`: WARN only, when still busy after the re-wait
@@ -118,7 +118,9 @@ Any step or map can also carry `ran without throwing` (fails when it threw).
 - per-map measurements:
   - `level`, `attachMs`
   - `loadMs`: attach to the build being ready
-  - `firstFrameMs`: the duration of the frame the first render ran in, the view's own "first frame drawn in" sense
+  - `completeMs`: attach to the start of the Unity frame the first complete frame ran in, the shown floors' picture decodes included
+  - `firstFrameMs`: the view's own "first frame drawn in" figure for its first complete frame: that frame's draw submissions and render, without any picture decode (decodes run before its clock starts)
+  - `drawCalls`, `trianglesSubmitted`, `trianglesInView` and `renderMs` are the first complete frame's, so `draws triangles at its default floor` no longer fails on a frame drawn before the pictures were decoded
   - `drawCalls`, `trianglesSubmitted`, `trianglesInView`, `renderMs`
   - `settledSeconds`, `idleRewaitSeconds`, `idle`, `framesRendered`
   - `vramBeforeMb`, `vramOpenMb`, `vramAfterMb`
