@@ -17,9 +17,12 @@ using UnityEngine.SceneManagement;
 namespace QuestTree.QuestGraph
 {
     /// <summary>
-    /// Track T, stage T0: a READ-ONLY diagnostic of one map's data, run in the main menu. Started by the Advanced setting
-    /// "Run map data probe (main menu)" (ModSettings.MapDataProbeLocation, a location id; empty = off), which it clears
-    /// BEFORE it starts, so no launch ever starts a run by itself. It hosts the map through MenuMapHost (whose restore puts
+    /// Track T, stage T0: a READ-ONLY diagnostic of one map's data, run in the main menu. Two Advanced settings drive it:
+    /// "Map data probe: map id" (ModSettings.MapDataProbeLocation) only HOLDS the location id - changing it starts, cancels
+    /// and writes nothing - and the checkbox "Run map data probe now (main menu)" (ModSettings.MapDataProbeRun) starts one
+    /// run for that id. The checkbox is unticked BEFORE the run starts, so no launch ever starts a run by itself; ticking it
+    /// again during a run cancels the run. (2026-10-05: one text setting that both held the id and started the run fired on
+    /// every keystroke in F12's text box, and the box's re-write of the id read as a cancel.) It hosts the map through MenuMapHost (whose restore puts
     /// the menu back and compares the state), measures what the 3D map's real textures would need - texture reach and read
     /// time, the terrain and its MicroSplat material, decals and roads, trees, normal maps, a viewer-style directional light
     /// with shadows, memory - and writes BepInEx/plugins/QuestTree/probe/mapdata-&lt;location&gt;-&lt;time&gt;.json plus one
@@ -32,8 +35,9 @@ namespace QuestTree.QuestGraph
     /// past its work, so the host's asset sweep is not kept from freeing anything. Every measurement is guarded on its own
     /// and records its error.
     ///
-    /// Started and finished from TrackerHotkey.Update (memory ddol-objects-dead-in-menu). Cancelled by setting the setting
-    /// again while it runs; a raid starting stops it through the host.
+    /// Started and finished from TrackerHotkey.Update (memory ddol-objects-dead-in-menu). Cancelled by ticking the checkbox
+    /// again while it runs; a raid starting stops it through the host. A refusal that loaded nothing (an empty or unknown
+    /// id, the menu gate) is a log line only, never a report file.
     /// </summary>
     internal static class MapDataProbe
     {
@@ -119,7 +123,7 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                if (!ModSettings.Ready || ModSettings.MapDataProbeLocation == null) return;
+                if (!ModSettings.Ready || ModSettings.MapDataProbeRun == null) return;
 
                 var run = _run;
                 if (run != null)
@@ -128,11 +132,18 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
-                var location = ModSettings.MapDataProbeLocation.Value?.Trim();
-                if (string.IsNullOrEmpty(location)) return;
+                if (!ModSettings.MapDataProbeRun.Value) return;
 
                 // Off FIRST, before anything can throw or crash the game, so no launch ever starts a run by itself.
-                ModSettings.MapDataProbeLocation.Value = "";
+                ModSettings.MapDataProbeRun.Value = false;
+
+                var location = Canonical(ModSettings.MapDataProbeLocation?.Value, out var unknown);
+                if (location == null)
+                {
+                    Plugin.LogSource?.LogInfo($"{Tag}refused - {unknown}. Nothing was loaded.");
+                    return;
+                }
+
                 Start(host, location);
             }
             catch (Exception ex)
@@ -145,15 +156,15 @@ namespace QuestTree.QuestGraph
 
         private static void PollRunning(RunState run)
         {
-            // The setting set again while a run goes is the cancel.
-            var again = ModSettings.MapDataProbeLocation.Value?.Trim();
-            if (!string.IsNullOrEmpty(again))
+            // The checkbox ticked again while a run goes is the cancel. The map id's text is never read here, so editing it
+            // during a run changes nothing.
+            if (ModSettings.MapDataProbeRun.Value)
             {
-                ModSettings.MapDataProbeLocation.Value = "";
+                ModSettings.MapDataProbeRun.Value = false;
 
                 if (run.Cancel == null)
                 {
-                    run.Cancel = "the setting was set again";
+                    run.Cancel = "the run checkbox was ticked again";
                     if (run.Claim != 0 && MenuMapHost.CurrentClaim == run.Claim) MenuMapHost.RequestStop("map data probe: cancelled");
                     Plugin.LogSource?.LogInfo($"{Tag}cancel asked - the measurement stops and the map is unloaded.");
                 }
@@ -406,12 +417,20 @@ namespace QuestTree.QuestGraph
                 run.Report["finishedLocal"] = finished.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture);
                 run.Report["seconds"] = Math.Round(run.Clock.Elapsed.TotalSeconds, 1);
 
+                // A refusal loaded nothing: the log line says it all, and no report file is written.
+                if (run.Claim == 0 && run.Report.TryGetValue("overall", out var ov) && ov as string == "refused")
+                    throw new RefusedNoReport();
+
                 var dir = Path.Combine(Path.GetDirectoryName(typeof(MapDataProbe).Assembly.Location) ?? "", "probe");
                 Directory.CreateDirectory(dir);
                 var file = $"mapdata-{FileSafe(run.Location)}-{finished.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture)}.json";
                 path = Path.Combine(dir, file);
                 File.WriteAllText(path, JsonConvert.SerializeObject(run.Report, Formatting.Indented,
                     new JsonSerializerSettings { ReferenceLoopHandling = ReferenceLoopHandling.Ignore }));
+            }
+            catch (RefusedNoReport)
+            {
+                path = "none (a refusal that loaded nothing)";
             }
             catch (Exception ex)
             {
@@ -432,6 +451,41 @@ namespace QuestTree.QuestGraph
             {
                 // The line is the last thing.
             }
+        }
+
+        /// <summary>Thrown inside Finish's try to skip the file for a refusal; never escapes it.</summary>
+        private sealed class RefusedNoReport : Exception
+        {
+        }
+
+        /// <summary>The session's own spelling of <paramref name="text"/> (trimmed): an exact match among every capturable
+        /// location's ids first, else the one id equal to it ignoring case. Null, with the reason and the valid ids, for an
+        /// empty, unknown or ambiguous id.</summary>
+        private static string Canonical(string text, out string why)
+        {
+            why = null;
+            var id = text?.Trim();
+            var maps = MenuMapHost.ListCapturableLocations();
+            var ids = maps.SelectMany(m => m.Ids.Count > 0 ? (IEnumerable<string>)m.Ids : new[] { m.Id })
+                .Where(i => !string.IsNullOrEmpty(i)).Distinct(StringComparer.Ordinal).ToList();
+            var valid = ids.Count == 0 ? "none - there is no session with a location list yet" : string.Join(", ", ids);
+
+            if (string.IsNullOrEmpty(id))
+            {
+                why = $"the map id setting is empty (valid ids: {valid})";
+                return null;
+            }
+
+            var exact = ids.FirstOrDefault(i => string.Equals(i, id, StringComparison.Ordinal));
+            if (exact != null) return exact;
+
+            var loose = ids.Where(i => string.Equals(i, id, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (loose.Count == 1) return loose[0];
+
+            why = loose.Count > 1
+                ? $"'{id}' matches {loose.Count} ids ignoring case ({string.Join(", ", loose)}) - type it exactly"
+                : $"no location '{id}' in the session (valid ids: {valid})";
+            return null;
         }
 
         private static string Summary(RunState run)

@@ -323,10 +323,14 @@ namespace QuestTree
         /// Switching it on again during a run cancels the run. Off by default; F12 and the cfg only, not in Entries.</summary>
         public static ConfigEntry<bool> SelfTestRun { get; private set; }
 
-        /// <summary>Track T stage T0: the map data probe's start switch (QuestGraph.MapDataProbe) - a location id runs it once
-        /// for that map in the main menu; empty is off. The probe clears it before it starts; setting it again during a run
-        /// cancels the run. F12 and the cfg only, not in Entries.</summary>
+        /// <summary>Track T stage T0: the map data probe's map (QuestGraph.MapDataProbe) - a location id, only HELD here:
+        /// changing it never starts or cancels a run. F12 and the cfg only, not in Entries.</summary>
         public static ConfigEntry<string> MapDataProbeLocation { get; private set; }
+
+        /// <summary>Track T stage T0: the map data probe's start switch. Ticked in the main menu, it starts one run for
+        /// <see cref="MapDataProbeLocation"/>; the probe unticks it before it starts, and ticking it again during a run
+        /// cancels the run. Off by default; F12 and the cfg only, not in Entries.</summary>
+        public static ConfigEntry<bool> MapDataProbeRun { get; private set; }
 
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
@@ -1056,14 +1060,22 @@ namespace QuestTree
                 "refuses in a raid, in the hideout, with the hideout preloaded, or while a capture runs. Restart the game " +
                 "after it, before any raid.");
 
-            // Track T stage T0: the map data probe's start switch - out of Entries like the self-test's; F12 and the cfg only.
+            // Track T stage T0: the map data probe's map and its start switch - out of Entries like the self-test's; F12 and
+            // the cfg only. The switch has a NEW key: the 2026-10-04 text entry "Run map data probe (main menu)" is left as
+            // an orphan in old .cfg files and never read.
             MapDataProbeLocation = config.Bind(
-                "Advanced", "Run map data probe (main menu)", "",
-                "Debug only. Set to a location id (bigmap, Woods, Interchange, ...) in the MAIN MENU to run a read-only probe " +
-                "of that map once: it hosts the map's scenes in the menu, measures its textures, terrain, decals, trees, normal " +
-                "maps, a test light and memory, unloads the map, and writes BepInEx/plugins/QuestTree/probe/mapdata-<id>-<time>.json. " +
-                "It changes no map set and uploads nothing. It clears itself when it starts; set it again during a run to " +
-                "cancel. It refuses in a raid, in the hideout, or while a capture or the self-test runs. Empty = off.");
+                "Advanced", "Map data probe: map id", "bigmap",
+                "Debug only. The location id the map data probe runs on - it only holds the id; changing it starts nothing. " +
+                "Ids (matched ignoring case): bigmap, Woods, Interchange, Shoreline, Lighthouse, TarkovStreets, RezervBase, " +
+                "laboratory, factory4_day, Sandbox. An unknown id is refused, and the log lists the valid ones.");
+
+            MapDataProbeRun = config.Bind(
+                "Advanced", "Run map data probe now (main menu)", false,
+                "Debug only. Tick in the MAIN MENU to run a read-only probe of the map named in \"Map data probe: map id\" once: " +
+                "it hosts the map's scenes in the menu, measures its textures, terrain, decals, trees, normal maps, a test light " +
+                "and memory, unloads the map, and writes BepInEx/plugins/QuestTree/probe/mapdata-<id>-<time>.json. It changes no " +
+                "map set and uploads nothing. It unticks itself when it starts; tick it again during a run to cancel. It refuses " +
+                "in a raid, in the hideout, or while a capture or the self-test runs.");
 
             // WP2: the 3D mesh's accumulation - out of Entries, so the in-panel Settings tab shows no row for them; F12 and
             // the cfg file only.
