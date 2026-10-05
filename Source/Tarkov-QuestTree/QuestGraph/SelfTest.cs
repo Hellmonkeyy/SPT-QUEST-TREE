@@ -22,7 +22,7 @@ namespace QuestTree.QuestGraph
     /// "QuestTree: self-test: N passed, M failed ...". tools/tests/README_selftest.md describes the JSON.
     ///
     /// Steps: (1) preconditions, which are MenuCaptureRunner.CanStart's gates; (2) a real menu capture of the smallest map
-    /// into its throwaway "-menu" TEST key (MapCapture.MenuSession's probe constructor), asserted from the run's own
+    /// into its throwaway "-menu" TEST key (MapCapture.MenuSession's two-argument constructor), asserted from the run's own
     /// results; (3) every catalog set with a mesh opened in 3D (Map3DView.Attach on a viewport of the test's own, one
     /// at a time), measured, closed, and checked for leftovers and VRAM; (4) every catalog set's floors decoded in 2D,
     /// checking the viewing copy is used; (5) cleanup, which always runs: the test viewport goes, the test set's folder is
@@ -471,7 +471,7 @@ namespace QuestTree.QuestGraph
                 yield break;
             }
 
-            // The probe's constructor: the location's id plus "-menu", written merge-or-fresh. Never the real key.
+            // The two-argument constructor: the location's id plus "-menu", written merge-or-fresh. Never the real key.
             var session = new MapCapture.MenuSession(map.Id, key);
             _testKey = session.Key;
 

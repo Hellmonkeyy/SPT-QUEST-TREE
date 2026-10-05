@@ -1,3 +1,4 @@
 [Message:   BepInEx] BepInEx 5.4.23.5 - EscapeFromTarkov (9/8/2026 1:16:52 PM)
 [Info   : QuestTree] QuestTree 1.19.0+5360921: loaded.
 [Info   : QuestTree] QuestTree: menu map host: FINISHED tarkovstreets in 134925 ms - 245 scene(s) of 'city.scenespreset.asset' loaded and unloaded; RESTART THE GAME ADVISED: still different: texture mip limit 0 -> 2 SD.
+[Info   : QuestTree] QuestTree: menu map host: EMERGENCY UNLOAD (the host's coroutine died mid-run): started for [custom_Terrain, custom_AI], not waited for. RESTART THE GAME ADVISED.

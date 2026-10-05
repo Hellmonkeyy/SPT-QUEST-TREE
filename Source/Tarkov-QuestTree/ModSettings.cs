@@ -313,56 +313,10 @@ namespace QuestTree
         /// only, like the other 3D-map switches.</summary>
         public static ConfigEntry<bool> MapSmallBuildingShadows { get; private set; }
 
-        /// <summary>THROWAWAY. The debug key of the 3D map experiments - see QuestGraph/MeshProbe.cs,
-        /// which measures in one raid and one menu visit whether a scene mesh can be read back off the
-        /// GPU, whether colliders stream out with the player, which layer has no renderer on it, and
-        /// whether a RenderTexture viewer draws at all. Deliberately NOT in Entries, so the in-panel
-        /// Settings tab shows no row for it; it lives in the F12 menu and the cfg file only. Delete this
-        /// entry, its bind and MeshProbe.cs together.
-        ///
-        /// UNBOUND by default (review F43). A bare F10 fired a GPU readback pass in the menu and left a
-        /// click-eating overlay up. Bind it under F12 > Advanced to use it; it is tested with
-        /// <see cref="ShortcutDown(KeyboardShortcut)"/> so the keys a raid holds do not block it, though a
-        /// bare binding still refuses while Ctrl, Shift or Alt is held.
-        ///
-        /// The SECTION AND NAME CHANGED with the rename ("Roof probe key (throwaway)" -> "Mesh probe key
-        /// (throwaway)"), and that is deliberate rather than incidental. Bind never overwrites a value
-        /// already in the cfg file, so under the old name a cfg written by an earlier build would have kept
-        /// its Ctrl+F10 - the binding whose modifier is exactly what stopped the first two presses of the
-        /// old probe from firing. A new name is a new entry, so this one is written fresh, now unbound, and
-        /// the old line is left orphaned in the cfg, which BepInEx ignores. MeshProbe.Install prints the
-        /// bound key at raid start and the menu watcher at plugin load, so which one is live can be read
-        /// rather than assumed.</summary>
-        public static ConfigEntry<KeyboardShortcut> ProbeKey { get; private set; }
-
-        /// <summary>THROWAWAY. The key of QuestGraph/MenuSceneProbe.cs, which asks whether a raid map's built-in scenes can be
-        /// loaded additively in the MAIN MENU (no raid, no GameWorld) and what arrives with them. Unbound by default, F12 and
-        /// the cfg only (not in Entries). Delete with MenuSceneProbe.cs, together with <see cref="MenuSceneProbeLevels"/> and
-        /// the one line in TrackerHotkey.Update.</summary>
-        public static ConfigEntry<KeyboardShortcut> MenuSceneProbeKey { get; private set; }
-
-        /// <summary>THROWAWAY, with <see cref="MenuSceneProbeKey"/>: the build indices the probe loads, as a comma list. "17"
-        /// is Customs' custom_Terrain.</summary>
-        public static ConfigEntry<string> MenuSceneProbeLevels { get; private set; }
-
-        /// <summary>THROWAWAY, with <see cref="MenuSceneProbeKey"/>: the stage M1 test hook. A location id here makes the probe
-        /// key run QuestGraph/MenuMapHost on that location instead of the level list. Empty by default.</summary>
-        public static ConfigEntry<string> MenuMapHostLocation { get; private set; }
-
-        /// <summary>THROWAWAY, with <see cref="MenuSceneProbeKey"/>: the stage M2a test hook. A location id here makes the probe
-        /// key host that map in the main menu AND take a whole map capture of it while it is loaded
-        /// (MapCapture.RunMenuCapture). Wins over <see cref="MenuMapHostLocation"/>. Empty by default.</summary>
-        public static ConfigEntry<string> MenuCaptureLocation { get; private set; }
-
         /// <summary>Stage M3: the scene-name suffixes a capture from game files does not load, as a comma list - audio-only
         /// and culling-bake scenes, which carry nothing the capture draws. Read by QuestGraph.MenuMapHost.SkipSuffixes at
         /// each run; MenuMapHost.SkipSuffixesFromSettings rolls it back to the built-in list. F12 and the cfg only.</summary>
         public static ConfigEntry<string> MenuCaptureSkipSuffixes { get; private set; }
-
-        /// <summary>THROWAWAY (stage M3): when on, a map in the Maps tab draws from its "&lt;id&gt;-menu" test set (the probe
-        /// key's menu capture) when one exists, so the maintainer can look at the test sets. Off by default; F12 and the cfg
-        /// only. Delete with the probe settings.</summary>
-        public static ConfigEntry<bool> ShowMenuTestSets { get; private set; }
 
         /// <summary>The in-game self-test (QuestGraph.SelfTest). Switching it on in the main menu starts one unattended
         /// run. The self-test switches it back off before it starts, so a crash never leaves it on for the next launch.
@@ -533,7 +487,7 @@ namespace QuestTree
         /// Shift is sprint. A capture key rebound to a bare M is therefore silent mid-sprint and fires the
         /// moment the player stops sprinting. Nothing can be done about that without giving up the
         /// exclusivity above; anyone who wants a key that fires whatever the hands are doing should bind a
-        /// function key with no modifier and press it standing still, which is what the probe key does.
+        /// function key with no modifier and press it standing still.
         /// </summary>
         /// <param name="shortcut">The bound shortcut. A MainKey of None never fires.</param>
         public static bool ShortcutDown(KeyboardShortcut shortcut) =>
@@ -1084,49 +1038,6 @@ namespace QuestTree
                 "Behaviour", "Open tracker shortcut", new KeyboardShortcut(KeyCode.Q, KeyCode.LeftControl),
                 "Opens and closes the tracker anywhere in the menu, including the raid ready-up screen where the taskbar is hidden.");
 
-            // THROWAWAY, to be deleted with QuestGraph/MeshProbe.cs. Its own section so it sits away
-            // from the real settings, and kept out of Entries below so the Settings tab shows nothing.
-            // Unbound by default - see ProbeKey.
-            ProbeKey = config.Bind(
-                "Advanced", "Mesh probe key (throwaway)", KeyboardShortcut.Empty,
-                "Debug only, and temporary. It is the diagnostic key of the 3D map experiments: pressed in a " +
-                "raid it measures whether the game's meshes can be read back off the GPU and how much of the " +
-                "map its colliders cover, and pressed in the menu it lists the loaded shaders, cameras and " +
-                "layers and puts a small test view on screen (press again to close it). It writes " +
-                "BepInEx/plugins/QuestTree/captures/<map>.meshprobe.txt and captures/menu.meshprobe.txt and " +
-                "will be removed again; nothing in the mod depends on it.");
-
-            // THROWAWAY, to be deleted with QuestGraph/MenuSceneProbe.cs. Unbound, and out of Entries like ProbeKey.
-            MenuSceneProbeKey = config.Bind(
-                "Advanced", "Menu scene probe key (throwaway)", KeyboardShortcut.Empty,
-                "Debug only, and temporary. Pressed in the MAIN MENU (never in a raid or the hideout), it loads the map scenes " +
-                "listed below additively, logs what arrived (renderers, terrains, colliders, lights, memory, errors), then " +
-                "unloads them again. Its lines start \"QuestTree: [menu scene probe]\" in BepInEx/LogOutput.log. Nothing in the " +
-                "mod depends on it and it will be removed again. Restart the game after using this, before any raid.");
-
-            MenuSceneProbeLevels = config.Bind(
-                "Advanced", "Menu scene probe levels (throwaway)", "17",
-                "Debug only, and temporary. The build indices (a comma list) the menu scene probe loads, one at a time. " +
-                "17 is Customs' terrain scene. Only scenes under Assets/Content/Locations/ are accepted. Restart the game after using " +
-                "this, before any raid.");
-
-            MenuMapHostLocation = config.Bind(
-                "Advanced", "Menu map host location (throwaway)", "",
-                "Debug only, and temporary. When set to a location id (bigmap, Interchange, icebreaker, ...), the menu scene " +
-                "probe key hosts that whole map in the main menu instead of loading the levels above: every scene of the " +
-                "location's scenes preset is loaded additively, counted, and unloaded again. Its lines start \"QuestTree: menu " +
-                "map host:\" in BepInEx/LogOutput.log. Empty = the level list. Restart the game after using this, before any raid.");
-
-            MenuCaptureLocation = config.Bind(
-                "Advanced", "Menu capture location (throwaway)", "",
-                "Debug only, and temporary. When set to a location id (bigmap, Interchange, ...), the menu scene probe key hosts " +
-                "that whole map in the main menu and takes a full map capture of it (floors, 3D mesh, side views) into the " +
-                "captures folder under its own key, <id>-menu (e.g. bigmap-menu), beside the raid set and never merged into it; " +
-                "the Maps tab shows it only with \"Show -menu test sets in the Maps tab\" on. Nothing is uploaded. The Maps tab's " +
-                "\"Capture from game files\" writes the map's real set instead. " +
-                "Wins over the menu map host location. Its lines start \"QuestTree: menu capture:\", \"QuestTree: menu map host:\" " +
-                "and \"QuestTree: capturing\" in BepInEx/LogOutput.log. Restart the game after using this, before any raid.");
-
             // Stage M3: the capture from game files' scene filter - out of Entries like the other capture internals.
             MenuCaptureSkipSuffixes = config.Bind(
                 "Advanced", "Menu capture: skip scenes ending in", "_Sound,_Culling",
@@ -1134,13 +1045,6 @@ namespace QuestTree
                 "load: audio-only and culling-bake scenes carry nothing a map picture shows and cost load time and memory. A " +
                 "scene ending in _AI (the map's navigation mesh) is always loaded. Empty loads every scene of the map. Takes " +
                 "effect at the next capture.");
-
-            // THROWAWAY (stage M3): out of Entries like the probe settings.
-            ShowMenuTestSets = config.Bind(
-                "Advanced", "Show -menu test sets in the Maps tab (throwaway)", false,
-                "Debug only, and temporary. On, a map in the Maps tab is drawn from its <id>-menu test set (what the menu " +
-                "capture location setting above writes, e.g. bigmap-menu) when one exists, instead of its real set - so a test " +
-                "capture can be looked at. Off, the default, the test sets are never drawn.");
 
             // The self-test's start switch - out of Entries like the other debug entries; F12 and the cfg only.
             SelfTestRun = config.Bind(
@@ -1297,7 +1201,6 @@ namespace QuestTree
             // generation in its key, and without the bump a flip from the F12 menu would leave the 2D
             // picture on screen with the toggle beside it saying 3D.
             MapPictureSource.SettingChanged += Raise;
-            ShowMenuTestSets.SettingChanged += Raise;   // stage M3: what the map draws
             MapLabels.SettingChanged += Raise;
             MapMode.SettingChanged += Raise;
             MapLighting.SettingChanged += Raise;

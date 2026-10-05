@@ -63,24 +63,7 @@ namespace QuestTree.Patches
             if (!watchers)
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: OnGameStarted on a {__instance.GetType().Name} with no map name - the capture, " +
-                    "campaign and probe keys are not installed (the raid watch is); the zone harvest still looks for one in a few seconds.");
-
-            // THROWAWAY (the 3D map experiments): the mesh probe key, in a try of its OWN. It used to
-            // share the block below, which put a debug tool in front of the harvest, the capture and the
-            // campaign: anything it threw past its own catch - or in the logging inside that catch -
-            // would have taken all three down, and the warning would have blamed the zone harvest.
-            //
-            // Still first, and still ahead of the HarvestZones gate, because it is not part of the
-            // harvest and a raid with the harvest switched off is exactly the raid the experiments are
-            // run in. Delete with QuestGraph/MeshProbe.cs.
-            try
-            {
-                if (watchers) MeshProbe.Install(__instance);
-            }
-            catch (Exception ex)
-            {
-                Plugin.LogSource?.LogWarning($"QuestTree: could not install the mesh probe key ({ex.Message}).");
-            }
+                    "campaign keys are not installed (the raid watch is); the zone harvest still looks for one in a few seconds.");
 
             // Inside the game's own raid start; nothing thrown here may reach it.
             try

@@ -77,14 +77,6 @@ namespace QuestTree.UI
         {
             if (string.IsNullOrEmpty(locationKey)) return null;
 
-            // THROWAWAY (stage M3): the maintainer asked to see the probe key's "-menu" test sets - one wins over everything
-            // else for its map, and only while the setting is on.
-            if (ModSettings.Ready && ModSettings.ShowMenuTestSets != null && ModSettings.ShowMenuTestSets.Value)
-            {
-                var test = TestSet(locationKey, displayName);
-                if (test != null) return test;
-            }
-
             var preference = SourcePreference();
 
             // ---- (a) DynamicMaps first, when that is what the player asked for. Kept as one branch
@@ -363,29 +355,6 @@ namespace QuestTree.UI
             var captures = _captures ??= ScanFolder(null, CapturesRoot(), "captured map");
 
             return EntryFor(captures, locationKey, displayName);
-        }
-
-        /// <summary>THROWAWAY (stage M3): the "&lt;id&gt;-menu" test set for this map (or its alias's), or null. The location
-        /// key is added to the entry's names, as <see cref="EntryFor"/> does for an alias, so the marker payload - keyed by
-        /// the real id - still finds the map's pins.</summary>
-        /// <param name="locationKey">The map's internal id, as the view spells it.</param>
-        /// <param name="displayName">What the view calls this map, or null.</param>
-        private static DynamicMapsLibrary.MapEntry TestSet(string locationKey, string displayName)
-        {
-            var captures = _captures ??= ScanFolder(null, CapturesRoot(), "captured map");
-            var suffix = QuestGraph.MapCapture.MenuCaptureKeySuffix;
-
-            if (!captures.TryGetValue(locationKey + suffix, out var capture))
-            {
-                var aliased = AliasOf(locationKey);
-                if (aliased == null || !captures.TryGetValue(aliased + suffix, out capture)) return null;
-            }
-
-            if (!capture.Entry.InternalNames.Any(n => string.Equals(n, locationKey, StringComparison.OrdinalIgnoreCase)))
-                capture.Entry.InternalNames.Add(locationKey);
-
-            if (!string.IsNullOrEmpty(displayName)) capture.Entry.DisplayName = displayName;
-            return capture.Entry;
         }
 
         /// <summary>

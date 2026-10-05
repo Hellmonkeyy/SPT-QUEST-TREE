@@ -18,7 +18,7 @@ namespace QuestTree.QuestGraph
     /// Replace, set aside). A run that died without its finally ends the same way - the host's dead-run check frees the slot
     /// and leaves a verdict.
     ///
-    /// The throwaway probe key's capture (MenuSceneProbe, the "-menu" test set) does not come through here.
+    /// The in-game self-test's capture (QuestGraph.SelfTest, the "-menu" test set) does not come through here.
     /// </summary>
     internal static class MenuCaptureRunner
     {
@@ -99,7 +99,7 @@ namespace QuestTree.QuestGraph
             try
             {
                 if (Running) why = $"a capture from game files is running ({_runningName})";
-                else if (MenuMapHost.Busy) why = "the menu map host is busy (the probe key's run)";
+                else if (MenuMapHost.Busy) why = "the menu map host is busy (another run is going: the self-test or the map data probe)";
                 else if (MapCapture.IsCapturing) why = "a map capture is running";
                 else if (MenuMapHost.RestartAdvised != null) why = "an earlier capture could not restore the menu - restart the game first";
                 else if (QuestTree.UI.TrackerHotkey.Current == null) why = "the tracker's menu host is not up";

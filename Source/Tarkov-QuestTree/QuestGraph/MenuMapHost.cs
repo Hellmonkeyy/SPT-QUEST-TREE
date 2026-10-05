@@ -25,9 +25,9 @@ namespace QuestTree.QuestGraph
     /// <summary>
     /// Stage M1 of the menu capture: hosts a whole raid map in the MAIN MENU. It reads the location's ScenesPreset (data,
     /// never a list in code), loads every scene of it additively, lets a caller work while they are loaded, then unloads them
-    /// and puts back the global state the scenes changed. It also owns the machinery MenuSceneProbe proved in game
-    /// (4d859f8): the main-menu gate, the state snapshot/restore, the DontDestroyOnLoad diff, the dead-run check, the
-    /// Streamer switch-off, the log-message counter and the per-scene counts - the probe now calls into this.
+    /// and puts back the global state the scenes changed. It also owns the machinery the (since deleted) menu scene probe
+    /// proved in game (4d859f8): the main-menu gate, the state snapshot/restore, the DontDestroyOnLoad diff, the dead-run
+    /// check, the Streamer switch-off, the log-message counter and the per-scene counts.
     ///
     /// What EFT itself does (decompiled 4.1.6, read-only): the location's <c>Scene</c> ResourceKey (server base.json, e.g.
     /// path <c>maps/customs_preset.bundle</c>, rcid <c>bigmap.scenespreset.asset</c>) names a <see cref="ScenesPreset"/>.
@@ -45,8 +45,7 @@ namespace QuestTree.QuestGraph
     {
         private const string HostTag = "QuestTree: menu map host: ";
 
-        /// <summary>The hard limit on one scene's (or the preset's) load, and on each unload and the asset sweep - the
-        /// probe's per-scene timeout.</summary>
+        /// <summary>The hard limit on one scene's (or the preset's) load, and on each unload and the asset sweep.</summary>
         internal const double TimeoutSeconds = 60d;
 
         private const int MaxDistinctMessages = 20;
@@ -108,8 +107,8 @@ namespace QuestTree.QuestGraph
         // END TESTABLE NavTrack.Scenes
 
         // --- the run slot ------------------------------------------------------------------------------------------------
-        // One menu, one run: the probe and the host share this slot, so they never load scenes over each other, and the
-        // dead-run check below covers whichever owns it.
+        // One menu, one run: every run of the host (a capture, the self-test's, the map data probe's) takes this slot, so
+        // no two load scenes over each other, and the dead-run check below covers whichever owns it.
 
         private static int _claim;
         private static int _nextClaim;
@@ -123,14 +122,14 @@ namespace QuestTree.QuestGraph
         /// <summary>The frame the run's coroutine last yielded on - see <see cref="DeadAfterFrames"/>.</summary>
         private static int _lastTick;
 
-        /// <summary>Whose lines the shared helpers write: the owner's tag while a run holds the slot, the host's otherwise,
-        /// so the probe's log reads exactly as it did before the move.</summary>
+        /// <summary>Whose lines the shared helpers write: the owner's tag while a run holds the slot, the host's otherwise.
+        /// Every run today is the host's own, so this is always <see cref="HostTag"/>.</summary>
         private static string _voice = HostTag;
 
-        /// <summary>Sticky for the session: an earlier run (probe or host) could not prove it left the menu as it found it.</summary>
+        /// <summary>Sticky for the session: an earlier run could not prove it left the menu as it found it.</summary>
         internal static string RestartAdvised;
 
-        /// <summary>True while the probe or the host has scenes loading, loaded or unloading.</summary>
+        /// <summary>True while a run has scenes loading, loaded or unloading.</summary>
         internal static bool Busy => _claim != 0;
 
         /// <summary>Stage M3: the claim of the run holding the slot, 0 when none - so a caller that started a run can match
@@ -805,13 +804,9 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>Takes the slot and starts <see cref="Run"/> on <paramref name="host"/>. False, with the reason, when a run
-        /// is going, the menu gate refuses, an earlier run advised a restart, or the coroutine cannot start.</summary>
-        internal static bool Start(MonoBehaviour host, string locationId, Func<IEnumerator> whileLoaded, out string refusal) =>
-            Start(host, locationId, whileLoaded, out refusal, out _);
-
-        /// <summary>Stage M3 (review): <see cref="Start(MonoBehaviour, string, Func{IEnumerator}, out string)"/>, also handing
-        /// back the run's claim - taken here, so a caller never reads <see cref="CurrentClaim"/> after a start whose run may
-        /// already have changed it. 0 when it did not start.</summary>
+        /// is going, the menu gate refuses, an earlier run advised a restart, or the coroutine cannot start. Stage M3
+        /// (review): also hands back the run's claim - taken here, so a caller never reads <see cref="CurrentClaim"/> after a
+        /// start whose run may already have changed it. 0 when it did not start.</summary>
         internal static bool Start(MonoBehaviour host, string locationId, Func<IEnumerator> whileLoaded, out string refusal,
             out int startedClaim)
         {
@@ -1256,8 +1251,8 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Waits for every load still going (never abandoning one that progresses), then unloads every scene that
         /// appeared during the run in reverse order of appearance - requested or not - then Resources.UnloadUnusedAssets and
-        /// a forced collection, then the DontDestroyOnLoad check, the restore and the comparison with the baseline, as the
-        /// probe does. Anything unproven lands in the run's trouble.</summary>
+        /// a forced collection, then the DontDestroyOnLoad check, the restore and the comparison with the baseline.
+        /// Anything unproven lands in the run's trouble.</summary>
         internal static IEnumerator UnloadAll(RunContext ctx)
         {
             // First, before any scene goes: every exit that unloads - the normal end, a refusal, the cancel, a raid
@@ -2328,8 +2323,8 @@ namespace QuestTree.QuestGraph
                 : $"{label}: disabled {names.Count} streamer component(s): {string.Join("; ", names.Take(10))}.");
         }
 
-        /// <summary>One scene, just loaded: what it contains and what it cost. <paramref name="label"/> starts each line (the
-        /// probe's "level 17"), <paramref name="what"/> names it on the first.</summary>
+        /// <summary>One scene, just loaded: what it contains and what it cost. <paramref name="label"/> starts each line (e.g.
+        /// "scene 3/26"), <paramref name="what"/> names it on the first.</summary>
         internal static void MeasureScene(string label, string what, Scene scene, long loadMs, string memBefore, int[] errorsBefore)
         {
             var clock = Stopwatch.StartNew();
@@ -3308,7 +3303,7 @@ namespace QuestTree.QuestGraph
         /// there and destroyed again at once.</summary>
         private static List<GameObject> DdolRoots()
         {
-            var marker = new GameObject("QuestTreeMenuSceneProbeMarker");
+            var marker = new GameObject("QuestTreeMenuHostDdolMarker");
             try
             {
                 UnityEngine.Object.DontDestroyOnLoad(marker);
@@ -3456,7 +3451,7 @@ namespace QuestTree.QuestGraph
         internal static int[] ErrorCounts() => new[] { _exceptions, _errors, _asserts, _warnings };
 
         /// <summary>The run's message summary; <paramref name="ownSteps"/> names whose steps the failure count is of ("the
-        /// probe's own steps").</summary>
+        /// host's own steps").</summary>
         internal static void LogMessages(string ownSteps)
         {
             Log($"messages over the run: {_exceptions} exceptions, {_errors} errors, {_asserts} asserts, {_warnings} warnings, " +
@@ -3545,7 +3540,7 @@ namespace QuestTree.QuestGraph
         internal static string FirstFrame(string stackTrace) =>
             (stackTrace ?? "").Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? "";
 
-        /// <summary>A line in the current run owner's voice (the probe's tag while it runs, the host's otherwise).</summary>
+        /// <summary>A line in the current run owner's voice (see <see cref="_voice"/>).</summary>
         private static void Log(string text) => Plugin.LogSource?.LogInfo(_voice + text);
     }
 }

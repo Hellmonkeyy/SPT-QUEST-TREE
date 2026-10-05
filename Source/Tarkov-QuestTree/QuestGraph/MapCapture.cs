@@ -1143,7 +1143,7 @@ namespace QuestTree.QuestGraph
         /// pictures while its lighting is not yet the menu rig. No upload is offered for it either. The Maps tab never asks
         /// for such a key (MapCatalog looks sets up by the viewed location's id), so it is scanned and counted but not
         /// drawn. Stage M3: the Maps tab's "Capture from game files" (MenuCaptureRunner) writes the location's OWN key;
-        /// this suffix is the throwaway probe key's test set only (and ModSettings.ShowMenuTestSets draws it).</summary>
+        /// this suffix is the in-game self-test's throwaway test set only (QuestGraph.SelfTest).</summary>
         internal const string MenuCaptureKeySuffix = "-menu";
 
         // --- stage M2b: a menu capture's time budgets ----------------------------------------------------------------------
@@ -1424,7 +1424,7 @@ namespace QuestTree.QuestGraph
             /// capture header; -1 when none were looked for (the rig off).</summary>
             internal int DirectionalLightsDisabled = -1;
 
-            /// <summary>The throwaway probe's session: the "-menu" test set, merged when it can be and replaced (with
+            /// <summary>The self-test's session: the "-menu" test set, merged when it can be and replaced (with
             /// no copy kept) when it cannot - stage M2's behaviour.</summary>
             /// <param name="locationId">As asked for.</param>
             /// <param name="locationKey">The location's own Id (MenuMapHost.LocationKey).</param>
@@ -1734,7 +1734,8 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Stage M2: the mask a menu capture draws with - <see cref="CaptureMask"/> of every layer, exactly what
         /// <see cref="BuildCamera"/> builds in menu mode - for MenuMapHost.WakeHosted to decide what is geometry. The
-        /// once-a-session layer line is left for the capture itself, as <see cref="ProbeCaptureMask"/> does.</summary>
+        /// once-a-session layer line is left for the capture itself: the flag is set for this call and put back as it was
+        /// found, so the line is neither printed here nor stolen from the capture that owes it.</summary>
         internal static int MenuCaptureMask()
         {
             var logged = _loggedLayers;
@@ -16945,59 +16946,6 @@ namespace QuestTree.QuestGraph
             Directory.CreateDirectory(dir);
             return dir;
         }
-
-        // --- THROWAWAY, with QuestGraph/MeshProbe.cs -------------------------------------------------
-        //
-        // Three accessors the Phase 3-0 mesh probe reads, and nothing else in the mod does. They exist
-        // so the probe measures what a CAPTURE would do rather than a second opinion of it: the same
-        // layer mask, the same camera height rule, the same folder. DELETE all three with MeshProbe.cs.
-
-        /// <summary>THROWAWAY: the folder the mesh probe's text file goes in. Delete with
-        /// QuestGraph/MeshProbe.cs.</summary>
-        internal static string ProbeCapturesRoot()
-        {
-            try
-            {
-                return CapturesRootDir();
-            }
-            catch (Exception ex)
-            {
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: the captures folder could not be made ({ex.GetType().Name}: {ex.Message}).");
-                return null;
-            }
-        }
-
-        /// <summary>THROWAWAY: the culling mask a capture of this raid would draw with, built exactly as
-        /// <see cref="BuildCamera"/> builds it - the live camera's own mask, or ~0 when there is none to
-        /// copy, minus <see cref="ExcludedLayerNames"/>.
-        ///
-        /// The once-per-session layer log line is SUPPRESSED for the probe's call and then put back the way
-        /// it was found, so the line is neither printed by a diagnostic nor stolen from the capture that
-        /// owes it. Saving the flag without setting it first was worse than leaving it alone: the probe's
-        /// call printed the line (the flag was still false), and then the restore un-marked it, so the next
-        /// capture printed the same line again. Delete with QuestGraph/MeshProbe.cs.</summary>
-        internal static int ProbeCaptureMask()
-        {
-            var main = LiveCamera();
-            var logged = _loggedLayers;
-
-            try
-            {
-                _loggedLayers = true;
-                return CaptureMask(main != null ? main.cullingMask : ~0);
-            }
-            finally
-            {
-                _loggedLayers = logged;
-            }
-        }
-
-        /// <summary>THROWAWAY: the metres above the topmost band's maxY a capture's camera stands - see
-        /// <see cref="TopBandCameraHeight"/> and <see cref="BeginFloor"/>. Read rather than copied, so
-        /// the probe's raycast grid starts where the picture's camera does. Delete with
-        /// QuestGraph/MeshProbe.cs.</summary>
-        internal static float ProbeTopBandCameraHeight => TopBandCameraHeight;
 
         /// <summary>The pixels per metre a floor of this map can actually be captured in: what the
         /// resolution setting asks for, brought down in <see cref="BudgetPpmStep"/> steps until one

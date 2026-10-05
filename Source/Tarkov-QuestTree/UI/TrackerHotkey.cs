@@ -44,18 +44,9 @@ namespace QuestTree.UI
 
         private void Update()
         {
-            // THROWAWAY (the 3D map experiments' probe key): polled from here too, because this Update
-            // is proven to run in the menu and the probe's own object's was not seen to. Delete with
-            // QuestGraph/MeshProbe.cs.
-            QuestGraph.MenuMeshProbe.PollFromHotkey(this);
-
-            // The menu map host's dead-run check (it and the probe below share one run slot): a run whose host died or whose
+            // The menu map host's dead-run check: a run whose host died or whose
             // coroutine stopped yielding has its scenes unloaded. First, so a dead run is freed before a key press is read.
             QuestGraph.MenuMapHost.PollFromHotkey(this);
-
-            // THROWAWAY (the menu scene experiment): the menu scene probe's key, hosted here for the same reason. Delete with
-            // QuestGraph/MenuSceneProbe.cs.
-            QuestGraph.MenuSceneProbe.PollFromHotkey(this);
 
             // Campaign speed step 2 (review): a capture campaign's last write can finish after its raid, in the menu - this
             // Update is proven to tick there, so the write's main-thread end (the upload release, the Maps tab) runs from here
