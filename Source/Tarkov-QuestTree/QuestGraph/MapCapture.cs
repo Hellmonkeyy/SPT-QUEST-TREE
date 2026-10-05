@@ -15961,6 +15961,31 @@ namespace QuestTree.QuestGraph
                 .OrderByDescending(dir => Path.GetFileName(dir), StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
+        // BEGIN TESTABLE SetAsidePrune
+        /// <summary>The backups a prune deletes: all but the newest <paramref name="kept"/> of the folders that hold
+        /// something. An empty folder (a set-aside that failed part way and could not remove its own folder) is neither
+        /// counted nor deleted, so it never takes a real backup's kept slot (review B15).</summary>
+        /// <param name="newestFirst">The map's backup folders, newest first.</param>
+        /// <param name="isEmpty">Whether a folder holds nothing.</param>
+        /// <param name="kept">How many backups are kept.</param>
+        internal static List<string> SetAsideToDelete(IList<string> newestFirst, Func<string, bool> isEmpty, int kept) =>
+            newestFirst.Where(dir => !isEmpty(dir)).Skip(Math.Max(0, kept)).ToList();
+        // END TESTABLE SetAsidePrune
+
+        /// <summary>Whether a folder holds no file and no folder; a folder that cannot be read counts as not empty, so it
+        /// is pruned as before rather than kept forever.</summary>
+        private static bool IsEmptyFolder(string dir)
+        {
+            try
+            {
+                return !Directory.EnumerateFileSystemEntries(dir).Any();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         /// <summary>Stage M3 (review): deletes all but the newest <see cref="SetAsideKept"/> backups of this map, one line each.
         /// A backup that will not delete is left and said. Never throws.</summary>
         /// <param name="plan">The capture's plan.</param>
@@ -15971,7 +15996,9 @@ namespace QuestTree.QuestGraph
                 var root = Path.GetDirectoryName(plan.Dir);
                 if (string.IsNullOrEmpty(root)) return;
 
-                foreach (var old in SetAsideFolders(root, plan.Key).Skip(SetAsideKept))
+                var folders = SetAsideFolders(root, plan.Key);
+
+                foreach (var old in SetAsideToDelete(folders, IsEmptyFolder, SetAsideKept))
                 {
                     try
                     {
@@ -16123,6 +16150,7 @@ namespace QuestTree.QuestGraph
             bytes = 0;
 
             var moved = new List<(string From, string To)>();
+            string target = null;
 
             try
             {
@@ -16145,7 +16173,7 @@ namespace QuestTree.QuestGraph
                 var root = Path.GetDirectoryName(plan.Dir) ?? plan.Dir;
                 var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
                 var name0 = plan.Key + SetAsideInfix + stamp;
-                var target = Path.Combine(root, name0);
+                target = Path.Combine(root, name0);
 
                 for (var n = 2; Directory.Exists(target) || File.Exists(target); n++)
                     target = Path.Combine(root, $"{name0}-{n.ToString(CultureInfo.InvariantCulture)}");
@@ -16174,6 +16202,8 @@ namespace QuestTree.QuestGraph
                 why = $"{ex.GetType().Name}: {ex.Message}";
 
                 // Back, newest first, so the folder is as it was.
+                var allBack = true;
+
                 for (var i = moved.Count - 1; i >= 0; i--)
                 {
                     try
@@ -16182,9 +16212,25 @@ namespace QuestTree.QuestGraph
                     }
                     catch (Exception back)
                     {
+                        allBack = false;
                         Plugin.LogSource?.LogWarning(
                             $"QuestTree: {Path.GetFileName(moved[i].From)} could not be moved back from the backup ({back.Message}) - " +
                             $"it is in {Path.GetDirectoryName(moved[i].To)}.");
+                    }
+                }
+
+                // The folder this attempt created, now empty, goes too (review B15): left, it would be the newest backup
+                // and take one of the SetAsideKept slots from a real one. Not recursive - a file still in it stays.
+                if (allBack && target != null && Directory.Exists(target))
+                {
+                    try
+                    {
+                        Directory.Delete(target, recursive: false);
+                    }
+                    catch (Exception gone)
+                    {
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: the empty backup folder captures\\{Path.GetFileName(target)} could not be removed ({gone.Message}).");
                     }
                 }
 

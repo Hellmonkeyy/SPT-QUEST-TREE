@@ -347,9 +347,9 @@ namespace QuestTree.UI
                 index => ModSettings.MapLabels.Value = (ModSettings.LabelMode)index);
 
             Dropdown(column, ref y, width, deferred, "Capture resolution",
-                new[] { "2048 px", "4096 px", "8192 px (sharpest)" },
-                ModSettings.CaptureResolution.Value <= 2048 ? 0 : ModSettings.CaptureResolution.Value <= 4096 ? 1 : 2,
-                index => ModSettings.CaptureResolution.Value = index == 0 ? 2048 : index == 1 ? 4096 : 8192);
+                new[] { "2048 px", "4096 px", "8192 px", "16384 px (sharpest)" },
+                ResolutionIndex(ModSettings.CaptureResolution.Value),
+                index => ModSettings.CaptureResolution.Value = ResolutionOf(index));
 
             AuxLayout.AddSpacer(ref y, 6f);
             Dropdown(column, ref y, width, deferred, "Pin labels",
@@ -373,6 +373,18 @@ namespace QuestTree.UI
                 ModSettings.CaptureResolution, ModSettings.UploadCaptures,
                 ModSettings.MapPictureSource, ModSettings.MapLabels, ModSettings.MapMode);
         }
+
+        // BEGIN TESTABLE CaptureResolutionChoice
+        /// <summary>The Capture resolution dropdown's option for a setting value: every value the setting accepts
+        /// (2048, 4096, 8192, 16384) has its own option, so the 16384 default is shown as itself and picking
+        /// the option already shown writes back the same value (review B9).</summary>
+        internal static int ResolutionIndex(int value) =>
+            value <= 2048 ? 0 : value <= 4096 ? 1 : value <= 8192 ? 2 : 3;
+
+        /// <summary>The setting value the dropdown's option at <paramref name="index"/> stands for.</summary>
+        internal static int ResolutionOf(int index) =>
+            index <= 0 ? 2048 : index == 1 ? 4096 : index == 2 ? 8192 : 16384;
+        // END TESTABLE CaptureResolutionChoice
 
         /// <summary>The Map section's one paragraph about capturing a picture: which key does it, and
         /// the two things that stop it working. Written out rather than left to the F12 menu's

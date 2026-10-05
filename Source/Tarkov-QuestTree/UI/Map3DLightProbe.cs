@@ -598,7 +598,7 @@ namespace QuestTree.UI
             PlaceSpot(rig, reported.Distance);
             rig.Light.shadowBias = reported.Bias;
             rig.Light.shadowNormalBias = reported.NormalBias;
-            CheckResolution(rig, result, reported.Distance, reported.Lit);
+            CheckResolution(rig, result, reported.Distance, reported.Lit, reported.Ratio * reported.Lit);
         }
 
         /// <summary>The spot at (0, D, 0) pointing straight down, its cone fitted to <see cref="FitRadius"/> (Unity's
@@ -701,7 +701,14 @@ namespace QuestTree.UI
         /// where the box's edge projects (x = half side x D / (D - top)). Twice the resolution halves the soft edge's
         /// width in pixels; an edge no narrower means the request was clamped. The view goes back to the wide one after.
         /// </summary>
-        private static void CheckResolution(Rig rig, Result result, float distance, float lit)
+        /// <param name="rig">The probe's rig.</param>
+        /// <param name="result">Where the measurement goes.</param>
+        /// <param name="distance">The passing pair's light distance.</param>
+        /// <param name="lit">The passing pair's lit reading: the edge's 100 % level.</param>
+        /// <param name="shade">The umbra's reading at the passing pair (ratio x lit): the edge's 0 % level. A passing
+        /// shadow may read up to <see cref="ShadowRatioMax"/> of lit, above <see cref="EdgeLow"/>, and measured from zero
+        /// every umbra pixel would count as edge, so 4096 could never show a narrower edge than 2048 (review B8).</param>
+        private static void CheckResolution(Rig rig, Result result, float distance, float lit, float shade)
         {
             var max = MaxResolution();
             result.ResolutionEffective = max;
@@ -714,11 +721,11 @@ namespace QuestTree.UI
 
                 rig.Light.shadowCustomResolution = ResolutionReference;
                 DrawShadowScene(rig);
-                result.EdgeWidthReference = EdgeWidth(Shoot(rig), lit);
+                result.EdgeWidthReference = EdgeWidth(Shoot(rig), lit, shade);
 
                 rig.Light.shadowCustomResolution = max;
                 DrawShadowScene(rig);
-                result.EdgeWidthMax = EdgeWidth(Shoot(rig), lit);
+                result.EdgeWidthMax = EdgeWidth(Shoot(rig), lit, shade);
             }
             finally
             {
@@ -734,9 +741,10 @@ namespace QuestTree.UI
             if (result.ResolutionClamped) result.ResolutionEffective = ResolutionReference;
         }
 
-        /// <summary>The pixels across the edge between <see cref="EdgeLow"/> and <see cref="EdgeHigh"/> of lit, on the
-        /// centre four rows averaged (the edge runs along the view's rows' normal, so every row crosses it alike).</summary>
-        private static int EdgeWidth(Color32[] pixels, float lit)
+        /// <summary>The pixels across the edge between <see cref="EdgeLow"/> and <see cref="EdgeHigh"/> of the rise from
+        /// the umbra (shade) to lit, on the centre four rows averaged (the edge runs along the view's rows' normal, so every
+        /// row crosses it alike).</summary>
+        private static int EdgeWidth(Color32[] pixels, float lit, float shade)
         {
             var width = 0;
 
@@ -751,11 +759,24 @@ namespace QuestTree.UI
                 }
 
                 var value = sum / (4f * 3f * 255f);
-                if (value > EdgeLow * lit && value < EdgeHigh * lit) width++;
+                if (OnEdge(value, lit, shade)) width++;
             }
 
             return width;
         }
+
+        // BEGIN TESTABLE ShadowEdge
+        /// <summary>Whether a reading lies on the soft edge: between <see cref="EdgeLow"/> and <see cref="EdgeHigh"/> of
+        /// the way from the umbra floor (shade) up to lit. Measured from the floor, not from zero, so an umbra that reads
+        /// above EdgeLow x lit (a passing shadow may read up to <see cref="ShadowRatioMax"/>) is not counted as edge.</summary>
+        internal static bool OnEdge(float value, float lit, float shade)
+        {
+            var floor = Mathf.Clamp(shade, 0f, lit);
+            var rise = lit - floor;
+
+            return value > floor + EdgeLow * rise && value < floor + EdgeHigh * rise;
+        }
+        // END TESTABLE ShadowEdge
 
         /// <summary>The emission quad, flat, with the light off: its centre pixel must read the texel within
         /// <see cref="EmissionTolerance"/> on every channel.</summary>

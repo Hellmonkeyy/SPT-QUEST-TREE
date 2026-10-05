@@ -5252,6 +5252,9 @@ namespace QuestTree.UI
             RenderTexture temporary = null;
             RenderTexture resolved = null;
             Texture2D readable = null;
+            // Review B21: a check render's submissions are not the view's frame - the count the first-frame line and
+            // SelfTestDrawCalls report is put back as the frame left it.
+            var drawCalls = _drawCalls;
 
             try
             {
@@ -5273,6 +5276,7 @@ namespace QuestTree.UI
             }
             finally
             {
+                _drawCalls = drawCalls;
                 try { RenderTexture.active = previous; } catch (Exception) { /* nothing further to try */ }
                 try { if (_camera != null) _camera.targetTexture = target; } catch (Exception) { /* as above */ }
                 if (temporary != null) RenderTexture.ReleaseTemporary(temporary);
@@ -10086,7 +10090,10 @@ namespace QuestTree.UI
         /// <summary>
         /// Spot-sun stage C: the union of every drawn floor's ground and building mesh bounds, for <see cref="FitView"/>.
         /// Once per build, when it finishes (Finish); Mesh.bounds is kept by Unity, so this is a walk over the lists, not
-        /// the vertices. The walls are not in it: they are built later (StartWalls) and stand under the roofs, which are.
+        /// the vertices. Review B22: the buildings are every roof-bearing list Draw submits - the top picture's, the atlas
+        /// tiles' (roofs kept on the atlas: setting off, a coarse picture, cut-out tiles, steep faces, trees), the roofs
+        /// filed on other floors, and the side pictures'. The walls are not in it: they are built later (StartWalls) and
+        /// stand under the roofs, which are.
         /// </summary>
         private void ComputeMapBounds()
         {
@@ -10100,26 +10107,37 @@ namespace QuestTree.UI
 
                 AddBounds(meshes.Ground);
                 AddBounds(meshes.Buildings);
+
+                for (var i = 0; i < meshes.Atlas.Count; i++)
+                    if (meshes.Atlas[i] != null) AddBounds(meshes.Atlas[i].Meshes);
+
+                for (var i = 0; i < meshes.Sides.Length; i++)
+                    if (meshes.Sides[i] != null) AddBounds(meshes.Sides[i].Meshes);
+
+                for (var i = 0; i < meshes.RoofsOnOtherFloors.Count; i++)
+                    AddBound(meshes.RoofsOnOtherFloors[i].Mesh);
             }
         }
 
         /// <summary>Encapsulates each non-empty mesh's bounds into <see cref="_mapBounds"/>, the first one setting it.</summary>
         private void AddBounds(List<Mesh> meshes)
         {
-            for (var i = 0; i < meshes.Count; i++)
+            for (var i = 0; i < meshes.Count; i++) AddBound(meshes[i]);
+        }
+
+        /// <summary>Encapsulates one non-empty mesh's world bounds into <see cref="_mapBounds"/>, the first one setting it.</summary>
+        private void AddBound(Mesh mesh)
+        {
+            if (mesh == null || mesh.vertexCount == 0) return;
+
+            // world bounds: a compact mesh's own are in lattice units
+            var bounds = WorldBoundsOf(mesh);
+
+            if (_mapBoundsSet) _mapBounds.Encapsulate(bounds);
+            else
             {
-                var mesh = meshes[i];
-                if (mesh == null || mesh.vertexCount == 0) continue;
-
-                // world bounds: a compact mesh's own are in lattice units
-                var bounds = WorldBoundsOf(mesh);
-
-                if (_mapBoundsSet) _mapBounds.Encapsulate(bounds);
-                else
-                {
-                    _mapBounds = bounds;
-                    _mapBoundsSet = true;
-                }
+                _mapBounds = bounds;
+                _mapBoundsSet = true;
             }
         }
 
@@ -10674,6 +10692,10 @@ namespace QuestTree.UI
             var fogEndWas = RenderSettings.fogEndDistance;
             var fogSet = false;
 
+            // Review B23: the stack detached inside SetActive below - this render is not made, and is made again once the
+            // finally has put everything back, by the fallback at the top of that call.
+            var detachedLate = false;
+
             try
             {
                 RenderSettings.fog = false;   // the menu's own, off unless AerialFog sets ours below
@@ -10804,13 +10826,22 @@ namespace QuestTree.UI
                 // oblique projection it would otherwise reset
                 Map3DPostProcess.SetActive(true, oblique);
 
-                var clock = _timeRender ? Stopwatch.StartNew() : null;
-                _camera.Render();
+                // Review B23: SetActive's volume check, or its catch, detaches the stack - after the plan, the spot's
+                // intensity for the tonemap anchor and the calibrated emission were set above. Rendered now, the frame is
+                // HDR with no tonemap, a flat white that stays until the view moves. Not rendered: the call below redoes
+                // it on the plain path (its top check takes the fallback, which clears _tonemapOn, so it runs once).
+                detachedLate = _tonemapOn && !_calibrating && !Map3DPostProcess.Attached;
 
-                if (clock != null)
+                if (!detachedLate)
                 {
-                    _renderMs = clock.Elapsed.TotalMilliseconds;
-                    _timeRender = false;
+                    var clock = _timeRender ? Stopwatch.StartNew() : null;
+                    _camera.Render();
+
+                    if (clock != null)
+                    {
+                        _renderMs = clock.Elapsed.TotalMilliseconds;
+                        _timeRender = false;
+                    }
                 }
             }
             finally
@@ -10862,6 +10893,8 @@ namespace QuestTree.UI
                 // view, the aspect and the clip planes.
                 try { if (oblique && _camera != null) _camera.ResetProjectionMatrix(); } catch (Exception) { /* as above */ }
             }
+
+            if (detachedLate) RenderNow();
         }
 
         /// <summary>Time the next render, for the first-frame line. Set by <see cref="Finish"/> and whenever the

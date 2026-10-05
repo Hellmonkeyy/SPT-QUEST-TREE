@@ -231,6 +231,9 @@ namespace QuestTree.QuestGraph
             _testKey = null;
             _testFolderMine = false;
             _claim = 0;
+            // Per run (review B19): a snapshot that fails this run must read as "no snapshot was taken", never as the
+            // previous run's. The mip, SD and nav baselines cannot fail (plain reads; NavVertices catches).
+            _realSetsBefore = null;
 
             try
             {
@@ -510,6 +513,13 @@ namespace QuestTree.QuestGraph
             step.Measure("sdModeBefore", sd);
             step.Measure("navMeshVerticesBefore", nav);
 
+            // A cancel that landed during the VRAM read above (review B20): no hosted capture is started for it.
+            if (_cancel != null)
+            {
+                step.Check("the capture started", false, "cancelled: " + _cancel);
+                yield break;
+            }
+
             var host = TrackerHotkey.Current;
             if (!MenuMapHost.Start(host, map.Id, () => MapCapture.RunMenuCapture(session), out var refusal, out var claim))
             {
@@ -747,6 +757,13 @@ namespace QuestTree.QuestGraph
             while (reading.MoveNext()) yield return reading.Current;
             var vramBefore = vram.UsageMb;
             part.Measure("vramBeforeMb", vramBefore);
+
+            // A cancel that landed during the waits and the VRAM read above (review B20): no viewport, no view.
+            if (_cancel != null)
+            {
+                part.Check("the view opened", false, "cancelled: " + _cancel);
+                yield break;
+            }
 
             var meshes = Ids<Mesh>();
             var textures = Ids<Texture>();

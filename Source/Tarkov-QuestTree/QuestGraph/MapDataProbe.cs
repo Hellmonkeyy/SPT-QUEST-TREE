@@ -167,6 +167,9 @@ namespace QuestTree.QuestGraph
                 run.Hosting = false;
                 run.EndFrame = Time.frameCount;
                 VramProbe.TryRead(out _, out _);
+                // Review B24: the Maps tab's 3D guard reads MenuMapHost.Busy, which no setting change announces - the tab
+                // is redrawn so its view comes back in 3D now the slot is free.
+                ModSettings.RequestRepaint();
                 return;
             }
 
@@ -274,6 +277,9 @@ namespace QuestTree.QuestGraph
 
             run.Claim = claim;
             run.Hosting = true;
+            // Review B24: the Maps tab redraws now, so its 3D guard (MenuMapHost.Busy) takes the view down while the map
+            // is hosted, rather than on some later unrelated repaint.
+            ModSettings.RequestRepaint();
             Plugin.LogSource?.LogInfo($"{Tag}hosting '{location}' to measure it (read-only). Do not start a raid or open the hideout until its summary line.");
         }
 

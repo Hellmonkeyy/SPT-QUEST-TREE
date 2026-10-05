@@ -138,8 +138,11 @@ namespace QuestTree.UI
             var path = entry?.MeshPath;
             if (string.IsNullOrEmpty(path)) return null;
 
-            if (MenuHostBusy) return "a capture from game files is running";
+            // Review B24: the reason names who holds the menu host - a capture, the self-test or the map data probe.
+            if (QuestGraph.MenuCaptureRunner.Running) return "a capture from game files is running";
             if (QuestGraph.SelfTest.Running) return "the self-test is running";
+            if (QuestGraph.MenuMapHost.Busy)
+                return QuestGraph.MapDataProbe.Running ? "the map data probe is running" : "a map is hosted in the menu";
 
             return _refusedMeshes.TryGetValue(path, out var reason) ? reason : null;
         }
