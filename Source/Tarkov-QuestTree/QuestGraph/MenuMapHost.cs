@@ -6,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Comfort.Common;
 using EFT;
 using EFT.AssetsManager;
@@ -666,7 +667,113 @@ namespace QuestTree.QuestGraph
             /// <summary>The preset entry it is the load of, or null when nothing asked for it (streamed in, or loaded by a
             /// script of the hosted scenes).</summary>
             internal SceneEntry Entry;
+
+            /// <summary>B6/B7: the scene one of the host's own LoadScene operations asked for (<see cref="ClaimedFor"/>),
+            /// known when it appeared - by the operation's scene handle, or by name before any foreign signal. Kept by the
+            /// freeze; every other scene of the set (a stray) is dropped by it.</summary>
+            internal bool Requested;
+
+            /// <summary>The entry whose load claimed it on appearance, or null.</summary>
+            internal SceneEntry ClaimedFor;
         }
+
+        // BEGIN TESTABLE HostScenes - tools/tests/unit/run_unit.py compiles this region on its own: no Unity type in it.
+        /// <summary>B6/B7/B17/B18: which scenes a run may unload, and which unload steps may run. A scene that appears
+        /// during a run is either REQUESTED (the scene one of the host's own LoadScene operations asked for - always the
+        /// run's) or a STRAY (anything else). A stray is the run's only while no foreign signal has been seen (a raid, a
+        /// GameWorld, the hideout, a trader screen, the main menu left, a Single-mode load) and only if it is not one of
+        /// the game's own scenes. At the first foreign signal the set FREEZES: every stray is dropped and left loaded,
+        /// nothing new but a requested scene is noted, and no diff, later unload pass, asset sweep or restore runs.</summary>
+        internal static class HostScenes
+        {
+            /// <summary>Name prefixes of the GAME's own scenes - a deny-list of what the game loads, never a key on a map
+            /// name: the trader dialog's Vendors_&lt;trader&gt; and Vendors_Scripts scenes (EFT.VendorScenePresets, loaded
+            /// Additive by NarrateController BEFORE its NarrateGameWorld exists). The exact names (EFT.Scenes' constants,
+            /// bunker_2, the vendor presets' own names) come from the game at run time.</summary>
+            internal static readonly string[] GameScenePrefixes = { "Vendors_" };
+
+            /// <summary>Whether <paramref name="name"/> is one of the game's own scenes: in
+            /// <paramref name="gameSceneNames"/> or starting with a <see cref="GameScenePrefixes"/> entry, ignoring case.
+            /// Fail-safe: <paramref name="gameSceneNames"/> null means the game's names could not be read, and then every
+            /// named scene counts as the game's - an unreadable list never widens what the host owns.</summary>
+            internal static bool IsGameScene(string name, ICollection<string> gameSceneNames)
+            {
+                if (string.IsNullOrEmpty(name)) return false;
+                if (gameSceneNames == null) return true;
+                if (gameSceneNames.Any(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase))) return true;
+                return GameScenePrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+            }
+
+            /// <summary>One reading of a host load's scene handle. <paramref name="newHandlesOfThatName"/>: every scene
+            /// SceneManager lists now, loading or loaded, not in the baseline, with the load's scene name.
+            /// <paramref name="sawTwo"/>: kept per load - once two such scenes have existed during the load (a same-map
+            /// raid), it stays true and no handle is ever given for that load. The handle when exactly one exists and two
+            /// never did, else 0.</summary>
+            internal static int LearnHandle(IList<int> newHandlesOfThatName, ref bool sawTwo)
+            {
+                if (newHandlesOfThatName.Count >= 2) sawTwo = true;
+                if (sawTwo || newHandlesOfThatName.Count != 1) return 0;
+                return newHandlesOfThatName[0];
+            }
+
+            /// <summary>Whether a scene that just appeared is the one a host load in flight asked for.
+            /// <paramref name="knownHandle"/>: that load's scene handle, read from SceneManager while it loaded, 0 when it
+            /// was never seen - then only the scene's handle decides. Unknown: by name, only when exactly one new scene of
+            /// that name exists (<paramref name="newScenesOfThatName"/>) and no foreign signal has been seen, so a raid
+            /// loading the same map's scene is never claimed.</summary>
+            internal static bool IsRequested(bool nameMatches, int handle, int knownHandle, int newScenesOfThatName, bool frozen)
+            {
+                if (knownHandle != 0) return handle == knownHandle;
+                return nameMatches && newScenesOfThatName == 1 && !frozen;
+            }
+
+            /// <summary>Whether a scene that appeared is noted as the run's. <paramref name="inBaseline"/>: loaded when the
+            /// run began. <paramref name="gameScene"/>: one of the game's own (<see cref="IsGameScene"/>, or loaded Single).
+            /// A requested scene always is; a stray only before the freeze.</summary>
+            internal static bool Owns(bool inBaseline, bool gameScene, bool requested, bool frozen)
+            {
+                if (inBaseline || gameScene) return false;
+                if (requested) return true;
+                return !frozen;
+            }
+
+            /// <summary>Whether a noted scene stays in the set at the freeze: requested ones only.</summary>
+            internal static bool KeepAtFreeze(bool requested, bool gameScene) => requested && !gameScene;
+
+            /// <summary>The freeze transition: removes from <paramref name="noted"/> every scene <see cref="KeepAtFreeze"/>
+            /// does not keep, appending each to <paramref name="dropped"/> in the order noted. Returns what remains.</summary>
+            internal static int FreezeSet<TItem>(List<TItem> noted, Func<TItem, bool> requested, Func<TItem, bool> gameScene,
+                List<TItem> dropped)
+            {
+                var kept = new List<TItem>();
+                foreach (var item in noted)
+                {
+                    if (KeepAtFreeze(requested(item), gameScene(item))) kept.Add(item);
+                    else dropped.Add(item);
+                }
+
+                noted.Clear();
+                noted.AddRange(kept);
+                return noted.Count;
+            }
+
+            /// <summary>Whether the loaded scenes may be diffed for new ones: never once frozen - every scene that
+            /// appears then is the game's.</summary>
+            internal static bool MayDiff(bool frozen) => !frozen;
+
+            /// <summary>Whether unload pass <paramref name="pass"/> (1-based) may run: the first always (over the run's
+            /// own set), the later ones - which pick up scenes that appeared during the unload - only while not frozen and
+            /// up to <paramref name="maxPasses"/>.</summary>
+            internal static bool MayRunPass(int pass, bool frozen, int maxPasses) => pass == 1 || (!frozen && pass <= maxPasses);
+
+            /// <summary>Whether Resources.UnloadUnusedAssets may run: not over the game's own loading.</summary>
+            internal static bool MaySweep(bool frozen) => !frozen;
+
+            /// <summary>Whether the menu's global state may be written back: only with a baseline and not frozen (it
+            /// would land on a raid's, the hideout's or a trader scene's own RenderSettings and LevelSettings).</summary>
+            internal static bool MayRestore(bool frozen, bool haveBaseline) => !frozen && haveBaseline;
+        }
+        // END TESTABLE HostScenes
 
         /// <summary>One run's state: the baseline, what is loaded, and what went wrong.</summary>
         internal sealed class RunContext
@@ -699,6 +806,48 @@ namespace QuestTree.QuestGraph
             /// which a scene's own name need not match.</summary>
             internal readonly List<Hosted> Appeared = new List<Hosted>();
 
+            /// <summary>B6/B7: what froze the run's scene set - the foreign signal seen first, in words (a raid, the
+            /// hideout, a trader dialog, the main menu left, a Single-mode load, one of the game's own scenes) - or null
+            /// while the run is alone in the menu. Sticky for the run.</summary>
+            internal string Frozen;
+
+            /// <summary>B6: each host load's scene handle, read from SceneManager while it loads (a loading scene is listed
+            /// with isLoaded false) - what lets the host claim exactly its own scene and never a same-named one a raid
+            /// loads. Absent while not seen.</summary>
+            internal readonly Dictionary<SceneEntry, int> InFlightHandles = new Dictionary<SceneEntry, int>();
+
+            /// <summary>The entries whose scene is known: claimed on appearance, or attributed by LoadAll.</summary>
+            internal readonly HashSet<SceneEntry> Claimed = new HashSet<SceneEntry>();
+
+            /// <summary>B17: the GameWorld singleton when the run began (a HideoutGameWorld can outlive a hideout visit, and
+            /// a bare run allows it); any other world set later is foreign.</summary>
+            internal GameWorld WorldAtStart;
+
+            /// <summary>Scenes the freeze dropped from <see cref="Appeared"/>: strays, which may be the game's, left
+            /// loaded.</summary>
+            internal readonly List<string> Disowned = new List<string>();
+
+            /// <summary>The frame <see cref="Foreign"/> last read the world on.</summary>
+            internal int ForeignFrame = -1;
+
+            /// <summary>Consecutive frames the current screen read as something other than the main menu (debounced: a
+            /// one-frame reading is not a signal), and the frame of the last such reading.</summary>
+            internal int ScreenAwayFrames;
+
+            internal int ScreenAwayFrame = -1;
+
+            /// <summary>The screen watch's two log lines, once each per run (<see cref="ScreenLeftIsForeign"/>).</summary>
+            internal bool ScreenAwayLogged, ScreenWouldFreezeLogged;
+
+            /// <summary>B6: the loads during which two scenes of their name have existed (a same-map raid): no handle is
+            /// ever recorded for them, and their scene is never claimed by name.</summary>
+            internal readonly HashSet<SceneEntry> Ambiguous = new HashSet<SceneEntry>();
+
+            /// <summary>True while the caller's work runs (<see cref="Drive"/>), for the stray watch.</summary>
+            internal bool InDrive;
+
+            internal bool StrayLogged;
+
             /// <summary>The caller's work while it runs, innermost on top - disposed top first on every exit.</summary>
             internal readonly Stack<IEnumerator> Work = new Stack<IEnumerator>();
 
@@ -720,7 +869,15 @@ namespace QuestTree.QuestGraph
         {
             try
             {
-                NoteAppeared(_current, scene);
+                var ctx = _current;
+                if (ctx == null) return;
+
+                // B6: the host loads Additive only - a Single load is the game leaving the menu (a raid's first scene).
+                var single = mode == LoadSceneMode.Single;
+                if (single) Freeze(ctx, FrozenSingle);
+                else Foreign(ctx, fresh: true);
+
+                NoteAppeared(ctx, scene, single);
             }
             catch (Exception)
             {
@@ -728,20 +885,371 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        private static void NoteAppeared(RunContext ctx, Scene scene)
+        /// <summary>Records <paramref name="scene"/> as the run's when <see cref="HostScenes.Owns"/> says so: a requested
+        /// scene always, a stray only before the freeze and never one of the game's own scenes (which freezes the set).
+        /// <paramref name="foreign"/>: known to be the game's (loaded Single).</summary>
+        private static void NoteAppeared(RunContext ctx, Scene scene, bool foreign = false)
         {
             if (ctx == null || !scene.IsValid()) return;
             if (ctx.BaselineHandles != null && ctx.BaselineHandles.Contains(scene.handle)) return;
             if (ctx.Appeared.Any(h => h.Scene.handle == scene.handle)) return;
-            ctx.Appeared.Add(new Hosted { Scene = scene, Name = scene.name });
+
+            // B7/B17: one of the game's own scenes (bunker_2, a trader dialog's Vendors_*) is never the run's, and it
+            // freezes the set before anything else is decided.
+            var gameScene = foreign || IsGameSceneName(scene.name);
+            if (gameScene && !foreign) Freeze(ctx, GameSceneKind(scene.name));
+
+            var frozen = ctx.Frozen != null;
+            var claimedFor = gameScene ? null : ClaimFor(ctx, scene, frozen);
+
+            // Review (known limit): a modded hideout scene with another name is a stray until its HideoutGameWorld exists.
+            // A stray during the capture, with no host load in flight, could be read as a foreign signal - but whether a
+            // hosted script loads scenes then on some map is not known, so it is logged, not acted on, until a play-test
+            // across the maps says (StrayInDriveIsForeign).
+            if (!gameScene && claimedFor == null && !frozen && ctx.InDrive && !ctx.Operations.Values.Any(o => o != null && !o.Completed))
+            {
+                if (StrayInDriveIsForeign)
+                {
+                    Freeze(ctx, $"a scene the host did not load appeared during the capture ('{scene.name}')");
+                    return;
+                }
+
+                if (!ctx.StrayLogged)
+                {
+                    ctx.StrayLogged = true;
+                    Log($"stray watch: '{scene.name}' appeared during the capture with no host load in flight - kept as the " +
+                        "run's (log-only; with StrayInDriveIsForeign on it would freeze the run).");
+                }
+            }
+
+            if (!HostScenes.Owns(false, gameScene, claimedFor != null, frozen)) return;
+
+            if (claimedFor != null) ctx.Claimed.Add(claimedFor);
+            ctx.Appeared.Add(new Hosted { Scene = scene, Name = scene.name, Requested = claimedFor != null, ClaimedFor = claimedFor });
+        }
+
+        /// <summary>The host load whose scene <paramref name="scene"/> is (<see cref="HostScenes.IsRequested"/>): by the
+        /// load's recorded handle, else by name while exactly one new scene has that name and nothing foreign was seen.
+        /// Null when none.</summary>
+        private static SceneEntry ClaimFor(RunContext ctx, Scene scene, bool frozen)
+        {
+            foreach (var pair in ctx.Operations)
+            {
+                var entry = pair.Key;
+                if (pair.Value == null || ctx.Claimed.Contains(entry)) continue;
+
+                ctx.InFlightHandles.TryGetValue(entry, out var known);
+                var nameMatches = string.Equals(entry.Name, scene.name, StringComparison.OrdinalIgnoreCase);
+                if (known == 0 && !nameMatches) continue;
+
+                // A load during which two scenes of its name existed is never claimed by name (2 = "not unique").
+                var sameName = known != 0 ? 0 : ctx.Ambiguous.Contains(entry) ? 2 : CountNewScenesNamed(ctx, scene.name);
+                if (HostScenes.IsRequested(nameMatches, scene.handle, known, sameName, frozen)) return entry;
+            }
+
+            return null;
+        }
+
+        /// <summary>How many scenes SceneManager lists (loading or loaded) that were not in the baseline and are named
+        /// <paramref name="name"/>.</summary>
+        private static int CountNewScenesNamed(RunContext ctx, string name)
+        {
+            var count = 0;
+            for (var i = 0; i < SceneManager.sceneCount; i++)
+            {
+                var s = SceneManager.GetSceneAt(i);
+                if (!s.IsValid() || (ctx.BaselineHandles != null && ctx.BaselineHandles.Contains(s.handle))) continue;
+                if (string.Equals(s.name, name, StringComparison.OrdinalIgnoreCase)) count++;
+            }
+
+            return count;
+        }
+
+        /// <summary>B6: records the handle of <paramref name="entry"/>'s scene once SceneManager lists it
+        /// (<see cref="HostScenes.LearnHandle"/>): every new scene of that name counts, loading or loaded, and a handle is
+        /// recorded only while exactly one exists; once two have existed during this load (a same-map raid), none ever is.
+        /// Cheap once known. Never throws.</summary>
+        private static void LearnHandle(RunContext ctx, SceneEntry entry, LoadSceneOperation op)
+        {
+            try
+            {
+                if (ctx == null || entry == null || op?.AsyncOperation == null || ctx.InFlightHandles.ContainsKey(entry)) return;
+
+                var handles = new List<int>();
+                for (var i = 0; i < SceneManager.sceneCount; i++)
+                {
+                    var s = SceneManager.GetSceneAt(i);
+                    if (!s.IsValid()) continue;
+                    if (ctx.BaselineHandles != null && ctx.BaselineHandles.Contains(s.handle)) continue;
+                    if (string.Equals(s.name, entry.Name, StringComparison.OrdinalIgnoreCase)) handles.Add(s.handle);
+                }
+
+                var sawTwo = ctx.Ambiguous.Contains(entry);
+                var found = HostScenes.LearnHandle(handles, ref sawTwo);
+                if (sawTwo) ctx.Ambiguous.Add(entry);
+                if (found != 0) ctx.InFlightHandles[entry] = found;
+            }
+            catch (Exception)
+            {
+                // No handle: the claim falls back to the name, before any foreign signal only.
+            }
         }
 
         /// <summary>The before/after diff: every loaded scene not there when the run began, in case one arrived without a
-        /// sceneLoaded call.</summary>
+        /// sceneLoaded call. B6/B7: never once the set is frozen - every scene that appears then is the game's.</summary>
         private static void DiffScenes(RunContext ctx)
         {
-            if (ctx == null) return;
+            if (ctx == null || !HostScenes.MayDiff(Foreign(ctx))) return;
             for (var i = 0; i < SceneManager.sceneCount; i++) NoteAppeared(ctx, SceneManager.GetSceneAt(i));
+        }
+
+        internal const string FrozenRaid = "a raid started loading";
+        internal const string FrozenHideout = "the hideout was opened";
+        internal const string FrozenTrader = "a trader dialog was opened";
+        internal const string FrozenSingle = "the game loaded a scene in Single mode (it is leaving the menu)";
+
+        /// <summary>Review rollback-style switch: true makes the current screen leaving the main menu (two frames running)
+        /// a foreign signal that freezes the run. False (today) only logs it ("screen watch:"), because whether the screen
+        /// reading stays MainMenu through a whole hosted run is not yet proven in game.</summary>
+        internal static readonly bool ScreenLeftIsForeign = false;
+
+        /// <summary>Review rollback-style switch: true makes a stray that appears during the capture, with no host load in
+        /// flight, a foreign signal (narrows the gap for a modded hideout scene not named bunker_2). False (today) only
+        /// logs it ("stray watch:"): whether hosted scripts load scenes during the capture on some map is not known.</summary>
+        internal static readonly bool StrayInDriveIsForeign = false;
+
+        /// <summary>The game's own scene names, read once per session from the game: EFT.Scenes' scene keys and constants
+        /// (bunker_2 among them) and the trader dialog's scenes (TarkovApplication.NarrateController.Scenes,
+        /// VendorScenePresets). A deny-list of the GAME's scenes, never a key on a map name. Null when any source could not
+        /// be read: then <see cref="HostScenes.IsGameScene"/> counts every scene as the game's (fail-safe) and
+        /// <see cref="Body"/> refuses the run before anything loads.</summary>
+        private static HashSet<string> _gameSceneNames;
+        private static bool _gameSceneNamesRead;
+
+        private static ICollection<string> GameSceneNames()
+        {
+            if (_gameSceneNamesRead) return _gameSceneNames;
+            _gameSceneNamesRead = true;
+
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { EFT.Scenes.HideoutSceneName };
+            var failed = new List<string>();
+            var counts = new List<string>();
+
+            // Each game-member read is its own NoInlining method, called inside a try here: a member a game update renamed
+            // fails when THAT method is JIT-compiled, which this try catches.
+            foreach (var source in new (string Name, Action<HashSet<string>> Read)[]
+                     {
+                         ("EFT.Scenes", ReadSceneConstants),
+                         ("NarrateController.Scenes", ReadVendorSceneNames),
+                     })
+            {
+                try
+                {
+                    var before = names.Count;
+                    source.Read(names);
+                    counts.Add($"{source.Name} {names.Count - before}");
+                }
+                catch (Exception ex)
+                {
+                    failed.Add($"{source.Name} ({ex.GetType().Name}: {ex.Message})");
+                }
+            }
+
+            _gameSceneNames = failed.Count == 0 ? names : null;
+            Log($"the game's own scene names: {names.Count} ({string.Join(", ", counts)}, plus bunker_2)" +
+                (failed.Count == 0
+                    ? "."
+                    : $"; COULD NOT READ {string.Join("; ", failed)} - every scene counts as the game's and runs are refused."));
+            return _gameSceneNames;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ReadSceneConstants(HashSet<string> names)
+        {
+            foreach (var field in typeof(EFT.Scenes).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static))
+            {
+                var value = field.GetValue(null);
+                if (value is string text && !string.IsNullOrEmpty(text)) names.Add(text);
+                else if (value is ResourceKey key)
+                {
+                    // Presets (HideoutScenesPreset) have no rcid and are no scene: only keyed scenes count.
+                    var name = Path.GetFileNameWithoutExtension(key.rcid ?? "");
+                    if (!string.IsNullOrEmpty(name)) names.Add(name);
+                }
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ReadVendorSceneNames(HashSet<string> names)
+        {
+            var vendors = TarkovApplication.NarrateController.Scenes;
+            if (vendors == null) throw new InvalidOperationException("NarrateController.Scenes is null");
+            foreach (var info in vendors.narrateScenes.Values) if (!string.IsNullOrEmpty(info?.sceneName)) names.Add(info.sceneName);
+            foreach (var common in vendors.commonScenes) if (!string.IsNullOrEmpty(common?.sceneName)) names.Add(common.sceneName);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool IsVendorPresetName(string name)
+        {
+            var vendors = TarkovApplication.NarrateController.Scenes;
+            return vendors != null && vendors.narrateScenes.Values.Any(v => string.Equals(v?.sceneName, name, StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>Whether <paramref name="name"/> is one of the game's scenes. Never throws: any failure counts as the
+        /// game's, so it never widens what the host owns.</summary>
+        private static bool IsGameSceneName(string name)
+        {
+            try
+            {
+                return HostScenes.IsGameScene(name, GameSceneNames());
+            }
+            catch (Exception)
+            {
+                return !string.IsNullOrEmpty(name);
+            }
+        }
+
+        /// <summary>What a game scene's appearance says happened, for the freeze.</summary>
+        private static string GameSceneKind(string name)
+        {
+            if (string.Equals(name, EFT.Scenes.HideoutSceneName, StringComparison.OrdinalIgnoreCase)) return FrozenHideout;
+            if (HostScenes.GameScenePrefixes.Any(p => name.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                return $"{FrozenTrader} (the game loaded '{name}')";
+
+            try
+            {
+                if (IsVendorPresetName(name)) return $"{FrozenTrader} (the game loaded '{name}')";
+            }
+            catch (Exception)
+            {
+                // Said as a game scene below.
+            }
+
+            return $"the game loaded its own scene '{name}'";
+        }
+
+        /// <summary>What a GameWorld set during the run is: the hideout's, a trader dialog's (NarrateGameWorld), or a
+        /// raid's.</summary>
+        private static string WorldKind(GameWorld world)
+        {
+            if (world is HideoutGameWorld) return FrozenHideout;
+            var type = world.GetType().Name;
+            return type.IndexOf("Narrate", StringComparison.Ordinal) >= 0 ? $"{FrozenTrader} ({type})" : FrozenRaid;
+        }
+
+        /// <summary>B6/B7/B17: whether a foreign signal has been seen during <paramref name="ctx"/>'s run - a raid watch,
+        /// a GameWorld set that was not the singleton when the run began (a raid's, the hideout's, a trader dialog's), a
+        /// raid GameWorld, the hideout scene loaded, or the current screen no longer the main menu for two frames running.
+        /// Freezes the run's scene set the first time (<see cref="Freeze"/>); sticky after that. Reads at most once a frame
+        /// unless <paramref name="fresh"/>. Never throws.</summary>
+        private static bool Foreign(RunContext ctx, bool fresh = false)
+        {
+            if (ctx == null) return false;
+            if (ctx.Frozen != null) return true;
+
+            var frame = Time.frameCount;
+            if (!fresh && ctx.ForeignFrame == frame) return false;
+            ctx.ForeignFrame = frame;
+
+            string kind = null;
+            try
+            {
+                var world = Singleton<GameWorld>.Instance;
+
+                if (RaidWatch.Live) kind = FrozenRaid;
+                else if (world != null && !ReferenceEquals(world, ctx.WorldAtStart)) kind = WorldKind(world);
+                else if (RaidStarting()) kind = FrozenRaid;
+                else if (IsLoaded(SceneManager.GetSceneByName(EFT.Scenes.HideoutSceneName))) kind = FrozenHideout;
+                else
+                {
+                    // The player walked away from the main menu. Only the player changes EFT's screen: the tracker panel
+                    // is a canvas of its own, not an EFT screen. "unknown" (no screen controller) is no signal, and one
+                    // frame away is not either.
+                    var screen = CurrentScreen();
+                    if (screen == EEftScreenType.MainMenu.ToString() || screen.StartsWith("unknown", StringComparison.Ordinal))
+                    {
+                        ctx.ScreenAwayFrames = 0;
+                    }
+                    else if (ctx.ScreenAwayFrame != frame)
+                    {
+                        ctx.ScreenAwayFrame = frame;
+                        var away = ++ctx.ScreenAwayFrames >= 2;
+
+                        // Log-only until ScreenLeftIsForeign is on: what was seen, and what the test would have done.
+                        if (!ctx.ScreenAwayLogged)
+                        {
+                            ctx.ScreenAwayLogged = true;
+                            Log($"screen watch: the screen read '{screen}', not the main menu, at frame {frame} during the run " +
+                                $"({(ScreenLeftIsForeign ? "the screen test is on" : "log-only")}).");
+                        }
+
+                        if (away && !ctx.ScreenWouldFreezeLogged)
+                        {
+                            ctx.ScreenWouldFreezeLogged = true;
+                            Log($"screen watch: '{screen}' for 2 frames running - the screen test " +
+                                (ScreenLeftIsForeign ? "freezes the run now." : "would have frozen the run here; it is log-only, nothing was done."));
+                        }
+
+                        if (away && ScreenLeftIsForeign) kind = $"the main menu was left (screen {screen})";
+                    }
+                }
+            }
+            catch (Exception)
+            {
+                // A world that cannot be read is treated as a raid: unloading the game's scenes is the outcome to avoid.
+                kind = FrozenRaid;
+            }
+
+            if (kind != null) Freeze(ctx, kind);
+            return ctx.Frozen != null;
+        }
+
+        /// <summary>The abort for a frozen run: a raid keeps the words it always had.</summary>
+        private static string ForeignAbort(RunContext ctx, string where) =>
+            ctx.Frozen == FrozenRaid ? $"a GameWorld appeared {where}" : $"{ctx.Frozen} {where}";
+
+        /// <summary>Freezes the run's scene set (<see cref="HostScenes.FreezeSet"/>): every stray is dropped - left
+        /// loaded, said in the trouble - and only requested scenes stay; from here on nothing new is noted but the scene
+        /// of a host load still in flight, by its handle, and no diff runs. Idempotent. Never throws.</summary>
+        private static void Freeze(RunContext ctx, string kind)
+        {
+            if (ctx == null || ctx.Frozen != null) return;
+            ctx.Frozen = kind;
+
+            try
+            {
+                var dropped = new List<Hosted>();
+                HostScenes.FreezeSet(ctx.Appeared, h => h.Requested || h.Entry != null, h => IsGameSceneName(h.Name), dropped);
+                ctx.Disowned.AddRange(dropped.Select(h => h.Name));
+
+                Log($"{ctx.LocationId}: {kind} during the run - only the run's own {ctx.Appeared.Count} requested scene(s) will " +
+                    "be unloaded; no scene that appears from now on is the run's, and no asset sweep or restore runs after this" +
+                    (ctx.Disowned.Count > 0
+                        ? $"; left loaded (strays, possibly the game's): {string.Join(", ", ctx.Disowned.Select(n => $"'{n}'"))}"
+                        : "") + ".");
+            }
+            catch (Exception)
+            {
+                // The freeze itself is set; a failed line must not break the game's sceneLoaded.
+            }
+        }
+
+        /// <summary>B7 (review, low): the parts of the restore that only DROP destroyed entries from the game's static
+        /// lists - safe over a raid's or the hideout's own state, and otherwise the next raid inherits dead entries. Writes
+        /// no menu state. Never throws.</summary>
+        private static void DropDeadEntries()
+        {
+            try
+            {
+                var doors = LocationScene.DoorsCollisionColliders.RemoveAll(c => c == null);
+                var mines = MineDirectional.Mines.RemoveAll(m => m == null);
+                Log($"frozen run: removed {doors} destroyed door collider(s) from LocationScene.DoorsCollisionColliders and " +
+                    $"{mines} destroyed entries from MineDirectional.Mines; nothing else was put back.");
+            }
+            catch (Exception ex)
+            {
+                Log($"frozen run: the destroyed entries could not be dropped ({ex.GetType().Name}: {ex.Message}).");
+            }
         }
 
         /// <summary>Disposes the caller's work, innermost first, so its own finally blocks run. Never throws.</summary>
@@ -902,6 +1410,7 @@ namespace QuestTree.QuestGraph
             // The scenes already loaded are the menu's; anything that appears from here on is the run's to unload.
             ctx.BaselineHandles = new HashSet<int>();
             for (var i = 0; i < SceneManager.sceneCount; i++) ctx.BaselineHandles.Add(SceneManager.GetSceneAt(i).handle);
+            try { ctx.WorldAtStart = Singleton<GameWorld>.Instance; } catch (Exception) { }
             SceneManager.sceneLoaded -= OnSceneLoaded;
             SceneManager.sceneLoaded += OnSceneLoaded;
 
@@ -914,6 +1423,8 @@ namespace QuestTree.QuestGraph
                 if (!InMenu(out var why)) ctx.Refusal = $"{why} - it runs in the main menu only";
                 else if (RestartAdvised != null) ctx.Refusal = $"an earlier run could not restore the menu ({RestartAdvised}) - RESTART THE GAME first";
                 else if (whileLoaded != null && WorldSet(out var world)) ctx.Refusal = WorkRefusal(world);
+                else if (GameSceneNames() == null)
+                    ctx.Refusal = "the game's own scene names could not be read (logged above), so the host could not tell its scenes from the game's";
 
                 if (ctx.Refusal == null)
                 {
@@ -943,7 +1454,9 @@ namespace QuestTree.QuestGraph
                 {
                     SetPhase("capturing");
                     var work = Drive(whileLoaded, ctx);
+                    ctx.InDrive = true;
                     while (work.MoveNext()) yield return work.Current;
+                    ctx.InDrive = false;
                 }
 
                 // A run refused at the gate took no baseline and loaded nothing: no sweep, restore or comparison (a raid being
@@ -1054,6 +1567,14 @@ namespace QuestTree.QuestGraph
 
                 SetPhase($"loading {label} '{entry.Name}'");
 
+                // B17: the hideout or a raid, before the menu test (which says only "no longer in the menu"), so the set
+                // freezes and the unload leaves the game's scenes alone.
+                if (Foreign(ctx, fresh: true))
+                {
+                    ctx.Abort = $"{ctx.Frozen} before {label} '{entry.Name}'";
+                    break;
+                }
+
                 if (!InMenu(out var why))
                 {
                     ctx.Abort = $"no longer in the menu before {label} '{entry.Name}' ({why})";
@@ -1087,10 +1608,15 @@ namespace QuestTree.QuestGraph
                 while (!op.Completed)
                 {
                     if ((expired = watch.Expired(op)) != null) break;
-                    if (RaidStarting()) { ctx.Abort = $"a GameWorld appeared while {label} '{entry.Name}' was loading"; break; }
+                    LearnHandle(ctx, entry, op);
+                    if (Foreign(ctx)) { ctx.Abort = ForeignAbort(ctx, $"while {label} '{entry.Name}' was loading"); break; }
                     if (_stopAsked != null) { ctx.Abort = $"{_stopAsked} while {label} '{entry.Name}' was loading"; break; }
                     yield return Tick();
                 }
+
+                // B6: a world that appeared on the frame the load ended - nothing more is attributed or diffed.
+                if (ctx.Abort == null && expired == null && Foreign(ctx, fresh: true))
+                    ctx.Abort = ForeignAbort(ctx, $"as {label} '{entry.Name}' finished loading");
 
                 if (ctx.Abort != null) break;
 
@@ -1109,6 +1635,13 @@ namespace QuestTree.QuestGraph
                 var loadMs = watch.ElapsedMs;
                 DiffScenes(ctx);
 
+                // B7: one of the game's own scenes in the diff froze the set - nothing is attributed after that.
+                if (ctx.Frozen != null)
+                {
+                    ctx.Abort = ForeignAbort(ctx, $"as {label} '{entry.Name}' finished loading");
+                    break;
+                }
+
                 // Which of the scenes that appeared during this load is the one asked for: by name, else the first.
                 var arrived = ctx.Appeared.Skip(appearedBefore).Where(h => h.Entry == null && IsLoaded(h.Scene)).ToList();
                 var hosted = arrived.FirstOrDefault(h => string.Equals(h.Name, entry.Name, StringComparison.OrdinalIgnoreCase)) ??
@@ -1125,6 +1658,7 @@ namespace QuestTree.QuestGraph
 
                 hosted.Entry = entry;
                 entry.Scene = hosted.Scene;
+                ctx.Claimed.Add(entry);
                 var scene = hosted.Scene;
 
                 // A Streamer loads and unloads further scenes around the camera from its own Update - scenes this host would
@@ -1182,9 +1716,10 @@ namespace QuestTree.QuestGraph
             {
                 while (ctx.Work.Count > 0)
                 {
-                    if (RaidStarting())
+                    // B17: any foreign world - a raid, the hideout's GameWorld or its scene - not only a raid.
+                    if (Foreign(ctx))
                     {
-                        ctx.Abort = "a GameWorld appeared while the map was hosted";
+                        ctx.Abort = ForeignAbort(ctx, "while the map was hosted");
                         yield break;
                     }
 
@@ -1267,12 +1802,18 @@ namespace QuestTree.QuestGraph
                 var watch = new LoadWatch();
                 string expired = null;
                 Log($"waiting for '{pair.Key.Name}''s load to end, so it can be unloaded.");
-                while (!load.Completed && (expired = watch.Expired(load)) == null) yield return Tick();
+                while (!load.Completed && (expired = watch.Expired(load)) == null)
+                {
+                    // B6: its scene's handle, so a scene that arrives after a freeze is claimed only if it is this one.
+                    LearnHandle(ctx, pair.Key, load);
+                    yield return Tick();
+                }
 
                 if (!load.Completed)
                     ctx.Trouble.Add($"'{pair.Key.Name}''s load never finished ({expired}), so its scene may be left loaded");
             }
 
+            // B6/B7: a no-op once frozen (DiffScenes) - the scenes loaded now are the game's.
             DiffScenes(ctx);
 
             var unasked = ctx.Appeared.Where(h => h.Entry == null).Select(h => $"'{h.Name}'").ToList();
@@ -1293,9 +1834,11 @@ namespace QuestTree.QuestGraph
                 var pending = ctx.Appeared.Count(h => !failed.Contains(h.Scene.handle));
                 if (pending == 0) break;
 
-                if (pass > MaxUnloadPasses)
+                // B6/B7: once frozen only pass 1 runs, over the run's own set - a later pass would take the game's.
+                var frozen = Foreign(ctx, fresh: true);
+                if (!HostScenes.MayRunPass(pass, frozen, MaxUnloadPasses))
                 {
-                    ctx.Trouble.Add($"scenes kept appearing through {MaxUnloadPasses} unload passes");
+                    if (!frozen) ctx.Trouble.Add($"scenes kept appearing through {MaxUnloadPasses} unload passes");
                     break;
                 }
 
@@ -1305,6 +1848,9 @@ namespace QuestTree.QuestGraph
 
                 for (var i = ctx.Appeared.Count - 1; i >= 0; i--)
                 {
+                    // A freeze during this pass (the sceneLoaded handler) may have dropped scenes from the list.
+                    if (i >= ctx.Appeared.Count) continue;
+
                     var hosted = ctx.Appeared[i];
                     var scene = hosted.Scene;
 
@@ -1347,22 +1893,12 @@ namespace QuestTree.QuestGraph
             yield return Tick();
             Log($"after the unloads: {Memory()}; {VramProbe.Text()}");
 
-            if (RaidStarting())
+            // A raid is loading (its first scene loads Single and takes ours with it) or the hideout is: a sweep or a
+            // restore now would land on its own state (its LevelSettings writes the same RenderSettings).
+            var swept = false;
+            if (HostScenes.MaySweep(Foreign(ctx, fresh: true)))
             {
-                // A raid is loading: its first scene loads Single and takes ours with it, and a sweep or a restore now would
-                // land on the raid's own state (its LevelSettings writes the same RenderSettings).
-                ctx.Trouble.Add("a raid started loading during the run - the asset sweep and the restore were skipped");
-
-                // ...but not the texture mip limit, a user setting the raid does not re-apply (see MenuState.MipLimit)
-                if (ctx.Before != null)
-                {
-                    var put = new List<string>();
-                    Try("restoring the texture mip limit", () => ctx.Before.RestoreMipLimit(put));
-                    if (put.Count > 0) Log($"restore: put back {put[0]} (the rest skipped for the raid).");
-                }
-            }
-            else
-            {
+                swept = true;
                 var clock = Stopwatch.StartNew();
                 AsyncOperation sweep = null;
                 SetPhase("freeing the map's assets");
@@ -1378,7 +1914,47 @@ namespace QuestTree.QuestGraph
                 Log($"after UnloadUnusedAssets ({clock.ElapsedMilliseconds} ms) and a collection: {Memory()}; {VramProbe.Text()}");
             }
 
-            if (ctx.Before != null && !RaidStarting())
+            // B18: ONE reading after the sweep decides both the abort branch and the restore, so a raid that started during
+            // the sweep's wait lands in the abort branch and never between the two.
+            var aborted = Foreign(ctx, fresh: true);
+
+            if (aborted)
+            {
+                ctx.Trouble.Add(
+                    ctx.Frozen == FrozenRaid && !swept ? "a raid started loading during the run - the asset sweep and the restore were skipped" :
+                    swept ? $"{ctx.Frozen} during the asset sweep - the restore was skipped" :
+                    $"{ctx.Frozen} during the run - only the run's own scenes were unloaded; the asset sweep and the restore were skipped");
+
+                // ...but not the texture mip limit, a user setting the raid does not re-apply (see MenuState.MipLimit)
+                if (ctx.Before != null)
+                {
+                    var put = new List<string>();
+                    Try("restoring the texture mip limit", () => ctx.Before.RestoreMipLimit(put));
+                    if (put.Count > 0)
+                        Log(ctx.Frozen == FrozenRaid
+                            ? $"restore: put back {put[0]} (the rest skipped for the raid)."
+                            : $"restore: put back {put[0]} (the rest skipped: {ctx.Frozen}).");
+                }
+
+                if (ctx.Disowned.Count > 0)
+                    ctx.Trouble.Add($"scene(s) {string.Join(", ", ctx.Disowned)} appeared during the run but were not requested " +
+                                    "by the host, so they were left loaded at the freeze");
+
+                // B6: a host load whose scene could not be told from the game's (no handle seen, and the name was not
+                // enough after the freeze) - never guessed, so it may be left loaded.
+                var unclaimed = ctx.Operations
+                    .Where(p => p.Value != null && p.Value.Completed && !p.Value.Failed && !ctx.Claimed.Contains(p.Key))
+                    .Select(p => $"'{p.Key.Name}'")
+                    .ToList();
+                if (unclaimed.Count > 0)
+                    ctx.Trouble.Add($"the scene(s) of the host's load(s) {string.Join(", ", unclaimed)} could not be told from " +
+                                    "the game's own after the freeze and may be left loaded");
+
+                // Dropping destroyed entries is safe over the game's own state; nothing that writes menu state runs.
+                DropDeadEntries();
+            }
+
+            if (HostScenes.MayRestore(aborted, ctx.Before != null))
             {
                 SetPhase("restoring the menu");
                 Try("the DontDestroyOnLoad leak check", () => SweepDdol(ctx.Trouble));
@@ -1432,6 +2008,8 @@ namespace QuestTree.QuestGraph
             try
             {
                 SceneManager.sceneLoaded -= OnSceneLoaded;
+
+                // B6/B7: DiffScenes is a no-op once a raid or the hideout froze the set - its scenes are not ours.
                 DiffScenes(ctx);
             }
             catch (Exception ex)
