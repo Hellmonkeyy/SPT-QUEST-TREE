@@ -95,6 +95,11 @@ namespace QuestTreeServer
         /// <summary>The free disk SizeCeilings measured, for the store ceiling's clamp once the sets are read; 0 unknown.</summary>
         private long _freeAtBoot;
 
+        /// <summary>2026-10-05 (B1): the maps folder's mount root, chosen once (<see cref="MapsMount"/>) so an upload never
+        /// rescans the host's mounts under the lock; null when it could not be found. Valid once <see cref="_mountChosen"/>.</summary>
+        private string? _mount;
+        private bool _mountChosen;
+
         /// <summary>The least the store ceiling is. Since 2026-09-30 eight maps at <see cref="MinMeshCeiling"/> plus their
         /// pictures and pages at their caps (2,448 MiB), so one map's floor holds a mesh at the client's stored-mesh cap
         /// on any host; before, the pre-WP7 fixed total. Rollback (with <see cref="StoreTop"/>): 1.5 GiB and 1.5 GiB.</summary>
@@ -2433,11 +2438,11 @@ namespace QuestTreeServer
             _ceilingsSized = true;
 
             long free;
+            var mount = CachedMount();
 
             try
             {
-                var root = System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(Folder));
-                free = string.IsNullOrEmpty(root) ? 0L : new System.IO.DriveInfo(root).AvailableFreeSpace;
+                free = string.IsNullOrEmpty(mount) ? 0L : new System.IO.DriveInfo(mount).AvailableFreeSpace;
             }
             catch (Exception)
             {
@@ -2445,6 +2450,17 @@ namespace QuestTreeServer
             }
 
             _freeAtBoot = free;
+
+            // 2026-10-05 (B1): which filesystem the free figure is from, so a host whose maps sit on another volume
+            // than "/" can see it is measured there.
+            var mountLine = string.IsNullOrEmpty(mount)
+                ? "Quest Tracker: maps: the maps folder's disk could not be found - its free space is unknown."
+                : free > 0
+                    ? $"Quest Tracker: maps: the maps folder is on the disk mounted at {mount}."
+                    : $"Quest Tracker: maps: the maps folder is on the disk mounted at {mount}, whose free space could not be read.";
+
+            if (AcceptsUploads) _logger.Info(mountLine);
+            else _logger.Detail(mountLine);
 
             var ceilings = CeilingsFor(free);
             _storeCeiling = ceilings.Store;
@@ -2497,8 +2513,10 @@ namespace QuestTreeServer
         }
 
         /// <summary>2026-09-30: why a staging write of <paramref name="incoming"/> more bytes is refused for the disk itself -
-        /// the volume's free space less <see cref="DiskReserveBytes"/> is under it - or null. Measured at each call; free disk
-        /// that cannot be measured refuses nothing (the ceilings still bound it).</summary>
+        /// the volume's free space less <see cref="DiskReserveBytes"/> is under it - or null. The free space of the mount
+        /// chosen once (<see cref="CachedMount"/>) is measured at each call, never a rescan of the mounts; free disk that
+        /// cannot be measured, or reads 0 or less (some FUSE and cloud mounts report 0 while taking writes; the boot line
+        /// calls it unread), refuses nothing (the ceilings still bound it).</summary>
         private string? DiskShortfall(long incoming)
         {
             if (incoming <= 0) return null;
@@ -2507,7 +2525,7 @@ namespace QuestTreeServer
 
             try
             {
-                var root = System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(Folder));
+                var root = CachedMount();
 
                 if (string.IsNullOrEmpty(root)) return null;
 
@@ -2518,11 +2536,121 @@ namespace QuestTreeServer
                 return null;
             }
 
+            if (free <= 0) return null;
+
             return free - DiskReserveBytes >= incoming
                 ? null
                 : $"this host's disk has {Mb(free)} MB free, and this capture's {Mb(incoming)} MB would leave less than the " +
                   $"{Mb(DiskReserveBytes)} MB kept free for SPT's own saves - refused; free some disk on the host";
         }
+
+        /// <summary>2026-10-05 (B1): <see cref="MapsMount"/> worked out once per process (at boot, from <see cref="SizeCeilings"/>)
+        /// and kept, failure included, so the per-upload <see cref="DiskShortfall"/> never enumerates mounts again - a stat on
+        /// a hung network mount would stall an upload holding the lock. Never throws. Caller holds the lock.</summary>
+        private string? CachedMount()
+        {
+            if (_mountChosen) return _mount;
+
+            _mountChosen = true;
+
+            try
+            {
+                _mount = MapsMount();
+            }
+            catch (Exception)
+            {
+                _mount = null;
+            }
+
+            return _mount;
+        }
+
+        /// <summary>2026-10-05 (B1): the root of the filesystem that holds <see cref="Folder"/>, for a DriveInfo to measure, or
+        /// null. On Windows the path root, as before (a drive; a UNC root, which DriveInfo refuses, so the callers' catch
+        /// treats the disk as unknown exactly as it always did). Elsewhere every path root is "/", so the mount is chosen
+        /// from <see cref="System.IO.DriveInfo.GetDrives"/> by <see cref="ChooseMount"/>, from the folder's nearest existing
+        /// ancestor; a mount that cannot be read is skipped, and no usable mount falls back to the path root. May throw
+        /// only where the old path-root code did (GetFullPath); <see cref="CachedMount"/> catches.</summary>
+        private string? MapsMount()
+        {
+            var full = System.IO.Path.GetFullPath(Folder);
+            var pathRoot = System.IO.Path.GetPathRoot(full);
+
+            if (OperatingSystem.IsWindows()) return pathRoot;
+
+            var existing = full;
+
+            try
+            {
+                while (!System.IO.Directory.Exists(existing))
+                {
+                    var parent = System.IO.Path.GetDirectoryName(existing);
+
+                    if (string.IsNullOrEmpty(parent)) break;
+
+                    existing = parent;
+                }
+            }
+            catch (Exception)
+            {
+                existing = full;
+            }
+
+            var roots = new List<string>();
+            System.IO.DriveInfo[] drives;
+
+            try
+            {
+                drives = System.IO.DriveInfo.GetDrives();
+            }
+            catch (Exception)
+            {
+                drives = Array.Empty<System.IO.DriveInfo>();
+            }
+
+            foreach (var drive in drives)
+            {
+                try
+                {
+                    if (drive.IsReady) roots.Add(drive.RootDirectory.FullName);
+                }
+                catch (Exception)
+                {
+                    // a mount this process may not stat (permission, a dead network share): not a candidate
+                }
+            }
+
+            return ChooseMount(existing, roots, false, pathRoot);
+        }
+
+        // BEGIN TESTABLE DiskMount
+        /// <summary>The mount root that holds <paramref name="fullPath"/>: on Windows <paramref name="pathRoot"/> unchanged;
+        /// elsewhere the root in <paramref name="roots"/> that is the LONGEST prefix of the path, compared ordinally with a
+        /// trailing '/' on both so "/mnt/data2/x" is not under "/mnt/data"; no match -> <paramref name="pathRoot"/>. Pure.</summary>
+        internal static string? ChooseMount(string fullPath, IEnumerable<string> roots, bool windows, string? pathRoot)
+        {
+            if (windows || string.IsNullOrEmpty(fullPath)) return pathRoot;
+
+            var path = fullPath.EndsWith('/') ? fullPath : fullPath + "/";
+            string? best = null;
+            var bestLength = -1;
+
+            foreach (var root in roots)
+            {
+                if (string.IsNullOrEmpty(root)) continue;
+
+                var prefix = root.EndsWith('/') ? root : root + "/";
+
+                if (prefix.Length > bestLength && path.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    best = root;
+                    bestLength = prefix.Length;
+                }
+            }
+
+            return best ?? pathRoot;
+        }
+        // END TESTABLE DiskMount
 
         /// <summary>Rebuilds the stamp cache from the folders. Caller holds the lock.</summary>
         private void Load()

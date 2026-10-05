@@ -1,6 +1,6 @@
 """Layer C: unit tests on the SHIPPING code's pure logic.
 
-Generalises tools/check-relief-simplify.py. Every region in Source/Tarkov-QuestTree between
+Generalises tools/check-relief-simplify.py. Every region in Source/Tarkov-QuestTree and Source/Tarkov-QuestTree-Server between
 
     // BEGIN TESTABLE <Suite>[.<Part>]
     ...
@@ -40,7 +40,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
-SOURCE_DIR = os.path.join(ROOT, 'Source', 'Tarkov-QuestTree')
+SOURCE_DIRS = [os.path.join(ROOT, 'Source', d) for d in ('Tarkov-QuestTree', 'Tarkov-QuestTree-Server')]  # client, server
 RELIEF = os.path.join(ROOT, 'tools', 'check-relief-simplify.py')
 LAYER = 'C'
 
@@ -69,10 +69,13 @@ def _opt(ctx, name, default):
 # --- extraction -----------------------------------------------------------------------------------------------------
 
 def regions():
-    """{full name: [(file, first line, text)]} for every TESTABLE region under Source/Tarkov-QuestTree."""
+    """{full name: [(file, first line, text)]} for every TESTABLE region under Source/Tarkov-QuestTree and
+    Source/Tarkov-QuestTree-Server; a name used in both projects is an error, not a merge."""
     found = collections.OrderedDict()
-    for path in sorted(glob.glob(os.path.join(SOURCE_DIR, '**', '*.cs'), recursive=True)):
+    tree_of = {}
+    for path in [p for d in SOURCE_DIRS for p in sorted(glob.glob(os.path.join(d, '**', '*.cs'), recursive=True))]:
         rel = os.path.relpath(path, ROOT)
+        tree = rel.split(os.sep)[1]
         if os.sep + 'obj' + os.sep in path or os.sep + 'bin' + os.sep in path:
             continue
         with open(path, encoding='utf-8-sig') as f:
@@ -87,6 +90,9 @@ def regions():
             elif e:
                 if e.group(1) != open_name:
                     raise Broken('%s:%d: END TESTABLE %s does not close %s' % (rel, number, e.group(1), open_name))
+                if tree_of.setdefault(open_name, tree) != tree:
+                    raise Broken('%s:%d: region %s is also in %s - a name must be in one project only'
+                                 % (rel, start, open_name, tree_of[open_name]))
                 found.setdefault(open_name, []).append((rel, start, '\n'.join(body)))
                 open_name = None
             elif open_name:
