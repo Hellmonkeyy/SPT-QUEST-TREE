@@ -2633,7 +2633,9 @@ namespace QuestTree.UI
                 return;
             }
 
-            _levels = DrawnLevels();
+            _builds++;
+            _levels = BuiltLevels();
+            _activeLevel = ActiveLevelOf(BandLevels(), _selectedLevel);
 
             var shader = ResolveShader(out var shaderName);
 
@@ -2701,7 +2703,8 @@ namespace QuestTree.UI
 
             for (var i = 0; i < _levels.Count; i++) RegisterFloor(_levels[i], shader, toPrepare);
 
-            _groundBand = _file.Band(_levels[_levels.Count - 1]);
+            // the active band: the highest DRAWN one, as before the window was built
+            _groundBand = _file.Band(_activeLevel);
             _groundFallbackY = FallbackGroundY();
             var cut = CutHeight();
             if (!SameCut(cut, _cutY)) _timeRender = true;
@@ -2729,8 +2732,10 @@ namespace QuestTree.UI
             // PumpTiles). Taken before the prep snapshot, which reads the tile index.
             if (AtlasActive) AcquireTiles();
 
+            // Only the floors SHOWING, lowest to highest, so the active one is asked last. The hidden floors of the
+            // window are asked by PrimeHidden after the first frame, so their main-thread decode never delays it.
             foreach (var floor in _floors)
-                if (!_flatColours) floor.Layer?.TryGetSprite(out _);
+                if (!_flatColours && IsShown(floor.Level)) floor.Layer?.TryGetSprite(out _);
 
             _preparing = toPrepare;
 
@@ -2847,9 +2852,14 @@ namespace QuestTree.UI
             // mesh is uploaded, so a file that would show nothing costs nothing to refuse.
             var drawable = 0L;
             var pictured = 0;
+            var shown = 0;
 
             foreach (var floor in _floors)
             {
+                // the floors that DRAW: a view whose shown floors show nothing is refused as before the window
+                if (!IsShown(floor.Level)) continue;
+                shown++;
+
                 // Only a floor that CAN be drawn: Draw skips any floor whose material has no picture on
                 // it (a textured shader samples white without one), so a band with no picture layer is
                 // never drawn at all, and its triangles counting here would pass this check for a view
@@ -2864,7 +2874,7 @@ namespace QuestTree.UI
             if (pictured == 0)
             {
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: the 3D relief of '{_mapKey}' has {_levels.Count} band(s) but no picture for " +
+                    $"QuestTree: the 3D relief of '{_mapKey}' has {shown} band(s) but no picture for " +
                     $"any of them - drawing the flat picture instead.");
                 Refuse("no band of it has a picture");
                 return;
@@ -2873,7 +2883,7 @@ namespace QuestTree.UI
             if (drawable == 0)
             {
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: the 3D relief of '{_mapKey}' has {_levels.Count} band(s) but not one " +
+                    $"QuestTree: the 3D relief of '{_mapKey}' has {shown} band(s) but not one " +
                     $"triangle in them - drawing the flat picture instead.");
                 Refuse("there is no ground in the bands it has");
                 return;
@@ -2997,6 +3007,9 @@ namespace QuestTree.UI
         {
             foreach (var floor in _floors)
             {
+                // a hidden floor's walls start late, from Prime, once its picture is here
+                if (!IsShown(floor.Level)) continue;
+
                 var built = floor.Meshes;
                 if (built == null || !built.WallsPending || built.WallsRunning) continue;
 
@@ -3273,6 +3286,7 @@ namespace QuestTree.UI
 
             // The slice stops, now that this build is known good (slice slider S1).
             AnnounceSlices();
+            AnnounceActiveLevel();
 
             // A floor switch whose entries were all cached: nothing was uploaded, and the cut is one matrix.
             if (_reusedFloors)
@@ -3423,7 +3437,8 @@ namespace QuestTree.UI
         /// <summary>The levels this build is preparing, and the entries they go into.</summary>
         private List<(int Level, Built Into)> _preparing;
 
-        /// <summary>The drawn band levels of this build, lowest first.</summary>
+        /// <summary>The BUILT band levels of this build, lowest first: the band window (<see cref="BuiltLevels"/>); the
+        /// drawn ones are those <see cref="IsShown"/>.</summary>
         private List<int> _levels = new List<int>();
 
         /// <summary>Units of main-thread work - a mesh uploaded, a wall build landed - run by <see cref="Pump"/>.</summary>
@@ -3687,6 +3702,8 @@ namespace QuestTree.UI
 
             foreach (var level in _levels)
             {
+                if (!IsShown(level)) continue;
+
                 var band = _file.Band(level);
                 var heights = band?.Heights;
                 if (heights == null) continue;
@@ -3754,52 +3771,70 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// The band levels to draw, lowest first: the floor peel. Every band at or below the chosen
-        /// floor, so looking at the second storey of Interchange shows it standing on the first and the
-        /// ground - that is what makes it read as a building rather than a floating slab.
+        /// The band levels to BUILD, lowest first: the band window (<see cref="BandWindow"/>). The floor peel - every band
+        /// at or below the chosen floor, so looking at the second storey of Interchange shows it standing on the first and
+        /// the ground - is the part of it at or below the active band (<see cref="IsShown"/>); the bands above it are built
+        /// and their pictures held but not drawn, so the slice slider can show them without a rebuild.
         ///
-        /// Capped at the picture cache's ceiling, keeping the HIGHEST bands. Each drawn band holds its
-        /// floor's picture resident, and asking for one more than the cache holds would evict a texture
-        /// this view asks for again next frame - a 39 MiB decode per frame, forever. Eight bands are
-        /// possible in the format and six fit in the cache; no captured map has more than four.
+        /// Capped at the picture cache's ceiling less one. Each built band holds its floor's picture resident, and asking
+        /// for one more than the cache holds would evict a texture this view asks for again next frame - a 44-81 MiB decode
+        /// per frame, forever. ONE LESS than the cache holds: the floor showing is also loaded by the flat path - the
+        /// sidebar and the kept-viewport key both read its sprite - so a window that filled the cache exactly would leave
+        /// that one texture as the eviction victim. Eight bands are possible in the format (Shoreline and Icebreaker have
+        /// them) and six fit in the cache: on those maps the bands outside the window are reached by a rebuild.
         /// </summary>
-        private List<int> DrawnLevels()
+        private List<int> BuiltLevels()
+        {
+            return BandWindow(BandLevels(), _selectedLevel, Mathf.Max(1, DynamicMapsLibrary.MaxResidentSprites - 1));
+        }
+
+        /// <summary>The file's band levels, in file order.</summary>
+        private List<int> BandLevels()
         {
             var levels = new List<int>();
 
             foreach (var band in _file.Bands)
-            {
-                if (band == null || band.Level > _selectedLevel) continue;
-                levels.Add(band.Level);
-            }
-
-            // Nothing at or below the floor showing: the lowest band there is, rather than nothing at
-            // all. That happens to a capture whose basement has a picture but no relief - the player has
-            // selected level -1 and the mesh starts at 0 - and drawing the ground under them is a better
-            // answer than refusing the whole file over which floor happens to be picked.
-            if (levels.Count == 0)
-            {
-                var lowest = int.MaxValue;
-
-                foreach (var band in _file.Bands)
-                    if (band != null && band.Level < lowest) lowest = band.Level;
-
-                if (lowest != int.MaxValue) levels.Add(lowest);
-
-                return levels;
-            }
-
-            levels.Sort();
-
-            // ONE LESS than the cache holds. The floor showing is also loaded by the flat path - the
-            // sidebar and the kept-viewport key both read its sprite - so a peel that filled the cache
-            // exactly would leave that one texture as the eviction victim, and the two sides would take
-            // turns evicting each other's picture at 39 MiB a decode.
-            var ceiling = Mathf.Max(1, DynamicMapsLibrary.MaxResidentSprites - 1);
-
-            while (levels.Count > ceiling) levels.RemoveAt(0);
+                if (band != null) levels.Add(band.Level);
 
             return levels;
+        }
+
+        /// <summary>Whether a built band is drawn: at or below the active band (<see cref="ShownOf"/>'s rule).</summary>
+        private bool IsShown(int level) => Shown(level, _activeLevel);
+
+        /// <summary>The band the view draws as its top, from <see cref="_selectedLevel"/> by <see cref="ActiveLevelOf"/>
+        /// (the lowest band when none is at or below the selection). Set by <see cref="BeginBuild"/>.</summary>
+        private int _activeLevel;
+
+        /// <summary>Raised on the main thread at the end of a successful build when the active band is not the selected
+        /// level (the fallback above) and was not announced yet, so pins can be styled against what is drawn. Nothing
+        /// subscribes yet (slice slider S2).</summary>
+        internal event Action ActiveLevelChanged;
+
+        /// <summary>The (selected, active) pair the last build ended with, for <see cref="AnnounceActiveLevel"/>; null
+        /// before any.</summary>
+        private (int Selected, int Active)? _announcedActive;
+
+        /// <summary>From <see cref="Finish"/>: raises <see cref="ActiveLevelChanged"/> once when the fallback made the
+        /// active band differ from the selected level.</summary>
+        private void AnnounceActiveLevel()
+        {
+            // Every build that ends with the fallback in force is told, unless the build before it ended in the same
+            // state (a rebuild of the same selection): -1 (active 0), then 0, then -1 again raises it twice.
+            var now = (_selectedLevel, _activeLevel);
+            var last = _announcedActive;
+            _announcedActive = now;
+
+            if (_activeLevel == _selectedLevel || (last.HasValue && last.Value == now)) return;
+
+            try
+            {
+                ActiveLevelChanged?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: a 3D map active-floor listener failed: {ex.Message}");
+            }
         }
 
         /// <summary>The first of <see cref="Shaders"/> that resolves in this scene.</summary>
@@ -4480,7 +4515,7 @@ namespace QuestTree.UI
                     return;
                 }
 
-                var floor = _levels.Count > 0 ? FloorAt(_levels[_levels.Count - 1]) : null;
+                var floor = FloorAt(_activeLevel);
                 var ground = floor?.GroundMaterial;
                 var picture = ground != null ? ground.mainTexture : null;
 
@@ -4510,7 +4545,8 @@ namespace QuestTree.UI
                         _withoutGround = true;
                         try
                         {
-                            for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
+                            for (var i = 0; i < _floors.Count; i++)
+                                if (IsShown(_floors[i].Level)) Draw(_floors[i]);
                         }
                         finally
                         {
@@ -4834,7 +4870,7 @@ namespace QuestTree.UI
         {
             if (_camera == null || _rt == null || !_emissiveGround) return;
 
-            var floor = _levels.Count > 0 ? FloorAt(_levels[_levels.Count - 1]) : null;
+            var floor = FloorAt(_activeLevel);
             if (floor == null || floor.Meshes == null) return;
 
             Material unlitReference = null;
@@ -5480,10 +5516,39 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// The band window: at most <paramref name="cap"/> consecutive band levels, lowest first, always holding the band
-        /// the selection draws as its top. First today's <see cref="DrawnLevels"/> set (the highest <paramref name="cap"/>
-        /// at or below <paramref name="selected"/>, or the lowest band when none is), then the bands above it while the
-        /// cap allows. S1 only computes it; <see cref="DrawnLevels"/> still decides what is built.
+        /// The band a selection draws as its top - the ACTIVE band: the highest band at or below <paramref name="selected"/>,
+        /// else the lowest band (a capture whose basement has a picture but no relief: the player selected -1 and the mesh
+        /// starts at 0). <paramref name="selected"/> itself when the file has no band.
+        /// </summary>
+        private static int ActiveLevelOf(IReadOnlyList<int> bandLevels, int selected)
+        {
+            var below = false;
+            var highestBelow = int.MinValue;
+            var lowest = int.MaxValue;
+
+            for (var i = 0; i < bandLevels.Count; i++)
+            {
+                var level = bandLevels[i];
+                if (level < lowest) lowest = level;
+
+                if (level <= selected && (!below || level > highestBelow))
+                {
+                    highestBelow = level;
+                    below = true;
+                }
+            }
+
+            if (below) return highestBelow;
+
+            return lowest != int.MaxValue ? lowest : selected;
+        }
+
+        /// <summary>
+        /// The band window - the bands a view BUILDS: at most <paramref name="cap"/> consecutive band levels, lowest first,
+        /// always holding the active band (<see cref="ActiveLevelOf"/>). First the highest <paramref name="cap"/> at or
+        /// below the active band - the set the view drew before the window existed - then the bands above it while the cap
+        /// allows (one fewer when the selection is no band: its picture is held besides). What is DRAWN is the part at or
+        /// below the active band (<see cref="ShownOf"/>).
         /// </summary>
         private static List<int> BandWindow(IReadOnlyList<int> bandLevels, int selected, int cap)
         {
@@ -5499,19 +5564,55 @@ namespace QuestTree.UI
 
             if (cap < 1) cap = 1;
 
-            // the highest band at or below the selection; the lowest band when there is none (DrawnLevels' fallback)
-            var last = 0;
-            for (var i = 0; i < levels.Count; i++)
-                if (levels[i] <= selected) last = i;
+            var last = levels.IndexOf(ActiveLevelOf(levels, selected));
 
             var first = Mathf.Max(0, last - cap + 1);
 
-            while (last - first + 1 < cap && last + 1 < levels.Count) last++;
+            // Upward only into room the picture cache has. The flat path holds the SELECTED floor's picture too; when the
+            // selection is a band that picture is one of the window's, but a selection with no band of its own (a layer
+            // with no relief) is a picture more, so the bands added above take one slot less. The set below never shrinks.
+            var room = levels.Contains(selected) ? cap : cap - 1;
+
+            while (last - first + 1 < room && last + 1 < levels.Count) last++;
 
             for (var i = first; i <= last; i++) window.Add(levels[i]);
 
             return window;
         }
+
+        /// <summary>The built bands a view DRAWS for a selection: those at or below its active band (<see cref="ActiveLevelOf"/>,
+        /// not the selected level), lowest first.</summary>
+        private static List<int> ShownOf(IReadOnlyList<int> built, IReadOnlyList<int> bandLevels, int selected)
+        {
+            var shown = new List<int>();
+            var active = ActiveLevelOf(bandLevels, selected);
+
+            for (var i = 0; i < built.Count; i++)
+                if (Shown(built[i], active)) shown.Add(built[i]);
+
+            return shown;
+        }
+
+        /// <summary>Whether a built band is drawn: at or below the ACTIVE band (not the selected level, which a selection
+        /// with no band of its own leaves above or below every band). The one copy of the rule: <see cref="IsShown"/> and
+        /// <see cref="ShownOf"/> both ask it.</summary>
+        private static bool Shown(int level, int active) => level <= active;
+
+        /// <summary>
+        /// Whose picture a roof filed under another floor (Built.RoofsOnOtherFloors) takes: that floor's when it is at or
+        /// below the active band and built; else the active floor's when the active band IS the selected level; else null,
+        /// the drawing floor's own. An owner ABOVE the active band is never used even when the window built it: a SLOPED
+        /// face routed there by its centroid can still reach below the cut, and that sliver must take the picture at the
+        /// cut, not the upper floor's (F28).
+        ///
+        /// The middle case is the old FloorAt(selected): with a selection that is not a band of the file (a layer with no
+        /// relief, under, between or over the bands) that floor was never built and the roof kept the drawing floor's own
+        /// picture - kept so, so every floor looks as before the window. The plan's "?? FloorAt(active)" differs from it
+        /// only there; the slice slider's step that moves the active band apart from the selection decides between them.
+        /// </summary>
+        private static TFloor RoofOwner<TFloor>(int roofLevel, int active, int selected, Func<int, TFloor> floorAt)
+            where TFloor : class =>
+            (roofLevel <= active ? floorAt(roofLevel) : null) ?? (selected == active ? floorAt(active) : null);
 
         /// <summary>
         /// The slice stops, one per layer of the entry (what the floor picker lists), lowest level first.
@@ -5709,7 +5810,7 @@ namespace QuestTree.UI
             foreach (var band in _file.Bands)
                 if (band != null) bandLevels.Add(band.Level);
 
-            // the cap DrawnLevels keeps to
+            // the cap BuiltLevels keeps to
             var cap = Mathf.Max(1, DynamicMapsLibrary.MaxResidentSprites - 1);
 
             // Usable is the picture state at THIS build only: a picture can still fail to decode after it. The later
@@ -5807,7 +5908,7 @@ namespace QuestTree.UI
         /// A small READABLE copy of a floor's picture, as pixels.
         ///
         /// The picture itself cannot be read: DynamicMapsLibrary decodes it with markNonReadable, which
-        /// frees the CPU copy - the right call for a 39 MiB texture that is only ever drawn. So the GPU
+        /// frees the CPU copy - the right call for a 44-81 MiB texture that is only ever drawn. So the GPU
         /// copies it down into a temporary render texture, and ReadPixels brings that back. Once per floor
         /// per built entry (the entry is cached, so once per session per floor in practice), and nothing
         /// of it outlives the call: the render texture goes back to the pool and the readable texture is
@@ -10055,6 +10156,7 @@ namespace QuestTree.UI
                 if (_camera == null || _floors.Count == 0) return;
 
                 var first = _measureFirstFrame;
+
                 var resized = EnsureRenderTexture();
 
                 // HQ S1.1: nothing this frame shows has changed - the last image stays in the texture. The overlays
@@ -10079,6 +10181,10 @@ namespace QuestTree.UI
                         _settledViewVersion = ViewVersion;
                         SaySettled();
                     }
+
+                    // A clean frame is a settled one (_unsettled forces a render): every shown floor and side has its
+                    // picture, so the window's hidden floors may take the picture cache's decode turn now.
+                    PrimeHidden();
 
                     return;
                 }
@@ -10116,12 +10222,19 @@ namespace QuestTree.UI
 
                 try
                 {
-                    for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
+                    for (var i = 0; i < _floors.Count; i++)
+                        if (IsShown(_floors[i].Level)) Draw(_floors[i]);
                 }
                 finally
                 {
                     _countView = false;
                 }
+
+                // The window's hidden floors: pictures and late walls, never drawn. AFTER the draw loop, and only once
+                // nothing shown is waiting (_unsettled: a floor, side or tile without its picture) and the first frame is
+                // out - the cache decodes one picture a frame for every caller (DecodeTurnAvailable), and a hidden floor
+                // must never take that turn ahead of what is on screen.
+                if (!first && !_unsettled) PrimeHidden();
 
                 RenderNow();
                 Present();
@@ -10431,7 +10544,8 @@ namespace QuestTree.UI
 
             foreach (var floor in _floors)
             {
-                var meshes = floor?.Meshes;
+                // the DRAWN floors only, as before the window: the light is fitted to what the frame shows
+                var meshes = floor != null && IsShown(floor.Level) ? floor.Meshes : null;
                 if (meshes == null) continue;
 
                 AddBounds(meshes.Ground);
@@ -10621,20 +10735,15 @@ namespace QuestTree.UI
             return mesh;
         }
 
-        /// <summary>Queues one floor's meshes for our camera, with the floor's picture on them - the
-        /// relief through the clipping material, the buildings through the opaque one.</summary>
-        private void Draw(Floor floor)
+        /// <summary>
+        /// Puts the floor's picture on its ground, wall and roof materials when any of them lacks it. Asked for every
+        /// frame, and cheap: a resident sprite is a dictionary-free list touch. It has to be asked, because the picture
+        /// cache can release a floor's texture under us - and a material whose mainTexture has been destroyed draws
+        /// white, not the last picture. Every material is checked, since any can be the one holding the destroyed
+        /// reference. From <see cref="Draw"/> and, for the hidden floors, <see cref="Prime"/>.
+        /// </summary>
+        private void AssignPicture(Floor floor, Material ground, Material walls, Material roofs)
         {
-            var ground = floor.GroundMaterial;
-            var walls = floor.BuildingMaterial;
-            var roofs = RoofMaterialOf(floor);
-
-            if (ground == null || walls == null) return;
-
-            // Asked for every frame, and cheap: a resident sprite is a dictionary-free list touch. It
-            // has to be asked, because the picture cache can release a floor's texture under us - and a
-            // material whose mainTexture has been destroyed draws white, not the last picture. Both
-            // materials are checked, since either can be the one holding the destroyed reference.
             if (!_flatColours && (ground.mainTexture == null || walls.mainTexture == null || roofs.mainTexture == null) &&
                 floor.Layer != null && floor.Layer.TryGetSprite(out var sprite) &&
                 sprite != null && sprite.texture != null)
@@ -10645,6 +10754,55 @@ namespace QuestTree.UI
                 // stage C: the roofs' own material, when it is one (made only on the emission path, so emissive)
                 if (roofs != walls) SetPicture(roofs, sprite.texture, _emissiveGround);
             }
+        }
+
+        /// <summary>The window's hidden floors (built, above the active band): <see cref="Prime"/> each, every frame
+        /// after the first. A hidden floor's picture is asked only while a material lacks it, so a primed floor costs a
+        /// few compares a frame.</summary>
+        private void PrimeHidden()
+        {
+            for (var i = 0; i < _floors.Count; i++)
+            {
+                var floor = _floors[i];
+                if (floor != null && !IsShown(floor.Level)) Prime(floor);
+            }
+        }
+
+        /// <summary>
+        /// <see cref="Draw"/>'s preparation without the drawing, for a floor that is built but hidden: its picture on its
+        /// materials, then its walls started once the picture is here. Renders nothing and never sets
+        /// <see cref="_unsettled"/> - nothing on screen waits for a hidden floor - so showing it later neither pops nor
+        /// pays the decode and the walls at that moment.
+        /// </summary>
+        private void Prime(Floor floor)
+        {
+            var ground = floor.GroundMaterial;
+            var walls = floor.BuildingMaterial;
+            var roofs = RoofMaterialOf(floor);
+
+            if (ground == null || walls == null || roofs == null) return;
+
+            AssignPicture(floor, ground, walls, roofs);
+
+            if (!_flatColours && ground.mainTexture == null) return;
+
+            var meshes = floor.Meshes;
+            if (meshes != null && meshes.WallsPending && !meshes.WallsRunning)
+                StartWalls(meshes, floor.Level, ground.mainTexture, late: true);
+        }
+
+        /// <summary>Queues one floor's meshes for our camera, with the floor's picture on them - the
+        /// relief through the clipping material, the buildings through the opaque one. Only for a floor
+        /// that is shown (<see cref="IsShown"/>); a hidden one is primed instead (<see cref="Prime"/>).</summary>
+        private void Draw(Floor floor)
+        {
+            var ground = floor.GroundMaterial;
+            var walls = floor.BuildingMaterial;
+            var roofs = RoofMaterialOf(floor);
+
+            if (ground == null || walls == null) return;
+
+            AssignPicture(floor, ground, walls, roofs);
 
             // NOT DRAWN until its picture is on it. A textured shader with a null _MainTex samples white,
             // so a peeled lower storey whose PNG is still being decoded would draw as a blank white slab
@@ -10698,10 +10856,10 @@ namespace QuestTree.UI
             for (var i = 0; i < meshes.RoofsOnOtherFloors.Count; i++)
             {
                 var roof = meshes.RoofsOnOtherFloors[i];
-                // An owner above the chosen floor is not drawn: a SLOPED face routed there by its centroid can still
-                // reach below the cut, and that sliver takes the chosen floor's picture - the one at the cut - not
-                // this filing band's (review F28).
-                var owner = FloorAt(roof.Level) ?? FloorAt(_selectedLevel);
+                // An owner above the active floor is not used, even now that the window BUILDS it: a SLOPED face routed
+                // there by its centroid can still reach below the cut, and that sliver takes the active floor's picture -
+                // the one at the cut - not this filing band's (review F28). See RoofOwner.
+                var owner = RoofOwner(roof.Level, _activeLevel, _selectedLevel, FloorAt);
                 var material = owner != null && owner.BuildingMaterial != null ? RoofMaterialOf(owner) : roofs;
 
                 if (material == null) continue;
@@ -11271,6 +11429,8 @@ namespace QuestTree.UI
         /// the file's own low end.</summary>
         private float FallbackGroundY()
         {
+            // The SELECTED layer's, as before the band window. The plan moves this to the active level; that belongs to
+            // the step that moves the pins and the camera target with the active floor (S3/S7), not to S2.
             var layer = ResolveLayer();
 
             // Not the "any height" placeholders (about -1003 m from the extent probe, -2000 m from the catalog):
@@ -11548,6 +11708,15 @@ namespace QuestTree.UI
 
         /// <summary>Self-test: the build is done and nothing is queued (uploads, cuts, walls).</summary>
         internal bool SelfTestIdle => _ready && _work.Count == 0 && _wallJobs.Count == 0;
+
+        /// <summary>The band the view draws as its top (slice slider S2).</summary>
+        internal int SelfTestActiveLevel => _activeLevel;
+
+        /// <summary>How many builds this view has begun (BeginBuild calls past the file checks), the first included: a
+        /// slice move must not add one.</summary>
+        internal int SelfTestBuilds => _builds;
+
+        private int _builds;
 
         /// <summary>Says once that this map's mesh is not usable, and stops. The caller drops the mesh
         /// for the session and repaints into the flat picture.</summary>

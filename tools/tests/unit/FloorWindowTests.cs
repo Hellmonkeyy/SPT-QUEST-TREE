@@ -19,6 +19,16 @@
 // @@MUTATE FloorWindow.Slice :: if (!known) sectionsOff = true; :: @@
 // @@MUTATE FloorWindow :: if (j != index && low > minY && low < next) next = low; :: if (j != index && low >= minY && low < next) next = low;@@
 // @@MUTATE FloorWindow.Slice :: if (seen.Contains(layer.Level)) continue; :: @@
+//
+// (e) S2, built versus drawn: the view builds the window and draws its bands at or below the active band; at every
+// selection what is drawn (bands, ground band, roof owners) is what DrawnLevels and the old roof rule gave.
+// @@MUTATE FloorWindow.Slice :: return lowest != int.MaxValue ? lowest : selected; :: return selected;@@
+// @@MUTATE FloorWindow.Slice :: (roofLevel <= active ? floorAt(roofLevel) : null) :: floorAt(roofLevel)@@
+// @@MUTATE FloorWindow.Slice :: (selected == active ? floorAt(active) : null) :: floorAt(active)@@
+// @@MUTATE FloorWindow.Slice :: var room = levels.Contains(selected) ? cap : cap - 1; :: var room = cap;@@
+// @@MUTATE FloorWindow.Slice :: var active = ActiveLevelOf(bandLevels, selected); :: var active = selected;@@
+// @@MUTATE FloorWindow.Slice :: private static bool Shown(int level, int active) => level <= active; :: private static bool Shown(int level, int active) => level < active;@@
+// @@MUTATE FloorWindow.Slice :: if (level <= selected && (!below || level > highestBelow)) :: if (level <= selected && (!below || level < highestBelow))@@
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -138,6 +148,112 @@ namespace UnitTests.FloorWindow
                     t.Eq(7, Woods().FloorForFace(-14f, 7), "filed 7"));
 
                 RunSlices(t);
+                RunBuiltAndDrawn(t);
+            }
+
+            // --- (e) S2: built versus drawn --------------------------------------------------------------------------
+
+            private static string Join(IEnumerable<int> levels) => string.Join(",", levels);
+
+            /// <summary>Map3DView's roof owner before S2, over what it built then (today's DrawnLevels set): FloorAt(roof)
+            /// ?? FloorAt(selected), null meaning the drawing floor's own material.</summary>
+            private static string TodayRoofOwner(int roofLevel, int selected, List<int> drawn, int drawing)
+            {
+                string FloorAt(int level) => drawn.Contains(level) ? "L" + level : null;
+                return FloorAt(roofLevel) ?? FloorAt(selected) ?? "L" + drawing;
+            }
+
+            /// <summary>Every selection from 3 under the lowest band to 3 over the highest, on <paramref name="levels"/>
+            /// (in the order given): the window holds the active band, at most 5, consecutive; the DRAWN part equals today's
+            /// DrawnLevels; the ground band (the active one) is today's top drawn band; every roof owner a drawn floor can
+            /// meet is today's.</summary>
+            private static void SameAsToday(T t, List<int> levels, string map)
+            {
+                var sorted = levels.OrderBy(l => l).ToList();
+
+                for (var selected = sorted.First() - 3; selected <= sorted.Last() + 3; selected++)
+                {
+                    var built = BandWindow(levels, selected, Cap);
+                    var active = ActiveLevelOf(levels, selected);
+                    var drawn = ShownOf(built, levels, selected);
+                    var today = TodayDrawn(selected, sorted);
+                    var at = $"{map} selected {selected}";
+
+                    t.Eq(Join(today), Join(drawn), $"{at}: drawn = today's DrawnLevels");
+                    t.Eq(today.Last(), active, $"{at}: active = today's ground band");
+                    t.True(built.Contains(active), $"{at}: the window holds the active band");
+                    var room = sorted.Contains(selected) ? Cap : Cap - 1;
+                    t.Eq(Math.Min(sorted.Count, Math.Max(today.Count, room)), built.Count, $"{at}: window size");
+
+                    // the pictures held: the window's plus the flat path's selected floor - at most the larger of 5 (the cap
+                    // less one) and what was held before the window, so no steady-state eviction
+                    var held = built.Union(new[] { selected }).Count();
+                    var heldToday = today.Union(new[] { selected }).Count();
+                    t.True(held <= Math.Max(Cap, heldToday), $"{at}: {held} pictures held, {heldToday} before the window");
+                    var from = sorted.IndexOf(built[0]);
+                    t.Eq(Join(sorted.Skip(from).Take(built.Count)), Join(built), $"{at}: window consecutive");
+
+                    foreach (var drawing in drawn)
+                        for (var roof = sorted.First() - 1; roof <= sorted.Last() + 1; roof++)
+                        {
+                            var owner = RoofOwner(roof, active, selected, l => built.Contains(l) ? "L" + l : null) ?? "L" + drawing;
+                            t.Eq(TodayRoofOwner(roof, selected, today, drawing), owner, $"{at}: roof {roof} on floor {drawing}");
+                        }
+                }
+            }
+
+            private static void RunBuiltAndDrawn(T t)
+            {
+                t.Case("S2: on 1 to 5 bands every band is built, and what is drawn is today's at every selection", () =>
+                {
+                    for (var n = 1; n <= 5; n++)
+                    {
+                        var levels = Enumerable.Range(-1, n).ToList();
+                        t.Eq(Join(levels), Join(BandWindow(levels, -1, Cap)), $"{n} band(s): all built at the bottom");
+                        SameAsToday(t, levels, $"{n} band(s)");
+                        levels.Reverse();
+                        SameAsToday(t, levels, $"{n} band(s) listed top first");
+                    }
+
+                    SameAsToday(t, new List<int> { 0, 2, 5 }, "levels with gaps");
+                });
+
+                t.Case("S2: 8 bands - bottom, middle and top selections draw today's set out of a window of 5", () =>
+                {
+                    var levels = Enumerable.Range(0, 8).ToList();
+                    SameAsToday(t, levels, "8 bands");
+
+                    t.Eq("0,1,2,3,4", Join(BandWindow(levels, 0, Cap)), "bottom: window");
+                    t.Eq("0", Join(ShownOf(BandWindow(levels, 0, Cap), levels, 0)), "bottom: drawn");
+                    t.Eq("0,1,2,3,4", Join(BandWindow(levels, 4, Cap)), "middle: window");
+                    t.Eq("0,1,2,3,4", Join(ShownOf(BandWindow(levels, 4, Cap), levels, 4)), "middle: drawn");
+                    t.Eq("3,4,5,6,7", Join(BandWindow(levels, 7, Cap)), "top: window");
+                    t.Eq("3,4,5,6,7", Join(ShownOf(BandWindow(levels, 7, Cap), levels, 7)), "top: drawn");
+                });
+
+                t.Case("S2: the fallback - a selection under every band draws the lowest band only", () =>
+                {
+                    var levels = new List<int> { 2, 0, 1 };
+                    t.Eq(0, ActiveLevelOf(levels, -1), "active");
+                    t.Eq("0", Join(ShownOf(BandWindow(levels, -1, Cap), levels, -1)), "drawn");
+                    t.Eq(7, ActiveLevelOf(new List<int>(), 7), "no band: the selection itself");
+
+                    // drawn by the ACTIVE band, not the selection: a selection under or over every band
+                    t.True(Shown(0, 0) && !Shown(1, 0), "Shown: at or below the active band");
+                    t.Eq("0", Join(ShownOf(new List<int> { 0, 1, 2 }, levels, -1)), "selection -1: the lowest band drawn");
+                    t.Eq("0,1", Join(ShownOf(new List<int> { 0, 1 }, new List<int> { 0, 1 }, 5)), "selection 5 over bands 0, 1: both drawn");
+                });
+
+                t.Case("S2: a roof filed above the active floor takes the active floor's picture though that floor is built", () =>
+                {
+                    var built = new List<int> { 0, 1, 2, 3, 4 };
+                    string FloorAt(int l) => built.Contains(l) ? "L" + l : null;
+                    t.Eq("L0", RoofOwner(2, 0, 0, FloorAt), "roof on 2, active 0");
+                    t.Eq("L1", RoofOwner(1, 3, 3, FloorAt), "roof on 1, active 3");
+                    t.Eq("L3", RoofOwner(-2, 3, 3, FloorAt), "roof below the window, active 3");
+                    t.Eq(null, RoofOwner(-2, 9, 9, FloorAt), "neither built");
+                    t.Eq(null, RoofOwner(4, 3, 7, FloorAt), "selection 7 is no band: the drawing floor's own, as before");
+                });
             }
 
             // --- (d) slice stops -------------------------------------------------------------------------------------------
