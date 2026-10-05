@@ -9,6 +9,8 @@
 // @@MUTATE FirstFrame :: return pictureCanArrive ? FloorFrame.Waiting : FloorFrame.Failed; :: return FloorFrame.Waiting;@@
 // @@MUTATE FirstFrame :: if (pictured) return FloorFrame.Drawn; :: @@
 // @@MUTATE FirstFrame :: if (!materials) return FloorFrame.Failed; :: @@
+// @@MUTATE FirstFrame :: => hasLayer && hasArtwork && !failed; :: => hasLayer && hasArtwork;@@
+// @@MUTATE FirstFrame :: => !pictured && pictureCanArrive; :: => !pictured;@@
 using System.Collections.Generic;
 
 namespace UnitTests.FirstFrame
@@ -44,6 +46,21 @@ namespace UnitTests.FirstFrame
                 {
                     t.True(!Complete(true, FloorFrame.Drawn), "already said");
                     t.True(!Complete(true), "already said, no floor");
+                });
+
+                t.Case("can a picture still arrive, and does its absence keep the view rendering", () =>
+                {
+                    t.True(PictureCanArrive(true, true, false), "decoding: can arrive");
+                    t.True(!PictureCanArrive(true, true, true), "failed: never");
+                    t.True(!PictureCanArrive(true, false, false), "no artwork: never");
+                    t.True(!PictureCanArrive(false, false, false), "no layer: never");
+
+                    t.True(Unsettles(false, true), "waiting: renders on");
+                    t.True(!Unsettles(false, false), "failed: settles (PrimeHidden may run)");
+                    t.True(!Unsettles(true, true), "pictured: settles");
+
+                    // the same notion as the first frame: a failed floor is neither waited for nor unsettling
+                    t.Eq(FloorFrame.Failed, FrameOfFloor(true, false, PictureCanArrive(true, true, true)), "failed: Failed");
                 });
 
                 t.Case("a floor's state from the draw loop", () =>

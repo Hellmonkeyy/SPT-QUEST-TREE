@@ -15,7 +15,12 @@
 // @@MUTATE FloorWindow.Slice :: return top + CutAboveFloor; :: return top;@@
 // @@MUTATE FloorWindow :: if (j != index && low > minY && low < next) next = low; :: if (j != index && low > minY) next = low;@@
 // @@MUTATE FloorWindow.Slice :: var first = Mathf.Max(0, last - cap + 1); :: var first = last;@@
-// @@MUTATE FloorWindow.Slice :: || !window.Contains(layer.Level) || :: ||@@
+// @@MUTATE FloorWindow.Slice :: if (!SliceReachable(bandLevels, selected, layer.Level, cap) || !layer.Usable) :: if (!HasLevel(bandLevels, layer.Level) || !layer.Usable)@@
+// @@MUTATE FloorWindow.Slice :: var sliced = ShownOf(BandWindow(bandLevels, selected, cap), bandLevels, level); :: var sliced = ShownOf(BandWindow(bandLevels, level, cap), bandLevels, level);@@
+// @@MUTATE FloorWindow.Slice :: if (!HasLevel(bandLevels, level)) return false; :: @@
+// @@MUTATE FloorWindow.Slice :: => sliceSet ? sliceLevel : selected; :: => selected;@@
+// @@MUTATE FloorWindow.Slice :: var to = at + (direction > 0 ? 1 : -1); :: var to = at + (direction > 0 ? 2 : -2);@@
+// @@MUTATE FloorWindow.Slice :: if (stops[i].Level == active) at = i; :: if (stops[i].Level == chosen) at = i;@@
 // @@MUTATE FloorWindow.Slice :: if (!known) sectionsOff = true; :: @@
 // @@MUTATE FloorWindow :: if (j != index && low > minY && low < next) next = low; :: if (j != index && low >= minY && low < next) next = low;@@
 // @@MUTATE FloorWindow.Slice :: if (seen.Contains(layer.Level)) continue; :: @@
@@ -202,8 +207,96 @@ namespace UnitTests.FloorWindow
                 }
             }
 
+            /// <summary>
+            /// S3's invariant: on a view built for <paramref name="levels"/> with ANY level selected, a slice to every
+            /// reachable band b draws what a view BUILT with b selected draws - the same bands, the same active (ground)
+            /// band, the same roof owners for every floor drawn - and on up to 5 bands every band is reachable. The cut is
+            /// the stop's home, which HomesAreToday holds equal to the build's CutHeight.
+            /// </summary>
+            private static void SliceIsRebuild(T t, List<int> levels, string map)
+            {
+                var sorted = levels.OrderBy(l => l).ToList();
+
+                for (var selected = sorted.First() - 2; selected <= sorted.Last() + 2; selected++)
+                {
+                    var window = BandWindow(levels, selected, Cap);
+
+                    foreach (var b in sorted)
+                    {
+                        var at = $"{map} built for {selected}, slice to {b}";
+                        var reachable = SliceReachable(levels, selected, b, Cap);
+
+                        // every band is built on up to 5 bands - but for a selection that is no band, whose own picture
+                        // takes a slot (S2), on exactly 5: then the top band is a rebuild stop
+                        if (sorted.Count <= Cap && (sorted.Contains(selected) || sorted.Count < Cap))
+                            t.True(reachable, $"{at}: reachable on up to 5 bands");
+                        if (!window.Contains(b)) t.True(!reachable, $"{at}: outside the window, a rebuild stop");
+                        if (!reachable) continue;
+
+                        var rebuilt = BandWindow(levels, b, Cap);
+                        var drawnSliced = ShownOf(window, levels, b);
+                        var drawnRebuilt = ShownOf(rebuilt, levels, b);
+
+                        t.Eq(Join(TodayDrawn(b, sorted)), Join(drawnSliced), $"{at}: drawn = a build with {b} selected");
+                        t.Eq(Join(drawnRebuilt), Join(drawnSliced), $"{at}: drawn = the rebuilt view's");
+                        t.Eq(ActiveLevelOf(levels, b), b, $"{at}: active band");
+
+                        foreach (var drawing in drawnSliced)
+                            for (var roof = sorted.First() - 1; roof <= sorted.Last() + 1; roof++)
+                            {
+                                var sliced = RoofOwner(roof, b, b, l => window.Contains(l) ? "L" + l : null) ?? "L" + drawing;
+                                var built = RoofOwner(roof, b, b, l => rebuilt.Contains(l) ? "L" + l : null) ?? "L" + drawing;
+                                t.Eq(built, sliced, $"{at}: roof {roof} on floor {drawing}");
+                            }
+                    }
+                }
+            }
+
             private static void RunBuiltAndDrawn(T t)
             {
+                t.Case("S3: the chosen level is the slice's once one is set", () =>
+                {
+                    t.Eq(0, ChosenOf(true, 0, -1), "sliced to 0 from a selection of -1");
+                    t.Eq(-1, ChosenOf(false, 0, -1), "no slice: the selection");
+                });
+
+                t.Case("S3: StepSlice's next stop - one at a time, rebuild stops said, the ends refused", () =>
+                {
+                    var interchange = Stops(0, InterchangeBands());   // -1, 0, 1, 2 - every one reachable
+
+                    t.Eq(SliceStep.Moved, NextStop(interchange, 0, 0, +1, out var next), "0 up");
+                    t.Eq(1, interchange[next].Level, "0 up: to 1, not past it");
+                    t.Eq(SliceStep.Moved, NextStop(interchange, 1, 1, -1, out next), "1 down");
+                    t.Eq(0, interchange[next].Level, "1 down: to 0");
+                    t.Eq(SliceStep.Refused, NextStop(interchange, 2, 2, +1, out _), "top up");
+                    t.Eq(SliceStep.Refused, NextStop(interchange, -1, -1, -1, out _), "bottom down");
+                    t.Eq(SliceStep.Refused, NextStop(interchange, 0, 0, 0, out _), "no direction");
+
+                    // a chosen level that is no layer: from the active band's stop
+                    t.Eq(SliceStep.Moved, NextStop(interchange, 9, 1, +1, out next), "chosen 9 (no stop), active 1, up");
+                    t.Eq(2, interchange[next].Level, "from the active band's stop");
+
+                    // 8 bands built for 0: 4 is the window's top, 5 a rebuild stop
+                    var eight = Stops(0, EightBands());
+                    t.Eq(SliceStep.Rebuild, NextStop(eight, 4, 4, +1, out next), "4 up: a rebuild stop");
+                    t.Eq(5, eight[next].Level, "4 up: 5");
+                });
+
+                t.Case("S3: a slice to any reachable band draws what a build with it selected draws (1 to 5 bands, 8 bands)", () =>
+                {
+                    for (var n = 1; n <= 5; n++) SliceIsRebuild(t, Enumerable.Range(-1, n).ToList(), $"{n} band(s)");
+
+                    SliceIsRebuild(t, new List<int> { 5, 0, 2 }, "levels with gaps, listed out of order");
+                    SliceIsRebuild(t, Enumerable.Range(0, 8).ToList(), "8 bands");
+
+                    // 8 bands built for the top: floor 3 is in the window but its own peel (0..3) is not - a rebuild stop
+                    var eight = Enumerable.Range(0, 8).ToList();
+                    t.True(!SliceReachable(eight, 7, 3, Cap), "8 bands, built for 7: 3 needs a rebuild");
+                    t.True(SliceReachable(eight, 0, 4, Cap), "8 bands, built for 0: 4 is reachable");
+                    t.True(!SliceReachable(eight, 0, 5, Cap), "8 bands, built for 0: 5 is outside the window");
+                    t.True(!SliceReachable(new List<int> { 0, 1 }, 0, -1, Cap), "a level with no band");
+                });
+
                 t.Case("S2: on 1 to 5 bands every band is built, and what is drawn is today's at every selection", () =>
                 {
                     for (var n = 1; n <= 5; n++)
@@ -424,7 +517,9 @@ namespace UnitTests.FloorWindow
                     var bands = EightBands();
                     var levels = bands.Select(b => b.Level).ToList();
 
-                    foreach (var (selected, from) in new[] { (0, 0), (3, 0), (5, 1), (7, 3) })
+                    // reachable without a rebuild: in the window AND drawing there what a build with that floor selected draws
+                    // (a floor whose own peel reaches below the window is a rebuild stop - S3)
+                    foreach (var (selected, from, reachable) in new[] { (0, 0, "0,1,2,3,4"), (3, 0, "0,1,2,3,4"), (5, 1, "5"), (7, 3, "7") })
                     {
                         var window = BandWindow(levels, selected, Cap);
                         t.Eq(string.Join(",", Enumerable.Range(from, 5)), string.Join(",", window), $"selected {selected}: window");
@@ -436,9 +531,11 @@ namespace UnitTests.FloorWindow
                         var s = Stops(selected, bands);
                         t.Eq(8, s.Count, "stops");
 
+                        t.Eq(reachable, string.Join(",", s.Where(x => x.Kind != Rebuild).Select(x => x.Level)), $"selected {selected}: reachable stops");
+
                         foreach (var stop in s)
                         {
-                            var inside = stop.Level >= from && stop.Level < from + 5;
+                            var inside = reachable.Split(',').Contains(stop.Level.ToString());
                             var kind = !inside ? Rebuild : stop.Level == 7 ? Notch : Section;
 
                             if (stop.Level == 7) Stop(t, stop, 7, kind, float.NaN, float.NaN);

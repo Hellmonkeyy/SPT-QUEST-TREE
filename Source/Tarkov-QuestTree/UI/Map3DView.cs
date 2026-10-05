@@ -2660,8 +2660,20 @@ namespace QuestTree.UI
             // Which heights are which floor's surfaces - the roof routing reads it while the floors build.
             MeasureFloorRanges();
 
-            // The slice slider's stops (S1: computed and logged; nothing draws by them yet).
+            // The slice slider's stops (S1: computed and logged).
             MeasureSliceStops();
+
+            // S3: a slice set on this view (SetSlice) survives a rebuild of it (RebuildWithoutFailedSides) while its level
+            // is still a stop this window can show; otherwise the view goes back to the selected level's home.
+            if (_sliceSet)
+            {
+                if (SliceStopAt(_sliceLevel, out var kept) && kept.Kind != SliceKind.Rebuild)
+                {
+                    _activeLevel = _sliceLevel;
+                    _sliceCut = kept.Home;
+                }
+                else _sliceSet = false;
+            }
 
             // Now, and not at Attach: whether the sides take part depends on the shader just resolved.
             TakeSideRoom();
@@ -2706,7 +2718,7 @@ namespace QuestTree.UI
             // the active band: the highest DRAWN one, as before the window was built
             _groundBand = _file.Band(_activeLevel);
             _groundFallbackY = FallbackGroundY();
-            var cut = CutHeight();
+            var cut = _sliceSet ? _sliceCut : CutHeight();
             if (!SameCut(cut, _cutY)) _timeRender = true;
             _cutY = cut;
 
@@ -3271,7 +3283,7 @@ namespace QuestTree.UI
                     ? ""
                     : string.Format(CultureInfo.InvariantCulture,
                         ", cut at {0:0.0} m (level {1}) by the camera's near plane, ground above the cut: {2:#,##0} of {3:#,##0} cells",
-                        _cutY, _selectedLevel, groundAbove, groundMeasured),
+                        _cutY, ChosenLevel, groundAbove, groundMeasured),
                 _buildFrames,
                 _longestFrameMs,
                 ResidentMeshBytes() / (1024d * 1024d),
@@ -3476,10 +3488,16 @@ namespace QuestTree.UI
         {
             var materials = floor.GroundMaterial != null && floor.BuildingMaterial != null && floor.Meshes != null;
             var pictured = _flatColours || (floor.GroundMaterial != null && floor.GroundMaterial.mainTexture != null);
-            var layer = floor.Layer;
-            var canArrive = layer != null && layer.HasArtwork && !layer.ArtworkFailed;
+            return FrameOfFloor(materials, pictured, PictureCanArrive(floor));
+        }
 
-            return FrameOfFloor(materials, pictured, canArrive);
+        /// <summary>Whether a floor's picture can still arrive (<see cref="PictureCanArrive(bool, bool, bool)"/>). A failed
+        /// picture is never asked again: the cache releases only pictures it holds, so nothing clears a failure while
+        /// a view is up.</summary>
+        private static bool PictureCanArrive(Floor floor)
+        {
+            var layer = floor?.Layer;
+            return PictureCanArrive(layer != null, layer != null && layer.HasArtwork, layer != null && layer.ArtworkFailed);
         }
 
         /// <summary>Draw calls submitted this frame - see <see cref="Submit"/>.</summary>
@@ -3842,6 +3860,143 @@ namespace QuestTree.UI
         /// before any.</summary>
         private (int Selected, int Active)? _announcedActive;
 
+        // --- the slice (slice slider S3, phase 1a: stops at their homes only) ---------------------------------------
+
+        /// <summary>A slice was set on this view by <see cref="SetSlice"/>: <see cref="_sliceLevel"/> is the floor it
+        /// shows and <see cref="_sliceCut"/> its cut, and they stand in for the selected level wherever the view decides
+        /// what a chosen floor is (<see cref="ChosenLevel"/>). Kept across a rebuild of this view.</summary>
+        private bool _sliceSet;
+
+        private int _sliceLevel;
+        private float _sliceCut = float.NaN;
+
+        /// <summary>The floor the view is showing as CHOSEN: the slice's when one is set, else the selected level. A
+        /// slice to floor b makes the view what a build with b selected is: its layer (<see cref="ResolveLayer"/>: the
+        /// fallback ground, the focus clamp), its roof fallback (<see cref="RoofOwner{TFloor}"/>), its cut.</summary>
+        internal int ChosenLevel => ChosenOf(_sliceSet, _sliceLevel, _selectedLevel);
+
+        /// <summary>The band the view draws as its top (<see cref="IsShown"/>): the chosen floor's band, or for a chosen
+        /// level with no band the one <see cref="ActiveLevelOf"/> gives.</summary>
+        internal int ActiveLevel => _activeLevel;
+
+        /// <summary>The stop of a level in <see cref="Slices"/>.</summary>
+        private bool SliceStopAt(int level, out SliceStop stop)
+        {
+            stop = default;
+            if (_slices == null) return false;
+
+            foreach (var candidate in _slices)
+            {
+                if (candidate.Level != level) continue;
+
+                stop = candidate;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// Whether <paramref name="level"/> is a stop this view can show now, without a rebuild: a Section or Notch stop
+        /// (in the window, drawing exactly the bands a build with it selected draws - <see cref="SliceReachable"/>) whose
+        /// floors that would come into view have their pictures on their materials (S2's priming), or flat colours.
+        /// False before the build is ready. Main thread only.
+        /// </summary>
+        internal bool CanShow(int level)
+        {
+            if (!_ready || _broke || !SliceStopAt(level, out var stop) || stop.Kind == SliceKind.Rebuild) return false;
+            // a floor coming into view whose picture is still on its way (a floor that can never have one - no layer, a
+            // failed decode - draws as it would after a rebuild: not at all)
+            // The stop's own floor with a picture that failed since the build: a rebuild would draw it flat, so not here.
+            var own = FloorAt(level);
+            if (!_flatColours && own != null && FrameOf(own) == FloorFrame.Failed) return false;
+
+            foreach (var floor in _floors)
+            {
+                // A floor below with a failed picture does not block the stops above: it draws as after a rebuild (not at
+                // all), and it no longer keeps the view unsettled, so priming goes on.
+                if (floor == null || IsShown(floor.Level) || floor.Level > level) continue;
+
+                var frame = FrameOf(floor);
+                if (frame == FloorFrame.Waiting) return false;
+
+                // Its walls too: a build's Finish waits for the walls it started, so a rebuild never shows a floor's
+                // buildings without them. Walls still building, or waiting on a picture that is here (Prime starts them
+                // next frame), are not shown yet; a floor that can never have a picture never gets walls, after a rebuild
+                // either.
+                var meshes = floor.Meshes;
+                if (meshes != null && (meshes.WallsRunning || (meshes.WallsPending && frame == FloorFrame.Drawn))) return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Shows the stop of <paramref name="level"/>, the way a build with that floor selected shows it, without a rebuild:
+        /// the bands at or below it drawn, the cut at its home (none for the top floor), its ground under the camera's
+        /// target. Phase 1a: every stop is a notch at its HOME - <paramref name="cutY"/> is not read yet (1b's continuous
+        /// sections will), nor <paramref name="dragging"/>. Re-renders once through <see cref="Moved"/>; never builds and
+        /// never renders itself. Main thread only.
+        /// </summary>
+        /// <returns>False, with nothing changed, for a rebuild stop, a level with no stop, or one that cannot be shown yet
+        /// (<see cref="CanShow"/>).</returns>
+        internal bool SetSlice(int level, float cutY, bool dragging)
+        {
+            if (!CanShow(level) || !SliceStopAt(level, out var stop)) return false;
+
+            var cut = stop.Home;
+            var activeChanged = level != _activeLevel;
+            var chosenChanged = level != ChosenLevel;
+
+            // already showing it: nothing to do, nothing said
+            if (!chosenChanged && !activeChanged && SameCut(cut, _cutY)) return true;
+
+            _sliceSet = true;
+            _sliceLevel = level;
+            _sliceCut = cut;
+            _cutY = cut;
+
+            if (activeChanged)
+            {
+                _activeLevel = level;
+
+                // As BeginBuild sets it for a build with this floor selected: the active band's relief. The camera's target
+                // follows on the next Place - a jump of the floor-to-floor height, which phase 1b's re-pivot removes.
+                _groundBand = _file?.Band(_activeLevel);
+
+                // the light is fitted to the drawn floors (Finish does it per build)
+                ComputeMapBounds();
+            }
+
+            if (activeChanged || chosenChanged)
+            {
+                // Where the relief has a hole: the CHOSEN layer's band bottom (ResolveLayer), which moves with the chosen
+                // level even when the band does not - a basement layer with no band (-1, band 0 active) sliced to 0.
+                _groundFallbackY = FallbackGroundY();
+
+                // listeners style pins by the chosen floor and place them on the active one: told of either change
+                _announcedActive = (_selectedLevel, _activeLevel);
+                RaiseActiveLevelChanged();
+            }
+
+            Plugin.LogSource?.LogInfo(string.Format(
+                CultureInfo.InvariantCulture,
+                "QuestTree: 3D map slice for {0} to level {1} - no rebuild, cut {2}.",
+                _mapKey, level, CutText()));
+
+            Moved();
+            return true;
+        }
+
+        /// <summary>Steps to the next stop up (<paramref name="direction"/> &gt; 0) or down from the one showing.</summary>
+        internal SliceStep StepSlice(int direction)
+        {
+            var step = NextStop(_slices, ChosenLevel, _activeLevel, direction, out var next);
+            if (step != SliceStep.Moved) return step;
+
+            return SetSlice(_slices[next].Level, _slices[next].Home, false) ? SliceStep.Moved : SliceStep.Refused;
+        }
+
         /// <summary>From <see cref="Finish"/>: raises <see cref="ActiveLevelChanged"/> once when the fallback made the
         /// active band differ from the selected level.</summary>
         private void AnnounceActiveLevel()
@@ -3854,6 +4009,12 @@ namespace QuestTree.UI
 
             if (_activeLevel == _selectedLevel || (last.HasValue && last.Value == now)) return;
 
+            RaiseActiveLevelChanged();
+        }
+
+        /// <summary>Raises <see cref="ActiveLevelChanged"/>, a listener's throw logged and swallowed.</summary>
+        private void RaiseActiveLevelChanged()
+        {
             try
             {
                 ActiveLevelChanged?.Invoke();
@@ -5475,6 +5636,14 @@ namespace QuestTree.UI
             return pictureCanArrive ? FloorFrame.Waiting : FloorFrame.Failed;
         }
 
+        /// <summary>Whether a floor's picture can still arrive: it has a layer with artwork whose decode has not failed. The
+        /// ONE definition: the first complete frame, the unsettled test and CanShow all ask it.</summary>
+        private static bool PictureCanArrive(bool hasLayer, bool hasArtwork, bool failed) => hasLayer && hasArtwork && !failed;
+
+        /// <summary>Whether a material without its picture keeps the view rendering every frame: only while the picture
+        /// can still arrive. One that never will (failed, none) is drawn as it is and the view settles.</summary>
+        private static bool Unsettles(bool pictured, bool pictureCanArrive) => !pictured && pictureCanArrive;
+
         /// <summary>Whether this rendered frame is the build's first COMPLETE frame: not announced yet, and no shown floor
         /// still waiting for its picture. A failed floor never holds it back, so the first-frame lines are always said.</summary>
         private static bool FirstFrameComplete(IReadOnlyList<FloorFrame> shown, bool announced)
@@ -5752,7 +5921,7 @@ namespace QuestTree.UI
 
                 SliceKind kind;
 
-                if (!HasLevel(bandLevels, layer.Level) || !window.Contains(layer.Level) || !layer.Usable)
+                if (!SliceReachable(bandLevels, selected, layer.Level, cap) || !layer.Usable)
                     kind = SliceKind.Rebuild;
                 else if (float.IsNaN(home) || sectionsOff)
                     kind = SliceKind.Notch;
@@ -5775,6 +5944,70 @@ namespace QuestTree.UI
             stops.Sort((a, b) => a.Level.CompareTo(b.Level));
 
             return stops;
+        }
+
+        /// <summary>
+        /// Whether a view built for <paramref name="selected"/> can show floor <paramref name="level"/> without a rebuild:
+        /// it is a band, and the bands its window draws at or below it are exactly those a build with it selected draws.
+        /// On up to 5 bands that is every band; on 8 (Shoreline, Icebreaker) a floor whose own peel reaches below the
+        /// window is a rebuild stop, so every home still looks as the floor picker shows it.
+        /// </summary>
+        private static bool SliceReachable(IReadOnlyList<int> bandLevels, int selected, int level, int cap)
+        {
+            if (!HasLevel(bandLevels, level)) return false;
+
+            var sliced = ShownOf(BandWindow(bandLevels, selected, cap), bandLevels, level);
+            var built = ShownOf(BandWindow(bandLevels, level, cap), bandLevels, level);
+
+            if (sliced.Count != built.Count) return false;
+
+            for (var i = 0; i < sliced.Count; i++)
+                if (sliced[i] != built[i]) return false;
+
+            return true;
+        }
+
+        /// <summary>What <see cref="StepSlice"/> did (or, from <see cref="NextStop"/>, would do).</summary>
+        internal enum SliceStep
+        {
+            /// <summary>The view moved to the next stop.</summary>
+            Moved,
+
+            /// <summary>No stop that way, or the next one cannot be shown yet (its picture is still decoding).</summary>
+            Refused,
+
+            /// <summary>The next stop is a rebuild stop: the caller selects that floor and rebuilds, as the picker does.</summary>
+            Rebuild
+        }
+
+        /// <summary>The floor a view shows as CHOSEN: a slice's level once one is set, else the selected level.</summary>
+        private static int ChosenOf(bool sliceSet, int sliceLevel, int selected) => sliceSet ? sliceLevel : selected;
+
+        /// <summary>
+        /// The stop one step up (<paramref name="direction"/> &gt; 0) or down from the one showing - the chosen level's
+        /// stop, else (a chosen level that is no layer) the active band's: Refused with none that way (or direction 0, or
+        /// no current stop), Rebuild when it is a rebuild stop, else Moved with <paramref name="next"/> its index.
+        /// </summary>
+        private static SliceStep NextStop(IReadOnlyList<SliceStop> stops, int chosen, int active, int direction, out int next)
+        {
+            next = -1;
+            if (stops == null || direction == 0) return SliceStep.Refused;
+
+            var at = -1;
+            for (var i = 0; i < stops.Count; i++)
+                if (stops[i].Level == chosen) at = i;
+
+            if (at < 0)
+                for (var i = 0; i < stops.Count; i++)
+                    if (stops[i].Level == active) at = i;
+
+            if (at < 0) return SliceStep.Refused;
+
+            var to = at + (direction > 0 ? 1 : -1);
+            if (to < 0 || to >= stops.Count) return SliceStep.Refused;
+
+            next = to;
+            return stops[to].Kind == SliceKind.Rebuild ? SliceStep.Rebuild : SliceStep.Moved;
         }
 
         private static bool HasLevel(IReadOnlyList<int> levels, int level)
@@ -10903,8 +11136,9 @@ namespace QuestTree.UI
             // so the frame that has it draws it.
             if (!_flatColours && ground.mainTexture == null)
             {
-                // S1 review: a floor with no layer at all never gets a picture - not worth a frame a frame
-                if (floor.Layer != null) _unsettled = true;
+                // Waiting keeps the view rendering; a floor whose picture can never come (no layer, no artwork, a failed
+                // decode) does not - it kept the view rendering every frame for nothing, and held PrimeHidden back.
+                if (Unsettles(false, PictureCanArrive(floor))) _unsettled = true;
                 return;
             }
 
@@ -10951,7 +11185,7 @@ namespace QuestTree.UI
                 // An owner above the active floor is not used, even now that the window BUILDS it: a SLOPED face routed
                 // there by its centroid can still reach below the cut, and that sliver takes the active floor's picture -
                 // the one at the cut - not this filing band's (review F28). See RoofOwner.
-                var owner = RoofOwner(roof.Level, _activeLevel, _selectedLevel, FloorAt);
+                var owner = RoofOwner(roof.Level, _activeLevel, ChosenLevel, FloorAt);
                 var material = owner != null && owner.BuildingMaterial != null ? RoofMaterialOf(owner) : roofs;
 
                 if (material == null) continue;
@@ -10960,7 +11194,8 @@ namespace QuestTree.UI
                 // texture on the material later this same frame, after this roof was skipped)
                 if (!_flatColours && material.mainTexture == null)
                 {
-                    _unsettled = true;
+                    // only while the owner's picture can still come (no owner: this floor's own, which is here)
+                    if (Unsettles(false, PictureCanArrive(owner ?? floor))) _unsettled = true;
                     continue;
                 }
 
@@ -11748,7 +11983,7 @@ namespace QuestTree.UI
 
         /// <summary>The layer of the floor showing, which is what the extent, the fit and the fallback
         /// ground height are read from.</summary>
-        private DynamicMapsLibrary.MapLayer ResolveLayer() => LayerOf(_selectedLevel) ?? _entry?.DefaultLayer;
+        private DynamicMapsLibrary.MapLayer ResolveLayer() => LayerOf(ChosenLevel) ?? _entry?.DefaultLayer;
 
         /// <summary>The map layer with this level, or null.</summary>
         /// <param name="level">The floor level.</param>
@@ -11811,11 +12046,20 @@ namespace QuestTree.UI
         internal double SelfTestFirstFrameMs => _firstFrameMs;
 
         /// <summary>The band the view draws as its top (slice slider S2).</summary>
-        internal int SelfTestActiveLevel => _activeLevel;
+        internal int SelfTestActiveLevel => ActiveLevel;
 
         /// <summary>How many builds this view has begun (BeginBuild calls past the file checks), the first included: a
         /// slice move must not add one.</summary>
         internal int SelfTestBuilds => _builds;
+
+        /// <summary>The slice stops (<see cref="Slices"/>); null before the first build measured them.</summary>
+        internal IReadOnlyList<SliceStop> SelfTestSlices => _slices;
+
+        /// <summary>The cut the view draws at, metres; NaN for none.</summary>
+        internal float SelfTestCut => _cutY;
+
+        /// <summary>Frames drawn uncut because the camera was not above the cut (<see cref="ApplyCut"/>).</summary>
+        internal int SelfTestCutSkippedFrames => _cutSkippedFrames;
 
         private int _builds;
 
