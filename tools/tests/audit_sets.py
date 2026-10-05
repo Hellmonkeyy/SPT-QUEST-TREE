@@ -33,6 +33,7 @@ Speed: each distinct mesh (by the meta's sha256) is read once, for the client an
 every triangle of every mesh is classified. The full run is mostly the mesh reads and the picture decodes.
 """
 
+import hashlib
 import json
 import math
 import os
@@ -391,10 +392,31 @@ class MeshFaces:
         del m
 
 
-def load_mesh(mapset):
+def mesh_bytes(mapset):
+    """The set's whole mesh file, or - when only the shipped-parts layout is there (<file>.partNN plus <file>.parts.json,
+    written by package.ps1 and joined by the host's MapStore.JoinShippedMesh on first read) - its parts joined in memory
+    by mesh_parts.join_verified and held to the meta's sha256 and byte count. Raises ValueError when the parts do not
+    join; a missing whole file with no manifest raises the read's own OSError, as before."""
     entry = mapset.mesh_entry()
     path = mapset.folder / entry["file"]
-    return MeshFaces(path.read_bytes())
+    if path.is_file():
+        return path.read_bytes()
+    parts = load_tool("mesh_parts.py")
+    if not (mapset.folder / parts.manifest_name(entry["file"])).is_file():
+        return path.read_bytes()
+    data, _manifest, why = parts.join_verified(mapset.folder, entry["file"])
+    if data is None:
+        raise ValueError(f"{entry['file']} is stored as parts that do not join: {why}")
+    sha, size = entry.get("sha256"), entry.get("bytes")
+    if isinstance(sha, str) and hashlib.sha256(data).hexdigest() != sha.lower():
+        raise ValueError(f"{entry['file']}'s parts join to a mesh whose sha256 is not the {sha.lower()[:16]} the meta names")
+    if isinstance(size, int) and not isinstance(size, bool) and len(data) != size:
+        raise ValueError(f"{entry['file']}'s parts join to {len(data):,} bytes, not the {size:,} bytes the meta names")
+    return data
+
+
+def load_mesh(mapset):
+    return MeshFaces(mesh_bytes(mapset))
 
 
 # --- (a) black faces ---------------------------------------------------------------------------------------------------------
@@ -1115,7 +1137,6 @@ def make_fixture(root, key="Fixture", side="client", *, floors=None, black_floor
     if extra_building:
         buildings.append(extra_building)
     data = write_mesh(folder / f"{key}-mesh.bin", extent, y_range, bands, buildings)
-    import hashlib
     meta["mesh"] = {"file": f"{key}-mesh.bin", "bytes": len(data), "version": 4, "sha256": hashlib.sha256(data).hexdigest()}
     (folder / f"{key}.map.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return folder
@@ -1127,7 +1148,7 @@ def self_test(ctx):
     results = []
     tmp = Path(tempfile.mkdtemp(prefix="qt-audit-sets-"))
     try:
-        def one(label, build, check, want, backup_limit=None, repo=None):
+        def one(label, build, check, want, backup_limit=None, repo=None, reason=None):
             root = tmp / label
             root.mkdir()
             build(root)
@@ -1135,7 +1156,7 @@ def self_test(ctx):
             got = [r for r in audit(sub, [("client", root)], backup_limit=backup_limit, repo=repo)
                    if r.name.startswith(check)]
             statuses = {r.status for r in got}
-            ok = want in statuses
+            ok = want in statuses and (reason is None or any(reason in r.detail for r in got if r.status == want))
             detail = "; ".join(f"{r.status} {r.detail}" for r in got)[:300]
             results.append(Result(LAYER, f"self-test {label}", PASS if ok else FAIL,
                                   f"{check} -> {'/'.join(sorted(statuses)) or 'nothing'} (wanted {want}): {detail}"))
@@ -1237,6 +1258,37 @@ def self_test(ctx):
             folder = make_fixture(r)
             shutil.copytree(folder, r / "Fixture.bak-20261004-000000")
         one("h-backups", backup, "backups", WARN, backup_limit=1024)
+        # (i) a mesh stored only as shipped parts (package.ps1's layout, as a fresh host install holds it): joined in
+        #     memory it must read like the whole file; a corrupted or a missing part must FAIL as unreadable, not pass
+        def split_mesh(fault=None):
+            def build(r):
+                folder = make_fixture(r, black_floor=-1)
+                parts = load_tool("mesh_parts.py")
+                whole = folder / "Fixture-mesh.bin"
+                manifest = parts.split(whole, folder, whole.stat().st_size // 3 + 1)
+                whole.unlink()
+                assert len(manifest["parts"]) == 3
+                if fault == "corrupt":
+                    p = folder / parts.part_name(whole.name, 1)
+                    b = bytearray(p.read_bytes())
+                    b[len(b) // 2] ^= 0xFF
+                    p.write_bytes(bytes(b))
+                elif fault == "missing":
+                    (folder / parts.part_name(whole.name, 2)).unlink()
+                elif fault in ("meta-sha", "meta-bytes"):
+                    # the parts join cleanly to the manifest's own sha; only the set meta names another mesh
+                    meta = json.loads((folder / "Fixture.map.json").read_text(encoding="utf-8"))
+                    if fault == "meta-sha":
+                        meta["mesh"]["sha256"] = "0" * 64
+                    else:
+                        meta["mesh"]["bytes"] += 1
+                    (folder / "Fixture.map.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
+            return build
+        one("i-mesh-parts", split_mesh(), "mesh-heights", PASS)
+        one("i-mesh-parts-corrupt", split_mesh("corrupt"), "mesh-heights", FAIL, reason="parts that do not join")
+        one("i-mesh-parts-missing", split_mesh("missing"), "mesh-heights", FAIL, reason="part02 is missing")
+        one("i-mesh-parts-meta-sha", split_mesh("meta-sha"), "mesh-heights", FAIL, reason="sha256 is not the 0000")
+        one("i-mesh-parts-meta-bytes", split_mesh("meta-bytes"), "mesh-heights", FAIL, reason="bytes the meta names")
 
         # (a) TileStore.CutOutTile mirrored: a 64 px alpha page, tile A (0,0 from the bottom) opaque, tile B with ONE clear
         #     texel, tile C on an opaque page; and the rect counted from the page's bottom (a clear texel in tile A's rows

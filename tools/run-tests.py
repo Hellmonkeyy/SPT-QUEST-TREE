@@ -15,11 +15,9 @@ parallel with the layers, one row each. Exit 0 only when no row is FAIL. Nothing
 import argparse
 import importlib.util
 import json
-import os
 import re
 import subprocess
 import sys
-import tempfile
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -82,32 +80,6 @@ def check_capture_in_process(ctx):
                  f"{len(errors)} problem(s)" + (f", {len(warnings)} warning(s)" if warnings else ""))
     rows = capture_rows(1 if errors else 0, "\n".join(lines), time.time() - started)
     return [Result(r.layer, r.name, r.status, r.detail.replace("exit ", "in-process, exit ", 1)) for r in rows]
-
-
-def sweep_stale_scratch():
-    """Earlier runner versions left %TEMP%\\qt-run-tests-*\\captures\\<map> directory JUNCTIONS into the install when a run
-    was interrupted. Removes them LINK-ONLY - os.rmdir on a junction removes the link, never its target - and then the
-    folders, only once they are empty. Never rmtree: anything that is not a junction is left alone."""
-    removed = 0
-    for scratch in Path(tempfile.gettempdir()).glob("qt-run-tests-*"):
-        try:
-            if os.path.isjunction(scratch) or os.path.islink(scratch) or not scratch.is_dir():
-                continue
-            captures = scratch / "captures"
-            if captures.is_dir() and not os.path.isjunction(captures):
-                for entry in os.listdir(captures):
-                    path = os.path.join(captures, entry)
-                    if os.path.isjunction(path):
-                        os.rmdir(path)
-                        removed += 1
-            for folder in (captures, scratch):
-                try:
-                    os.rmdir(folder)      # only succeeds on an empty folder
-                except OSError:
-                    pass
-        except OSError:
-            pass
-    return removed
 
 
 def existing_tools(ctx, self_test, quick=False):
@@ -311,9 +283,6 @@ def main(argv=None):
     rows = []
     pool = ThreadPoolExecutor(max_workers=6)
     futures = []
-    swept = sweep_stale_scratch()
-    if swept:
-        print(f"removed {swept} stale junction(s) an interrupted earlier run left under {tempfile.gettempdir()}", flush=True)
     if "tools" in wanted:
         for name, argv_, why in existing_tools(ctx, args.self_test, args.quick):
             if argv_ is None:

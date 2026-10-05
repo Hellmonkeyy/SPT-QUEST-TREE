@@ -9,8 +9,8 @@ read as floors. That alone draws a map - a dark backdrop over its own rectangle,
 picker working, every pin where it belongs - after one raid on it.
 
 **Ctrl+F9 in a raid takes the picture.** The game draws the map from straight above, one picture per
-floor band, into `BepInEx\plugins\QuestTree\captures\<key>\`, at up to 8192 px and never past four
-pixels to the metre - a quarter of a metre to the pixel on Customs, 4472x2156 across fifteen tiles -
+floor band, into `BepInEx\plugins\QuestTree\captures\<key>\`, at up to 16384 px (the default) and never
+past eight pixels to the metre - an eighth of a metre to the pixel on Customs -
 spread over frames as short hitches rather than one freeze. It is drawn to exactly the rectangle
 harvest measured, so a pin lands on the right building without anything agreeing twice. Pressing the
 key again from somewhere else adds to what is there rather than replacing it - the game streams
@@ -326,8 +326,8 @@ The checker compares pictures by pixels:
   missing. The render recipe's `reach` term now records whether the walkable mask was actually
   built rather than merely asked for, since a merge of a masked and an unmasked capture would
   leave a hard seam.
-- **Big Red is a building again.** The throwaway probe key below, run inside it, found that the warehouse's
-  own walls-and-roof mesh - the one with real materials that the player's camera draws - sits on the
+- **Big Red is a building again.** A throwaway diagnostic probe, run inside it during development, found that
+  the warehouse's own walls-and-roof mesh - the one with real materials that the player's camera draws - sits on the
   game layer named HighPolyCollider, and that name had put the layer on the capture's list of
   collider layers to leave out. What was left of the building was its two interior-volume shells
   drawn with a flat vertex-paint shader: the translucent teal slab three campaigns showed. The layer
@@ -484,21 +484,6 @@ The checker compares pictures by pixels:
   this is a WARN, not an error), check-capture.py's `--compare OLD_ROOT` says whether any building
   lost detail between two captures, and check-maps-pack.py warns at a mesh over 100 MB, which GitHub
   refuses in a push.
-- **A throwaway diagnostic ships unbound with this release**, which is worth saying out loud because
-  it is not a feature: the mesh probe of the 3D map experiments, which does nothing until it is bound
-  under F12 > **Advanced > Mesh probe key (throwaway)**. Once bound it writes
-  `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` in a raid - whether the game's own meshes
-  can be read back off the graphics card, and how much of the map its colliders cover from where you
-  stand - and `captures\menu.meshprobe.txt` in the menu, where it lists the loaded shaders, cameras
-  and layers and puts a small test view in the bottom-left corner until it is pressed again. Nothing
-  in the mod depends on it. What it does touch: it reads up to twenty scene meshes and asks the
-  graphics card for a copy of one, modifying none of them - the first version of it did modify a
-  mesh's buffer targets and put them back, and the restoring write killed the game natively
-  (`Mesh.set_vertexBufferTarget` into d3d11), so nothing in this mod writes those any more and the
-  readback test now has to complete once in the menu before a raid will run it; in the menu the test
-  view lives until the second press and swallows clicks inside its own 512 px square. It is meant to
-  be removed again. It ships unbound - bind it under F12 > **Advanced > Mesh probe key (throwaway)** -
-  and is deliberately kept out of the in-game Settings tab.
 ---
 
 # Quest Tracker 1.18.5

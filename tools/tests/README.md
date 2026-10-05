@@ -2,11 +2,11 @@
 
 ## Running them
 
-Run everything from the repo root with `python tools/run-tests.py`. It checks the real install, prints a table, and exits 0 only when no row is FAIL. A full run takes about 80 seconds (measured 2026-10-04). Most of that time goes to reading the large mesh files, decoding the floor pictures, and check-capture, which runs alongside and takes about 57 seconds.
+Run everything from the repo root with `python tools/run-tests.py`. It is tested on Python 3.12 and 3.14, with numpy and Pillow. It checks the real install, prints a table, and exits 0 only when no row is FAIL. A full run takes about 80 seconds (measured 2026-10-04). Most of that time goes to reading the large mesh files, decoding the floor pictures, and check-capture, which runs alongside and takes about 57 seconds.
 
 `--layer NAME` runs only that layer, and the flag can be repeated. The names are `sets`, `logs`, `install`, `unit` and `tools`.
 
-`--map KEY` restricts the run to one map, for example `--map Woods`, and can also be repeated. It narrows the set audits, and it also narrows check-capture: check-capture takes a captures root rather than a map, so the runner gives it a temporary folder of directory junctions to just those maps' folders. Only the links are removed afterwards.
+`--map KEY` restricts the run to one map, for example `--map Woods`, and can also be repeated. It narrows the set audits, and it also narrows check-capture: the runner imports check-capture and runs its `check_capture()` in-process on just the chosen maps' capture folders.
 
 `--quick` leaves out check-capture and every check that reads a mesh: black-faces, mesh-heights, and the atlas tiles of dxt-safety. Everything else still runs, in about 6 seconds.
 
@@ -18,7 +18,7 @@ The paths default to the usual install. You can override them with `--captures`,
 
 Nothing here writes under `C:\Games\SPT`. The fixtures are built in a temporary folder and deleted afterwards.
 
-You need Python 3 with numpy and Pillow. The `unit` layer and `check-relief-simplify` also need the .NET SDK.
+You need Python (tested on 3.12 and 3.14) with numpy and Pillow. The `unit` layer and `check-relief-simplify` also need the .NET SDK.
 
 ## What each layer covers
 

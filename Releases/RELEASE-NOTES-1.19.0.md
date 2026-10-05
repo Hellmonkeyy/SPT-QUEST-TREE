@@ -452,18 +452,6 @@ pages refuses a page post as a floor it has no record of, and the client goes on
 per-map budget is an eighth of the host's store, which is a quarter of its free disk at boot (1.5 to
 32 GB), and every page a meta names is reserved against it from the first floor.
 
-**A throwaway diagnostic ships in this build, with no key bound**, said out loud because it is not a
-feature: the mesh probe of the 3D experiments, which does nothing until you give it a key under F12 >
-**Advanced > Mesh probe key (throwaway)**. Once bound, in a raid it writes
-`BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` - whether the game's own meshes can be read
-back off the graphics card, and how much of the map its colliders cover from where you stand - and in
-the menu `captures\menu.meshprobe.txt`, listing the loaded shaders, cameras and layers, with a small
-test view in the bottom-left corner until the key is pressed again (it swallows clicks inside its own
-512 px square while it is up). Nothing in the mod depends on it. It reads up to twenty scene meshes
-and asks the graphics card for a copy of one, modifying none of them; the readback test has to
-complete once in the menu before a raid will run it. It is kept out of the in-game Settings tab and
-is meant to be removed again.
-
 ## Under the hood
 
 - **The zone file is schema v2.** Each map's record now carries the measured extent - its four
@@ -665,8 +653,8 @@ the rest.
   quickest test. If it looks right, the geometry is right.
 - The log line after a capture, in `BepInEx\LogOutput.log`: `QuestTree: captured bigmap "Ground"
   2048x988 px (0.55 m/px), 2 tiles, 475 ms, ...` - that is Customs at the 2048 resolution setting,
-  which is what the run above was taken at; the default 8192 setting makes it 4472x2156 px
-  (0.25 m/px) across fifteen tiles. A tail saying some of it was not drawn is an
+  which is what the run above was taken at; the default 16384 setting draws it at up to
+  eight pixels to the metre (0.125 m/px). A tail saying some of it was not drawn is an
   invitation to press the key again somewhere else - do, and watch the second line say how much was
   newly drawn.
 - **The water.** No blue slabs anywhere: not over a yard, not on the bridge deck, not across an
