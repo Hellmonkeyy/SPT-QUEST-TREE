@@ -2658,6 +2658,9 @@ namespace QuestTree.UI
             // Which heights are which floor's surfaces - the roof routing reads it while the floors build.
             MeasureFloorRanges();
 
+            // The slice slider's stops (S1: computed and logged; nothing draws by them yet).
+            MeasureSliceStops();
+
             // Now, and not at Attach: whether the sides take part depends on the shader just resolved.
             TakeSideRoom();
 
@@ -3239,7 +3242,7 @@ namespace QuestTree.UI
                 "QuestTree: 3D map for {0} - {1} band(s) {2:#,##0} cells -> {3:#,##0} triangles, " +
                 "{4:#,##0} buildings {5:#,##0} triangles ({11}), built in {6:#,##0} ms over {14} frame(s) " +
                 "(longest {15:#,##0} ms), meshes ~{16:#,##0} MB, textures resident ~{17:#,##0} MB, layer {7}, shader {8}, " +
-                "ground cutout: {9}{10}{12}{13}, path {18}.",
+                "ground cutout: {9}{10}{12}{13}, path {18}, {19}.",
                 _mapKey, _levels.Count, cells, groundTriangles, buildings, buildingTriangles,
                 _buildClock.ElapsedMilliseconds, _drawLayer,
                 _flatColours ? _shaderName + " (flat colours, no picture)" : _shaderName,
@@ -3263,9 +3266,13 @@ namespace QuestTree.UI
                 // chain, and every atlas tile cut so far (DXT1: half a byte a pixel plus a third). Tiles still
                 // waiting their paced cut are not in it yet; the TileStore logs its own total when it finishes.
                 (DynamicMapsLibrary.ResidentRasterBytes + TileStore.ResidentBytesAll) / (1024d * 1024d),
-                RenderingPathOf(_camera)));
+                RenderingPathOf(_camera),
+                SlicesText()));
 
             LogChunks();
+
+            // The slice stops, now that this build is known good (slice slider S1).
+            AnnounceSlices();
 
             // A floor switch whose entries were all cached: nothing was uploaded, and the cut is one matrix.
             if (_reusedFloors)
@@ -3560,27 +3567,29 @@ namespace QuestTree.UI
         /// then looks exactly as it did before the cut existed. No cut either when the floor's height band
         /// is unknown - a cut at a guessed height would slice a building somewhere meaningless.
         /// </summary>
-        private float CutHeight()
+        private float CutHeight() => HomeCut(_selectedLevel);
+
+        /// <summary>
+        /// The cut <see cref="CutHeight"/> makes when <paramref name="level"/> is the chosen floor - its slice stop's home
+        /// (<see cref="SliceStop.Home"/>). NaN when no band of the file lies above that level (the top floor: no cut), when
+        /// the level has no layer or no height band, and when the height is the catalog's "any height" placeholder. The
+        /// arithmetic is <see cref="HomeCutAt"/>, shared with the slice stops so the two cannot drift apart.
+        /// </summary>
+        private float HomeCut(int level)
         {
             if (_file?.Bands == null) return float.NaN;
 
             var anyAbove = false;
 
             foreach (var band in _file.Bands)
-                if (band != null && band.Level > _selectedLevel) anyAbove = true;
+                if (band != null && band.Level > level) anyAbove = true;
 
             if (!anyAbove) return float.NaN;
 
-            var layer = LayerOf(_selectedLevel);
+            var layer = LayerOf(level);
             if (layer == null || layer.GameBounds.Count == 0) return float.NaN;
 
-            var top = layer.GameBounds[0].Max.z;
-
-            // The catalog files a floor with no height band as claiming every height (+-2000 m); a cut
-            // there cuts nothing.
-            if (float.IsNaN(top) || float.IsInfinity(top) || top >= 1000f) return float.NaN;
-
-            return top + CutAboveFloor;
+            return HomeCutAt(layer.GameBounds[0].Max.z, true);
         }
 
         // --- the dollhouse cut: the camera's oblique near plane -----------------------------------------
@@ -5397,7 +5406,228 @@ namespace QuestTree.UI
             high = top ? maxY + CaptureTopCameraHeight : Mathf.Max(nextMinY - CaptureCeilingClearance, maxY + CaptureCeilingClearance);
             low = minY - CaptureFarClipSlack - (top ? CaptureTopDepthBelow : 0f);
         }
+
+        /// <summary>The next floor up from <paramref name="ranges"/>[<paramref name="index"/>]: the lowest declared minY
+        /// (Low + <see cref="FloorFaceSlack"/>) above its own among the known floor ranges, +infinity for the topmost. The ONE
+        /// copy of the rule - <see cref="Prep.MeasureWindows"/> and the slice stops' ceilings both ask it, so the camera
+        /// height a stop ends at is the camera height the roof routing assumed.</summary>
+        private static float NextMinY(IReadOnlyList<(int Level, float Low, float High)> ranges, int index)
+        {
+            var minY = ranges[index].Low + FloorFaceSlack;
+            var next = float.PositiveInfinity;
+
+            for (var j = 0; j < ranges.Count; j++)
+            {
+                var low = ranges[j].Low + FloorFaceSlack;
+                if (j != index && low > minY && low < next) next = low;
+            }
+
+            return next;
+        }
         // END TESTABLE FloorWindow
+
+        // BEGIN TESTABLE FloorWindow.Slice - tools/tests/unit/run_unit.py compiles this region (with the others of the name) on its own.
+        /// <summary>What a slice stop is: a continuous section [Home, Ceiling]; one height only (the top floor's "no cut",
+        /// a section under <see cref="MinSectionMetres"/>, a floor of unknown height); or a floor reached only by
+        /// rebuilding the view, as the floor picker does today.</summary>
+        internal enum SliceKind
+        {
+            Section,
+            Notch,
+            Rebuild
+        }
+
+        /// <summary>One floor of the slice slider (S1: computed and logged only). <see cref="Home"/> is the cut
+        /// <see cref="CutHeight"/> makes for that floor (NaN = no cut); <see cref="Ceiling"/> the height of the camera that
+        /// took the floor's picture (NaN when it has none to offer); <see cref="Known"/> whether the floor's height band is
+        /// a real one (both ends inside +-1000 m, the test <see cref="MeasureFloorRanges"/> makes).</summary>
+        internal struct SliceStop
+        {
+            public int Level;
+            public string Name;
+            public float Home;
+            public float Ceiling;
+            public SliceKind Kind;
+            public bool Known;
+        }
+
+        /// <summary>One layer of the entry as the slice stops need it. MinY/MaxY are NaN for a layer with no height band;
+        /// Usable is "its picture can be drawn" (artwork that did not fail, or the flat-colour shader).</summary>
+        internal struct SliceLayer
+        {
+            public int Level;
+            public string Name;
+            public float MinY;
+            public float MaxY;
+            public bool Usable;
+        }
+
+        /// <summary>A floor height band counts only when both ends are inside +-1000 m and it is not upside down: the test
+        /// <see cref="MeasureFloorRanges"/> makes. The catalog's placeholder is +-2000 m.</summary>
+        private static bool KnownHeights(float minY, float maxY) => minY > -1000f && maxY < 1000f && !(maxY < minY);
+
+        /// <summary>The cut over a floor whose height band tops out at <paramref name="top"/>: <see cref="CutAboveFloor"/>
+        /// above it, or NaN with nothing above that floor or with a top that is no real height (+-2000 m placeholder).</summary>
+        private static float HomeCutAt(float top, bool anyAbove)
+        {
+            if (!anyAbove) return float.NaN;
+
+            // The catalog files a floor with no height band as claiming every height (+-2000 m); a cut
+            // there cuts nothing.
+            if (float.IsNaN(top) || float.IsInfinity(top) || top >= 1000f) return float.NaN;
+
+            return top + CutAboveFloor;
+        }
+
+        /// <summary>
+        /// The band window: at most <paramref name="cap"/> consecutive band levels, lowest first, always holding the band
+        /// the selection draws as its top. First today's <see cref="DrawnLevels"/> set (the highest <paramref name="cap"/>
+        /// at or below <paramref name="selected"/>, or the lowest band when none is), then the bands above it while the
+        /// cap allows. S1 only computes it; <see cref="DrawnLevels"/> still decides what is built.
+        /// </summary>
+        private static List<int> BandWindow(IReadOnlyList<int> bandLevels, int selected, int cap)
+        {
+            var levels = new List<int>();
+
+            for (var i = 0; i < bandLevels.Count; i++)
+                if (!levels.Contains(bandLevels[i])) levels.Add(bandLevels[i]);
+
+            levels.Sort();
+
+            var window = new List<int>();
+            if (levels.Count == 0) return window;
+
+            if (cap < 1) cap = 1;
+
+            // the highest band at or below the selection; the lowest band when there is none (DrawnLevels' fallback)
+            var last = 0;
+            for (var i = 0; i < levels.Count; i++)
+                if (levels[i] <= selected) last = i;
+
+            var first = Mathf.Max(0, last - cap + 1);
+
+            while (last - first + 1 < cap && last + 1 < levels.Count) last++;
+
+            for (var i = first; i <= last; i++) window.Add(levels[i]);
+
+            return window;
+        }
+
+        /// <summary>
+        /// The slice stops, one per layer of the entry (what the floor picker lists), lowest level first.
+        /// <list type="bullet">
+        /// <item>Home: <see cref="HomeCutAt"/>, today's cut for that floor.</item>
+        /// <item>Ceiling: <see cref="CaptureWindow"/>'s high for the floor's range in <paramref name="floorRanges"/>, the next
+        /// floor up found by <see cref="NextMinY"/> exactly as <see cref="Prep.MeasureWindows"/> finds it; NaN for the top
+        /// floor, a floor with no known range, or one with no known floor above it.</item>
+        /// <item>Kind: Rebuild for a floor with no band in the file, outside the band window, or without a usable picture;
+        /// else Notch when it has no cut (the top floor, an unknown height), when any band in the window has no known
+        /// height (the discrete fallback), or when [Home, Ceiling] is shorter than <see cref="MinSectionMetres"/>; else
+        /// Section.</item>
+        /// </list>
+        /// A band with no layer is never a stop.
+        /// </summary>
+        private static List<SliceStop> MeasureSlices(IReadOnlyList<SliceLayer> layers, IReadOnlyList<int> bandLevels,
+            IReadOnlyList<(int Level, float Low, float High)> floorRanges, int selected, int cap)
+        {
+            var window = BandWindow(bandLevels, selected, cap);
+
+            var topBand = int.MinValue;
+            for (var i = 0; i < bandLevels.Count; i++)
+                if (bandLevels[i] > topBand) topBand = bandLevels[i];
+
+            // The discrete fallback: a band in the window whose height is not known (no layer, or a placeholder band)
+            // turns every continuous section off - the ceilings below it would be measured past a floor nobody knows.
+            var sectionsOff = false;
+
+            for (var w = 0; w < window.Count; w++)
+            {
+                var known = false;
+
+                for (var i = 0; i < layers.Count; i++)
+                    if (layers[i].Level == window[w])
+                    {
+                        known = KnownHeights(layers[i].MinY, layers[i].MaxY);
+                        break;
+                    }
+
+                if (!known) sectionsOff = true;
+            }
+
+            var stops = new List<SliceStop>();
+            var seen = new List<int>();
+
+            for (var i = 0; i < layers.Count; i++)
+            {
+                var layer = layers[i];
+
+                // the first layer of a level, as LayerOf finds it
+                if (seen.Contains(layer.Level)) continue;
+                seen.Add(layer.Level);
+
+                var anyAbove = topBand > layer.Level;
+                var home = HomeCutAt(layer.MaxY, anyAbove);
+
+                var ceiling = float.NaN;
+
+                if (anyAbove)
+                {
+                    for (var r = 0; r < floorRanges.Count; r++)
+                    {
+                        if (floorRanges[r].Level != layer.Level) continue;
+
+                        var next = NextMinY(floorRanges, r);
+
+                        if (!float.IsInfinity(next))
+                        {
+                            CaptureWindow(floorRanges[r].Low + FloorFaceSlack, floorRanges[r].High - FloorFaceSlack, next,
+                                out _, out var high);
+                            ceiling = high;
+                        }
+
+                        break;
+                    }
+                }
+
+                SliceKind kind;
+
+                if (!HasLevel(bandLevels, layer.Level) || !window.Contains(layer.Level) || !layer.Usable)
+                    kind = SliceKind.Rebuild;
+                else if (float.IsNaN(home) || sectionsOff)
+                    kind = SliceKind.Notch;
+                else if (ceiling - home >= MinSectionMetres)
+                    kind = SliceKind.Section;
+                else
+                    kind = SliceKind.Notch;
+
+                stops.Add(new SliceStop
+                {
+                    Level = layer.Level,
+                    Name = layer.Name ?? "",
+                    Home = home,
+                    Ceiling = ceiling,
+                    Kind = kind,
+                    Known = KnownHeights(layer.MinY, layer.MaxY)
+                });
+            }
+
+            stops.Sort((a, b) => a.Level.CompareTo(b.Level));
+
+            return stops;
+        }
+
+        private static bool HasLevel(IReadOnlyList<int> levels, int level)
+        {
+            for (var i = 0; i < levels.Count; i++)
+                if (levels[i] == level) return true;
+
+            return false;
+        }
+        // END TESTABLE FloorWindow.Slice
+
+        /// <summary>The shortest stretch [home, ceiling] the slice slider drags through, in metres; a floor with less is a
+        /// notch only (one height, its home). 4 of the 7 known sections are 0.7 m or under.</summary>
+        private const float MinSectionMetres = 1f;
 
         /// <summary>MapCapture.TopBandCameraHeight.</summary>
         private const float CaptureTopCameraHeight = 300f;
@@ -5432,6 +5662,111 @@ namespace QuestTree.UI
 
                 _floorRanges.Add((band.Level, low - FloorFaceSlack, high + FloorFaceSlack));
             }
+        }
+
+        /// <summary>The slice slider's stops, lowest level first (see <see cref="MeasureSlices"/>); null until the first
+        /// build has measured them. Main thread only.</summary>
+        internal IReadOnlyList<SliceStop> Slices => _slices;
+
+        private List<SliceStop> _slices;
+
+        /// <summary>Raised on the main thread at the end of the first SUCCESSFUL build (<see cref="Finish"/>), once
+        /// <see cref="Slices"/> is known - never by a build that then falls back to the flat map - and again after a
+        /// rebuild only when the stop count or any stop's kind changed. Nothing subscribes yet (slice slider S1).</summary>
+        internal event Action SlicesReady;
+
+        /// <summary>The stops as last announced by <see cref="SlicesReady"/>; null before the first announcement.</summary>
+        private List<SliceStop> _announcedSlices;
+
+        /// <summary>Fills <see cref="_slices"/> from the entry's layers and the file's bands. Call after
+        /// <see cref="MeasureFloorRanges"/>, whose ranges give the ceilings, and after the shader is resolved
+        /// (<see cref="_flatColours"/> makes any floor's picture usable).</summary>
+        private void MeasureSliceStops()
+        {
+            var layers = new List<SliceLayer>();
+
+            if (_entry != null)
+            {
+                foreach (var layer in _entry.Layers)
+                {
+                    if (layer == null) continue;
+
+                    var has = layer.GameBounds.Count > 0;
+
+                    layers.Add(new SliceLayer
+                    {
+                        Level = layer.Level,
+                        Name = layer.Name,
+                        MinY = has ? layer.GameBounds[0].Min.z : float.NaN,
+                        MaxY = has ? layer.GameBounds[0].Max.z : float.NaN,
+                        Usable = _flatColours || (layer.HasArtwork && !layer.ArtworkFailed)
+                    });
+                }
+            }
+
+            var bandLevels = new List<int>();
+
+            foreach (var band in _file.Bands)
+                if (band != null) bandLevels.Add(band.Level);
+
+            // the cap DrawnLevels keeps to
+            var cap = Mathf.Max(1, DynamicMapsLibrary.MaxResidentSprites - 1);
+
+            // Usable is the picture state at THIS build only: a picture can still fail to decode after it. The later
+            // steps' slider must grey a stop out by the live state (HasArtwork, ArtworkFailed, the material's texture),
+            // not by Kind alone.
+            _slices = MeasureSlices(layers, bandLevels, _floorRanges, _selectedLevel, cap);
+        }
+
+        /// <summary>From <see cref="Finish"/>, the build known good: raises <see cref="SlicesReady"/> the first time, and
+        /// after a rebuild when the stop count or any stop's kind differs from what was last announced.</summary>
+        private void AnnounceSlices()
+        {
+            if (_slices == null) return;
+            if (_announcedSlices != null && !SlicesDiffer(_announcedSlices, _slices)) return;
+
+            _announcedSlices = new List<SliceStop>(_slices);
+
+            try
+            {
+                SlicesReady?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: a 3D map slice listener failed: {ex.Message}");
+            }
+        }
+
+        private static bool SlicesDiffer(List<SliceStop> before, List<SliceStop> after)
+        {
+            if (before.Count != after.Count) return true;
+
+            for (var i = 0; i < before.Count; i++)
+                if (before[i].Level != after[i].Level || before[i].Kind != after[i].Kind) return true;
+
+            return false;
+        }
+
+        /// <summary>The stops for the build line, e.g. "slices: -1 19.8, 0 24.8-26.0, 1 28.8-35.0, 2 off": a section is
+        /// home-ceiling, a notch its home ("off" = no cut), a rebuild notch its home with "r" after it.</summary>
+        private string SlicesText()
+        {
+            if (_slices == null || _slices.Count == 0) return "slices: none";
+
+            var parts = new List<string>(_slices.Count);
+
+            foreach (var stop in _slices)
+            {
+                var home = float.IsNaN(stop.Home) ? "off" : stop.Home.ToString("0.0", CultureInfo.InvariantCulture);
+
+                parts.Add(string.Format(CultureInfo.InvariantCulture, "{0} {1}{2}{3}", stop.Level, home,
+                    stop.Kind == SliceKind.Section
+                        ? "-" + stop.Ceiling.ToString("0.0", CultureInfo.InvariantCulture)
+                        : "",
+                    stop.Kind == SliceKind.Rebuild ? " r" : ""));
+            }
+
+            return "slices: " + string.Join(", ", parts);
         }
 
         /// <summary>This view's floor with the given level, or null. At most six floors, so a loop.</summary>
@@ -7157,13 +7492,7 @@ namespace QuestTree.UI
                 for (var i = 0; i < count; i++)
                 {
                     var minY = FloorRanges[i].Low + FloorFaceSlack;
-                    var nextMinY = float.PositiveInfinity;
-
-                    for (var j = 0; j < count; j++)
-                    {
-                        var low = FloorRanges[j].Low + FloorFaceSlack;
-                        if (j != i && low > minY && low < nextMinY) nextMinY = low;
-                    }
+                    var nextMinY = NextMinY(FloorRanges, i);
 
                     CaptureWindow(minY, FloorRanges[i].High - FloorFaceSlack, nextMinY, out _windowLow[i], out _windowHigh[i]);
 
