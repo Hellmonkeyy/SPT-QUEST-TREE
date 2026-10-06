@@ -590,6 +590,17 @@ namespace QuestTree.UI
         /// than by index so it carries across maps that have the same floor.</summary>
         private static int? _selectedLevel;
 
+        /// <summary>Per map (location key), the floor CHOSEN for it this session - by the picker, [ and ], a quest's pin,
+        /// or the 3D view's opening floor (<see cref="ChooseOpeningFloor"/>). A map with none opens in 3D on its remembered
+        /// or top floor; a map with one opens in 3D on it again.</summary>
+        private static readonly Dictionary<string, int> _floorsChosen = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>Records <see cref="_selectedLevel"/> as the current map's chosen floor.</summary>
+        private static void NoteFloorChosen()
+        {
+            if (_selectedLocationKey != null && _selectedLevel.HasValue) _floorsChosen[_selectedLocationKey] = _selectedLevel.Value;
+        }
+
         private static bool _pickerOpen;
         private static bool _floorPickerOpen;
 
@@ -746,6 +757,7 @@ namespace QuestTree.UI
             _savedPan = Vector2.zero;
             _selectedLocationKey = null;
             _selectedLevel = null;
+            _floorsChosen.Clear();
             _pickerOpen = false;
             _floorPickerOpen = false;
             _selectedQuestId = null;
@@ -772,6 +784,43 @@ namespace QuestTree.UI
             _viewStateKey = null;
             _saved3D = null;
             _pendingFocusQuestId = null;
+
+            // The floor stays: F refits the camera and drops the session's slice (in _saved3D), as before S4. Neither
+            // the map's chosen floor nor its remembered one (SliceMemory) is touched - a new commit replaces that.
+        }
+
+        /// <summary>
+        /// Slice slider S4: the floor a captured map's 3D view OPENS on when no floor was chosen for that map this session -
+        /// the one remembered on disk for it (SliceMemory) when the map's floors still sign the same, else the TOP floor
+        /// (the "no cut" stop, the owner's default). It is made the selected floor, so the picker, [ and ], the 2D toggle and
+        /// the view all agree on it; the 2D map's own default (level 0) is untouched, since only a 3D build chooses here.
+        /// A quest's pin (SelectFloorFor) and every explicit choice mark the map chosen first, so they win.
+        /// </summary>
+        private static void ChooseOpeningFloor(DynamicMapsLibrary.MapEntry entry)
+        {
+            var key = _selectedLocationKey;
+            if (entry == null || key == null || entry.Layers.Count < 2) return;
+            if (!ReliefMode || MeshFor(entry) == null) return;
+
+            // chosen this session: that floor again (the selected level is shared by every map, so another map's choice
+            // may be in it now)
+            if (_floorsChosen.TryGetValue(key, out var chosen))
+            {
+                if (entry.Layers.Any(l => l.Level == chosen)) _selectedLevel = chosen;
+                return;
+            }
+
+            // Only a floor whose picture can be drawn - the 3D view needs the selected floor's raster picture; a floor
+            // with no artwork, or one whose picture failed, would open flat on a blank floor.
+            var level = SliceMemory.OpeningLevel(SliceMemory.FloorsOf(entry), SliceMemory.Recall(key), floor =>
+            {
+                var layer = entry.Layers.FirstOrDefault(l => l != null && l.Level == floor);
+                return layer != null && layer.IsRaster && layer.HasArtwork && !layer.ArtworkFailed;
+            });
+            if (!level.HasValue) return;
+
+            _selectedLevel = level.Value;
+            NoteFloorChosen();
         }
 
         /// <summary>Moves one floor up (+1) or down (-1) from the one showing. False at either end
@@ -790,6 +839,7 @@ namespace QuestTree.UI
             if (next < 0 || next >= floors.Count) return false;
 
             _selectedLevel = floors[next].Level;
+            NoteFloorChosen();
             _pickerOpen = false;
             _floorPickerOpen = false;
             return true;
@@ -874,6 +924,10 @@ namespace QuestTree.UI
                 _selectedLocationKey,
                 MarkerSetForKey(_selectedLocationKey),
                 DisplayNameFor(_selectedLocationKey, selected));
+
+            // S4: a 3D map with no floor chosen this session opens on its remembered or top floor
+            ChooseOpeningFloor(entry);
+
             var layer = ResolveLayer(entry);
 
             // The map and list are built first and the dropdowns last, even though the dropdowns sit
@@ -987,6 +1041,7 @@ namespace QuestTree.UI
                     onSelect: chosen =>
                     {
                         _selectedLevel = entry.Layers[chosen].Level;
+                        NoteFloorChosen();
                         _floorPickerOpen = false;
                         onRepaint();
                     },
@@ -1898,7 +1953,10 @@ namespace QuestTree.UI
             if (marker == null) return;
 
             var owner = OwnerFor(marker, entry);
-            if (owner != null) _selectedLevel = owner.Level;
+            if (owner == null) return;
+
+            _selectedLevel = owner.Level;
+            NoteFloorChosen();
         }
 
         /// <summary>

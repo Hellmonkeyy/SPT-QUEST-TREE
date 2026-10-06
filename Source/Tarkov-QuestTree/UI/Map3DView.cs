@@ -1398,6 +1398,16 @@ namespace QuestTree.UI
             public float Pitch;
             public float Distance;
             public Vector2 Focus;
+
+            /// <summary>A slice was set (SetSlice): <see cref="SliceLevel"/> and <see cref="SliceY"/> mean something. A
+            /// default ViewState has level 0, every capture's default floor, so this is what marks "no slice".</summary>
+            public bool HasSlice;
+
+            /// <summary>The slice's floor.</summary>
+            public int SliceLevel;
+
+            /// <summary>The slice's height on that floor, metres; NaN for its home (phase 1a: always the home).</summary>
+            public float SliceY;
         }
 
         private float _yaw;
@@ -1411,8 +1421,15 @@ namespace QuestTree.UI
             Yaw = _yaw,
             Pitch = _pitch,
             Distance = _distance,
-            Focus = _focus
+            Focus = _focus,
+            HasSlice = _sliceSet,
+            SliceLevel = _sliceLevel,
+            SliceY = float.NaN
         };
+
+        /// <summary>The slice a restored ViewState carried (S4), applied by <see cref="BeginBuild"/> when it is on the
+        /// level this view was attached for; null when none.</summary>
+        private int? _pendingSlice;
 
         // --- what it was given --------------------------------------------------------------------
 
@@ -2020,6 +2037,9 @@ namespace QuestTree.UI
                 _pitch = Mathf.Clamp(restore.Value.Pitch, MinPitch, MaxPitch);
                 _distance = restore.Value.Distance;
                 _focus = restore.Value.Focus;
+
+                // S4: the slice comes back through the S3 path (BeginBuild), on its floor only
+                if (restore.Value.HasSlice) _pendingSlice = restore.Value.SliceLevel;
             }
             else
             {
@@ -2662,6 +2682,19 @@ namespace QuestTree.UI
 
             // The slice slider's stops (S1: computed and logged).
             MeasureSliceStops();
+
+            // S4: a slice restored with the view's state is taken up when it is on the floor this view was attached for
+            // (its home in phase 1a); on another floor the view opens on its own floor's home.
+            if (_pendingSlice.HasValue)
+            {
+                if (_pendingSlice.Value == _selectedLevel)
+                {
+                    _sliceSet = true;
+                    _sliceLevel = _pendingSlice.Value;
+                }
+
+                _pendingSlice = null;
+            }
 
             // S3: a slice set on this view (SetSlice) survives a rebuild of it (RebuildWithoutFailedSides) while its level
             // is still a stop this window can show; otherwise the view goes back to the selected level's home.
@@ -3983,6 +4016,9 @@ namespace QuestTree.UI
                 CultureInfo.InvariantCulture,
                 "QuestTree: 3D map slice for {0} to level {1} - no rebuild, cut {2}.",
                 _mapKey, level, CutText()));
+
+            // S4: a committed slice is remembered for this map across sessions (the slider's commit, S6, lands here too)
+            if (!dragging) SliceMemory.Remember(_mapKey, level, float.NaN, SliceMemory.SignatureOf(_entry));
 
             Moved();
             return true;
